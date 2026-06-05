@@ -18,15 +18,16 @@ import {
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
+  WORKER_SKIP_ONECLI,
 } from './config.js';
-import { materializeContainerJson } from './container-config.js';
+import { materializeContainerJson, type ContainerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { initGroupFilesystem } from './group-init.js';
+import { initGroupFilesystem, ensureClaudeSharedFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -63,6 +64,60 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** Worker-provided paths and config — bypasses central DB and groups/ lookups. */
+export interface WorkerSpawnContext {
+  agentGroup: AgentGroup;
+  groupDir: string;
+  claudeSharedDir: string;
+  containerConfig: ContainerConfig;
+}
+
+export interface BuildMountOptions {
+  groupDir?: string;
+  claudeSharedDir?: string;
+  /** Skip initGroupFilesystem / composeGroupClaudeMd — workspace already materialized. */
+  materialized?: boolean;
+}
+
+const containerStopWaiters = new Map<string, Array<() => void>>();
+
+function notifyContainerStopped(sessionId: string): void {
+  const waiters = containerStopWaiters.get(sessionId);
+  if (waiters) {
+    for (const resolve of waiters) resolve();
+    containerStopWaiters.delete(sessionId);
+  }
+}
+
+/** Wait until the container for a session exits, or until timeoutMs elapses. */
+export function waitForContainerStop(sessionId: string, timeoutMs: number): Promise<boolean> {
+  if (!activeContainers.has(sessionId)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      removeWaiter(sessionId, onStop);
+      resolve(false);
+    }, timeoutMs);
+    const onStop = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    let waiters = containerStopWaiters.get(sessionId);
+    if (!waiters) {
+      waiters = [];
+      containerStopWaiters.set(sessionId, waiters);
+    }
+    waiters.push(onStop);
+  });
+}
+
+function removeWaiter(sessionId: string, fn: () => void): void {
+  const waiters = containerStopWaiters.get(sessionId);
+  if (!waiters) return;
+  const idx = waiters.indexOf(fn);
+  if (idx >= 0) waiters.splice(idx, 1);
+  if (waiters.length === 0) containerStopWaiters.delete(sessionId);
+}
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
@@ -83,7 +138,7 @@ export function isContainerRunning(sessionId: string): boolean {
  * its next tick. Callers that care (e.g. the router's typing indicator)
  * can branch on the boolean.
  */
-export function wakeContainer(session: Session): Promise<boolean> {
+export function wakeContainer(session: Session, spawnContext?: WorkerSpawnContext): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
     return Promise.resolve(true);
@@ -93,7 +148,7 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
-  const promise = spawnContainer(session)
+  const promise = spawnContainer(session, spawnContext)
     .then(() => true)
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
@@ -106,36 +161,37 @@ export function wakeContainer(session: Session): Promise<boolean> {
   return promise;
 }
 
-async function spawnContainer(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContext): Promise<void> {
+  const agentGroup = spawnContext?.agentGroup ?? getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
   }
 
-  // Refresh the destination map and default reply routing so any admin
-  // changes take effect on wake. Destinations come from the agent-to-agent
-  // module — skip when the module isn't installed (table absent).
-  if (hasTable(getDb(), 'agent_destinations')) {
-    const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
-    writeDestinations(agentGroup.id, session.id);
+  if (!spawnContext) {
+    if (hasTable(getDb(), 'agent_destinations')) {
+      const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+      writeDestinations(agentGroup.id, session.id);
+    }
+    writeSessionRouting(agentGroup.id, session.id);
   }
-  writeSessionRouting(agentGroup.id, session.id);
 
-  // Materialize container.json from DB — writes fresh file and returns
-  // the config object, threaded through provider resolution, buildMounts,
-  // and buildContainerArgs so we don't re-read.
-  const containerConfig = materializeContainerJson(agentGroup.id);
+  const containerConfig =
+    spawnContext?.containerConfig ??
+    materializeContainerJson(agentGroup.id);
 
-  // Resolve the effective provider + any host-side contribution it declares
-  // (extra mounts, env passthrough). Computed once and threaded through both
-  // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+  const mountOptions: BuildMountOptions | undefined = spawnContext
+    ? {
+        groupDir: spawnContext.groupDir,
+        claudeSharedDir: spawnContext.claudeSharedDir,
+        materialized: true,
+      }
+    : undefined;
+
+  const mounts = buildMounts(agentGroup, session, containerConfig, contribution, mountOptions);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
   const args = await buildContainerArgs(
     mounts,
@@ -145,6 +201,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    Boolean(spawnContext),
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -179,6 +236,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    notifyContainerStopped(session.id);
     log.info('Container exited', { sessionId: session.id, code, containerName });
   });
 
@@ -186,6 +244,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    notifyContainerStopped(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
 }
@@ -243,27 +302,26 @@ function resolveProviderContribution(
 function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
-  containerConfig: import('./container-config.js').ContainerConfig,
+  containerConfig: ContainerConfig,
   providerContribution: ProviderContainerContribution,
+  mountOptions?: BuildMountOptions,
 ): VolumeMount[] {
   const projectRoot = process.cwd();
+  const materialized = mountOptions?.materialized === true;
+  const groupDir = mountOptions?.groupDir ?? path.resolve(GROUPS_DIR, agentGroup.folder);
+  const claudeDir =
+    mountOptions?.claudeSharedDir ?? path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
 
-  // Per-group filesystem state lives forever after first creation. Init is
-  // idempotent: it only writes paths that don't already exist, so this call
-  // is a no-op for groups that have spawned before.
-  initGroupFilesystem(agentGroup);
-
-  // Sync skill symlinks based on container.json selection before mounting.
-  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
-
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  composeGroupClaudeMd(agentGroup);
+  if (!materialized) {
+    initGroupFilesystem(agentGroup);
+    syncSkillSymlinks(claudeDir, containerConfig);
+    composeGroupClaudeMd(agentGroup);
+  } else {
+    ensureClaudeSharedFilesystem(claudeDir);
+  }
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
@@ -345,6 +403,7 @@ async function buildContainerArgs(
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  workerSpawn?: boolean,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -364,14 +423,18 @@ async function buildContainerArgs(
   // a transient hard failure: if we can't wire the gateway, we don't spawn.
   // The caller (router or host-sweep) catches the throw, leaves the inbound
   // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
+  if (agentIdentifier && !(workerSpawn && WORKER_SKIP_ONECLI)) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+  if (!(workerSpawn && WORKER_SKIP_ONECLI)) {
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
+  } else {
+    log.warn('OneCLI skipped for worker spawn (WORKER_SKIP_ONECLI=true)');
   }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());

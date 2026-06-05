@@ -32,10 +32,27 @@ export interface WorkerJobRequest {
   options?: {
     timeout_ms?: number;
     trigger?: 0 | 1;
+    /** When false, prepare session only (no container spawn). Default true. */
+    run_container?: boolean;
   };
 }
 
-export type WorkerJobStatus = 'prepared' | 'failed';
+export type WorkerJobStatus = 'prepared' | 'completed' | 'failed' | 'timeout';
+
+export interface WorkerCollectedOutbound {
+  id: string;
+  kind: string;
+  channel_type: string | null;
+  platform_id: string | null;
+  thread_id: string | null;
+  content: Record<string, unknown>;
+  files?: Array<{ filename: string; data_base64: string }>;
+}
+
+export interface WorkerMemoryPatch {
+  instructions?: string;
+  files?: Array<{ path: string; content: string; deleted?: boolean }>;
+}
 
 export interface WorkerJobResponse {
   job_id: string;
@@ -54,6 +71,8 @@ export interface WorkerJobResponse {
     outbound_db: string;
   };
   inbound_message_id: string;
+  outbound?: WorkerCollectedOutbound[];
+  memory_patch?: WorkerMemoryPatch;
   detail?: string;
   error?: string;
 }

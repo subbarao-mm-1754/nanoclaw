@@ -8,6 +8,7 @@ import {
   type ContainerConfig,
 } from '../container-config.js';
 import { syncSkillSymlinks } from '../skill-symlinks.js';
+import { ensureClaudeSharedFilesystem } from '../group-init.js';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import type { WorkerJobRequest } from './types.js';
@@ -48,6 +49,8 @@ export function materializeWorkspace(job: WorkerJobRequest): MaterializeWorkspac
   if (job.agent_snapshot.files?.length) {
     writeAgentFiles(groupDir, job.agent_snapshot.files);
   }
+
+  ensureClaudeSharedFilesystem(claudeSharedDir);
 
   const agentGroup = {
     id: job.session.agent_group_id,

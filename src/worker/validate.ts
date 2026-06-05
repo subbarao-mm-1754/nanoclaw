@@ -94,6 +94,12 @@ export function parseWorkerJobRequest(body: unknown): WorkerJobRequest {
       }
       options.trigger = opts.trigger;
     }
+    if (opts.run_container !== undefined) {
+      if (typeof opts.run_container !== 'boolean') {
+        throw new WorkerValidationError('body.options.run_container must be a boolean');
+      }
+      options.run_container = opts.run_container;
+    }
   }
 
   return {

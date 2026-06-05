@@ -103,6 +103,25 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   }
 }
 
+/** Initialize `.claude-shared` state at an arbitrary path (worker temp workspace). */
+export function ensureClaudeSharedFilesystem(claudeDir: string): void {
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true });
+  }
+
+  const settingsFile = path.join(claudeDir, 'settings.json');
+  if (!fs.existsSync(settingsFile)) {
+    fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
+  } else {
+    ensurePreCompactHook(settingsFile, []);
+  }
+
+  const skillsDst = path.join(claudeDir, 'skills');
+  if (!fs.existsSync(skillsDst)) {
+    fs.mkdirSync(skillsDst, { recursive: true });
+  }
+}
+
 const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
 
 /**

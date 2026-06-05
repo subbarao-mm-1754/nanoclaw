@@ -81,7 +81,7 @@ async function handleProcessMessage(req: http.IncomingMessage, res: http.ServerR
   }
 
   try {
-    const result: WorkerJobResponse = runWorkerJob(job);
+    const result: WorkerJobResponse = await runWorkerJob(job);
     jsonResponse(res, 200, result);
   } catch (err) {
     log.error('Worker job failed', { jobId: job.job_id, err });

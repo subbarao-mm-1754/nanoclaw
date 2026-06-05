@@ -5,6 +5,9 @@
  * Usage:
  *   pnpm worker:dev          # terminal 1
  *   pnpm exec tsx scripts/test-worker-job.ts   # terminal 2
+ *
+ * Set WORKER_SKIP_ONECLI=true for local runs without OneCLI (agent API calls may fail).
+ * Set options.run_container=false to test session prep only.
  */
 const WORKER_URL = process.env.WORKER_URL || 'http://127.0.0.1:8080';
 const AUTH = process.env.WORKER_AUTH_TOKEN;

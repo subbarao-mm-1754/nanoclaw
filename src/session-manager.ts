@@ -567,15 +567,18 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
 
 /** Mark a container as running for a session. */
 export function markContainerRunning(sessionId: string): void {
+  if (!isDbInitialized()) return;
   updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
 }
 
 /** Mark a container as idle for a session. */
 export function markContainerIdle(sessionId: string): void {
+  if (!isDbInitialized()) return;
   updateSession(sessionId, { container_status: 'idle' });
 }
 
 /** Mark a container as stopped for a session. */
 export function markContainerStopped(sessionId: string): void {
+  if (!isDbInitialized()) return;
   updateSession(sessionId, { container_status: 'stopped' });
 }

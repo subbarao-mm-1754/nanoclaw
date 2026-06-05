@@ -72,3 +72,7 @@ export const WORKER_HOST = process.env.WORKER_HOST || '127.0.0.1';
 export const WORKER_PORT = parseInt(process.env.WORKER_PORT || '8080', 10);
 export const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || '';
 export const WORKER_MAX_BODY_BYTES = parseInt(process.env.WORKER_MAX_BODY_BYTES || '1048576', 10); // 1MB
+export const WORKER_JOB_TIMEOUT_MS = parseInt(process.env.WORKER_JOB_TIMEOUT_MS || '120000', 10);
+export const WORKER_CLEANUP_WORKSPACE = process.env.WORKER_CLEANUP_WORKSPACE === 'true';
+/** Skip OneCLI wiring when spawning worker containers (local dev only). */
+export const WORKER_SKIP_ONECLI = process.env.WORKER_SKIP_ONECLI === 'true';
