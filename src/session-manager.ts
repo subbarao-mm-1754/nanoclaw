@@ -19,6 +19,7 @@ import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
+import { isDbInitialized } from './db/connection.js';
 import {
   createSession,
   findSessionByAgentGroup,
@@ -132,6 +133,14 @@ export function resolveSession(
   return { session, created: true };
 }
 
+/**
+ * Ensure a session workspace exists (inbound.db + outbound.db). Used by the
+ * worker when the gateway supplies session ids — no central DB session row.
+ */
+export function ensureSessionWorkspace(agentGroupId: string, sessionId: string): void {
+  initSessionFolder(agentGroupId, sessionId);
+}
+
 /** Create the session folder and initialize both DBs. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
@@ -181,6 +190,33 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
     db.close();
   }
   log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+}
+
+/** Write default reply routing from an explicit delivery address (worker / gateway path). */
+export function writeSessionRoutingFromJob(
+  agentGroupId: string,
+  sessionId: string,
+  delivery: { channel_type: string; platform_id: string; thread_id: string | null },
+): void {
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return;
+
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    upsertSessionRouting(db, {
+      channel_type: delivery.channel_type,
+      platform_id: delivery.platform_id,
+      thread_id: delivery.thread_id,
+    });
+  } finally {
+    db.close();
+  }
+  log.debug('Session routing written from job', {
+    sessionId,
+    channelType: delivery.channel_type,
+    platformId: delivery.platform_id,
+    threadId: delivery.thread_id,
+  });
 }
 
 /**
@@ -246,7 +282,9 @@ export function writeSessionMessage(
     db.close();
   }
 
-  updateSession(sessionId, { last_active: new Date().toISOString() });
+  if (isDbInitialized()) {
+    updateSession(sessionId, { last_active: new Date().toISOString() });
+  }
 }
 
 /**

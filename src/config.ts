@@ -66,3 +66,9 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// NanoClaw worker HTTP API (separate from the monolithic host).
+export const WORKER_HOST = process.env.WORKER_HOST || '127.0.0.1';
+export const WORKER_PORT = parseInt(process.env.WORKER_PORT || '8080', 10);
+export const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || '';
+export const WORKER_MAX_BODY_BYTES = parseInt(process.env.WORKER_MAX_BODY_BYTES || '1048576', 10); // 1MB

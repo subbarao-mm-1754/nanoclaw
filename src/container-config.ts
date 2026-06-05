@@ -66,6 +66,41 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
   };
 }
 
+/** Build a `ContainerConfig` from a worker/gateway snapshot + agent group identity. */
+export function containerConfigFromSnapshot(
+  snapshot: ContainerConfigSnapshot,
+  group: { id: string; name: string },
+): ContainerConfig {
+  return {
+    mcpServers: snapshot.mcpServers ?? {},
+    packages: snapshot.packages ?? { apt: [], npm: [] },
+    additionalMounts: snapshot.additionalMounts ?? [],
+    skills: snapshot.skills ?? 'all',
+    provider: snapshot.provider,
+    model: snapshot.model,
+    effort: snapshot.effort,
+    imageTag: snapshot.imageTag,
+    assistantName: snapshot.assistantName ?? group.name,
+    maxMessagesPerPrompt: snapshot.maxMessagesPerPrompt,
+    groupName: group.name,
+    agentGroupId: group.id,
+  };
+}
+
+/** JSON shape accepted in worker job payloads for container config. */
+export interface ContainerConfigSnapshot {
+  provider?: string;
+  model?: string;
+  effort?: string;
+  imageTag?: string;
+  assistantName?: string;
+  maxMessagesPerPrompt?: number;
+  skills?: string[] | 'all';
+  mcpServers?: Record<string, McpServerConfig>;
+  packages?: { apt: string[]; npm: string[] };
+  additionalMounts?: AdditionalMountConfig[];
+}
+
 /**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
@@ -85,5 +120,13 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
 
+  return config;
+}
+
+/** Write `container.json` to an arbitrary directory (worker temp workspace). */
+export function materializeContainerJsonToDir(groupDir: string, config: ContainerConfig): ContainerConfig {
+  const p = path.join(groupDir, 'container.json');
+  if (!fs.existsSync(groupDir)) fs.mkdirSync(groupDir, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
   return config;
 }

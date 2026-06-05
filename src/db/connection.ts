@@ -11,6 +11,11 @@ export function getDb(): Database.Database {
   return _db;
 }
 
+/** True when the central DB has been opened (host mode). Worker mode leaves this false. */
+export function isDbInitialized(): boolean {
+  return _db !== null;
+}
+
 export function initDb(dbPath: string): Database.Database {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   _db = new Database(dbPath);

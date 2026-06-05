@@ -41,7 +41,23 @@ const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.loc
  * an empty `CLAUDE.local.md` if missing.
  */
 export function composeGroupClaudeMd(group: AgentGroup): void {
-  const groupDir = path.resolve(GROUPS_DIR, group.folder);
+  const configRow = getContainerConfig(group.id);
+  composeGroupClaudeMdAt({
+    groupDir: path.resolve(GROUPS_DIR, group.folder),
+    mcpServers: configRow ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>) : {},
+    cliScope: configRow?.cli_scope ?? 'group',
+  });
+}
+
+export interface ComposeClaudeMdOptions {
+  groupDir: string;
+  mcpServers?: Record<string, McpServerConfig>;
+  cliScope?: string;
+}
+
+/** Compose CLAUDE.md under an arbitrary group directory (worker temp workspace). */
+export function composeGroupClaudeMdAt(options: ComposeClaudeMdOptions): void {
+  const { groupDir, mcpServers = {}, cliScope = 'group' } = options;
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
   }
@@ -54,15 +70,10 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     fs.mkdirSync(fragmentsDir, { recursive: true });
   }
 
-  // Desired fragment set.
-  const configRow = getContainerConfig(group.id);
-  const mcpServers: Record<string, McpServerConfig> = configRow
-    ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
-    : {};
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
   // Skill fragments — every skill that ships an `instructions.md`.
-  // TODO (shared-source refactor): respect `container.json` skill selection.
+  // TODO (shared-source refactor): respect container.json skill selection.
   const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
@@ -76,11 +87,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Built-in module fragments — every MCP tool source file that ships a
-  // sibling `<name>.instructions.md`. These describe how the agent should
-  // use that module's MCP tools (schedule_task, install_packages, etc.).
-  // Skip cli.instructions.md when cli_scope is disabled.
-  const cliDisabled = configRow?.cli_scope === 'disabled';
+  const cliDisabled = cliScope === 'disabled';
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
@@ -95,8 +102,6 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // MCP server fragments — inline instructions from container.json for
-  // user-added external MCP servers.
   for (const [name, mcp] of Object.entries(mcpServers)) {
     if (mcp.instructions) {
       desired.set(`mcp-${name}.md`, {
@@ -106,7 +111,6 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
       fs.unlinkSync(path.join(fragmentsDir, existing));
@@ -121,7 +125,6 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Composed entry — imports only.
   const imports = ['@./.claude-shared.md'];
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
