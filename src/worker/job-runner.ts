@@ -8,6 +8,7 @@ import {
   outboundDbPath,
   writeSessionMessage,
   writeSessionRoutingFromJob,
+  writeDestinationsFromJob,
 } from '../session-manager.js';
 import { log } from '../log.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
@@ -76,6 +77,10 @@ export async function runWorkerJob(job: WorkerJobRequest): Promise<WorkerJobResp
 
   ensureSessionWorkspace(agentGroupId, sessionId);
   writeSessionRoutingFromJob(agentGroupId, sessionId, job.delivery);
+  writeDestinationsFromJob(agentGroupId, sessionId, {
+    ...job.delivery,
+    display_name: job.delivery.display_name ?? job.inbound.sender?.display_name,
+  });
 
   writeSessionMessage(agentGroupId, sessionId, {
     id: job.inbound.id,

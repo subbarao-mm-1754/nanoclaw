@@ -35,6 +35,8 @@ import {
   upsertSessionRouting,
   insertMessage,
   migrateMessagesInTable,
+  replaceDestinations,
+  type DestinationRow,
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
@@ -217,6 +219,47 @@ export function writeSessionRoutingFromJob(
     platformId: delivery.platform_id,
     threadId: delivery.thread_id,
   });
+}
+
+export interface WorkerJobDelivery {
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  /** Local name for `<message to="...">` (default: `client`). */
+  name?: string;
+  display_name?: string;
+}
+
+/**
+ * Project the job's delivery address into inbound.db `destinations` so the
+ * container agent can dispatch replies. Worker/gateway path — no central DB.
+ */
+export function writeDestinationsFromJob(
+  agentGroupId: string,
+  sessionId: string,
+  delivery: WorkerJobDelivery,
+): void {
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return;
+
+  const name = delivery.name?.trim() || 'client';
+  const displayName = delivery.display_name?.trim() || delivery.platform_id;
+  const row: DestinationRow = {
+    name,
+    display_name: displayName,
+    type: 'channel',
+    channel_type: delivery.channel_type,
+    platform_id: delivery.platform_id,
+    agent_group_id: null,
+  };
+
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    replaceDestinations(db, [row]);
+  } finally {
+    db.close();
+  }
+  log.debug('Destinations written from job', { sessionId, name, channelType: delivery.channel_type, platformId: delivery.platform_id });
 }
 
 /**

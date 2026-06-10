@@ -148,10 +148,38 @@ describe('collectOutboundMessages', () => {
     expect(outbound).toHaveLength(1);
     expect(outbound[0].content.text).toBe('Hi there');
   });
+
+  it('returns immediately when outbound arrives while container is still running', async () => {
+    const job = parseWorkerJobRequest(sampleJob());
+    await runWorkerJob(job);
+
+    writeOutboundDirect(job.session.agent_group_id, job.session.id, {
+      id: 'out-early',
+      kind: 'chat',
+      platformId: job.delivery.platform_id,
+      channelType: job.delivery.channel_type,
+      threadId: job.delivery.thread_id,
+      content: JSON.stringify({ text: 'Quick reply' }),
+    });
+
+    isContainerRunningMock.mockReturnValue(true);
+    const started = Date.now();
+    const outbound = await collectOutboundMessages({
+      agentGroupId: job.session.agent_group_id,
+      sessionId: job.session.id,
+      delivery: job.delivery,
+      timeoutMs: 5000,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0].content.text).toBe('Quick reply');
+    expect(elapsed).toBeLessThan(500);
+  });
 });
 
 describe('runWorkerJob', () => {
-  it('writes inbound message and session routing', async () => {
+  it('writes inbound message, session routing, and destinations', async () => {
     const job = parseWorkerJobRequest(sampleJob());
     const result = await runWorkerJob(job);
 
@@ -168,6 +196,15 @@ describe('runWorkerJob', () => {
       expect(row.channel_type).toBe('http');
       const content = JSON.parse(row.content);
       expect(content.text).toBe('Hello');
+
+      const dest = db.prepare('SELECT * FROM destinations WHERE name = ?').get('client') as {
+        channel_type: string;
+        platform_id: string;
+        display_name: string;
+      };
+      expect(dest.channel_type).toBe('http');
+      expect(dest.platform_id).toBe('client-1');
+      expect(dest.display_name).toBe('Test User');
     } finally {
       db.close();
     }

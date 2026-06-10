@@ -37,8 +37,10 @@ export interface CollectOutboundOptions {
 }
 
 /**
- * Poll outbound.db until the container stops (or times out) and collect
- * user-facing chat messages for the job's delivery address.
+ * Poll outbound.db until a user-facing message is collected for the job's
+ * delivery address, the container exits without replying, or timeoutMs elapses.
+ * Returns as soon as outbound is ready; the container keeps running for later
+ * messages (any further outbounds are picked up by a subsequent job).
  */
 export async function collectOutboundMessages(opts: CollectOutboundOptions): Promise<WorkerCollectedOutbound[]> {
   const { agentGroupId, sessionId, delivery, timeoutMs } = opts;
@@ -54,13 +56,14 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
       collectedIds.add(msg.id);
     }
 
+    if (collected.length > 0) {
+      break;
+    }
+
     if (!isContainerRunning(sessionId)) {
       if (containerStoppedAt === null) {
         containerStoppedAt = Date.now();
-      }
-      const quiet = batch.length === 0;
-      const graceElapsed = Date.now() - containerStoppedAt >= POST_STOP_GRACE_MS;
-      if (quiet && (collected.length > 0 || graceElapsed)) {
+      } else if (Date.now() - containerStoppedAt >= POST_STOP_GRACE_MS) {
         break;
       }
     } else {
@@ -70,9 +73,10 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
     await sleep(POLL_MS);
   }
 
-  // Final drain after loop
-  const tail = drainOutboundBatch(agentGroupId, sessionId, delivery, collectedIds);
-  collected.push(...tail);
+  if (collected.length === 0) {
+    const tail = drainOutboundBatch(agentGroupId, sessionId, delivery, collectedIds);
+    collected.push(...tail);
+  }
 
   log.info('Worker outbound collection finished', {
     sessionId,

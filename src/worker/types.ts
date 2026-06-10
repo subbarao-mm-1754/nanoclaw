@@ -10,6 +10,9 @@ export interface WorkerJobRequest {
     channel_type: string;
     platform_id: string;
     thread_id: string | null;
+    /** Local destination name for agent `<message to="...">` (default: `client`). */
+    name?: string;
+    display_name?: string;
   };
   inbound: {
     id: string;

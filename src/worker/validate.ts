@@ -46,6 +46,20 @@ export function parseWorkerJobRequest(body: unknown): WorkerJobRequest {
             throw new WorkerValidationError('body.delivery.thread_id must be a string or null');
           })();
 
+  let deliveryName: string | undefined;
+  if (delivery.name !== undefined) {
+    deliveryName = requireString(delivery, 'name', 'body.delivery');
+  }
+  let deliveryDisplayName: string | undefined;
+  if (delivery.display_name !== undefined) {
+    deliveryDisplayName =
+      typeof delivery.display_name === 'string' && delivery.display_name.trim() !== ''
+        ? delivery.display_name
+        : (() => {
+            throw new WorkerValidationError('body.delivery.display_name must be a non-empty string');
+          })();
+  }
+
   const inboundId = requireString(inbound, 'id', 'body.inbound');
   const inboundKind = requireString(inbound, 'kind', 'body.inbound');
   const inboundTimestamp = requireString(inbound, 'timestamp', 'body.inbound');
@@ -105,7 +119,13 @@ export function parseWorkerJobRequest(body: unknown): WorkerJobRequest {
   return {
     job_id: jobId,
     session: { id: sessionId, agent_group_id: agentGroupId },
-    delivery: { channel_type: channelType, platform_id: platformId, thread_id: threadId },
+    delivery: {
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      name: deliveryName,
+      display_name: deliveryDisplayName,
+    },
     inbound: {
       id: inboundId,
       kind: inboundKind,

@@ -204,7 +204,13 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
     Boolean(spawnContext),
   );
 
-  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+  const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
+  log.info('Spawning container', {
+    sessionId: session.id,
+    agentGroup: agentGroup.name,
+    containerName,
+    image: imageTag,
+  });
 
   // Clear any orphan heartbeat from a previous container instance — the
   // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
@@ -213,12 +219,14 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderrBuf = '';
 
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
 
-  // Log stderr
+  // Log stderr (buffered so non-zero exits can surface the runtime error).
   container.stderr?.on('data', (data) => {
+    stderrBuf += data.toString();
     for (const line of data.toString().trim().split('\n')) {
       if (line) log.debug(line, { container: agentGroup.folder });
     }
@@ -237,7 +245,18 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     notifyContainerStopped(session.id);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
+    if (code !== 0 && code !== null) {
+      const detail = stderrBuf.trim().slice(0, 2000);
+      log.warn('Container exited with error', {
+        sessionId: session.id,
+        code,
+        containerName,
+        image: imageTag,
+        stderr: detail || undefined,
+      });
+    } else {
+      log.info('Container exited', { sessionId: session.id, code, containerName });
+    }
   });
 
   container.on('error', (err) => {
