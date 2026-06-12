@@ -9,67 +9,77 @@ import {
 } from '../container-config.js';
 import { syncSkillSymlinks } from '../skill-symlinks.js';
 import { ensureClaudeSharedFilesystem } from '../group-init.js';
-import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import type { WorkerJobRequest } from './types.js';
+import type { WorkerAgentFile, WorkerWorkspaceManifest, WorkerWorkspacePaths } from './types.js';
+import { workerWorkspacePaths } from './workspace-store.js';
 
-export interface MaterializeWorkspaceResult {
-  workspaceRoot: string;
-  groupDir: string;
-  claudeSharedDir: string;
+export interface MaterializeWorkspaceResult extends WorkerWorkspacePaths {
   containerConfig: ContainerConfig;
+  filesWritten: string[];
 }
 
-function writeAgentFiles(groupDir: string, files: Array<{ path: string; content: string }>): void {
+export function writeAgentFiles(groupDir: string, files: WorkerAgentFile[]): string[] {
+  const written: string[] = [];
   for (const file of files) {
     if (file.path.includes('..') || path.isAbsolute(file.path)) {
       throw new Error(`Invalid agent file path: ${file.path}`);
     }
-    const filePath = path.join(groupDir, file.path);
+    const normalized = file.path.replace(/\\/g, '/');
+    const filePath = path.join(groupDir, normalized);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, file.content);
+    if (Buffer.isBuffer(file.content)) {
+      fs.writeFileSync(filePath, file.content);
+    } else {
+      fs.writeFileSync(filePath, file.content, 'utf8');
+    }
+    written.push(normalized);
   }
+  return written;
 }
 
 /**
- * Materialize a per-job workspace from the gateway payload.
- * Layout mirrors spawn-time group dir + .claude-shared for Phase D mounts.
+ * Materialize or refresh a worker workspace from manifest + optional file overrides.
+ * Files are stored at the relative paths given in the request (e.g. CLAUDE.local.md, notes/foo.md).
  */
-export function materializeWorkspace(job: WorkerJobRequest): MaterializeWorkspaceResult {
-  const workspaceRoot = path.join(DATA_DIR, 'worker-workspaces', job.job_id);
-  const groupDir = path.join(workspaceRoot, 'agent');
-  const claudeSharedDir = path.join(workspaceRoot, '.claude-shared');
+export function materializeWorkspace(
+  manifest: WorkerWorkspaceManifest,
+  files?: WorkerAgentFile[],
+): MaterializeWorkspaceResult {
+  const paths = workerWorkspacePaths(manifest.workspace_id);
+  const { root: workspaceRoot, group_dir: groupDir, claude_shared_dir: claudeSharedDir } = paths;
 
   fs.mkdirSync(groupDir, { recursive: true });
   fs.mkdirSync(claudeSharedDir, { recursive: true });
 
-  const instructions = job.agent_snapshot.instructions ?? '';
-  fs.writeFileSync(path.join(groupDir, 'CLAUDE.local.md'), instructions);
-
-  if (job.agent_snapshot.files?.length) {
-    writeAgentFiles(groupDir, job.agent_snapshot.files);
-  }
+  const filesWritten = files?.length ? writeAgentFiles(groupDir, files) : [];
 
   ensureClaudeSharedFilesystem(claudeSharedDir);
 
   const agentGroup = {
-    id: job.session.agent_group_id,
-    name: job.agent_snapshot.name,
+    id: manifest.agent_group_id,
+    name: manifest.name,
   };
-  const containerConfig = containerConfigFromSnapshot(job.agent_snapshot.container_config, agentGroup);
+  const containerConfig = containerConfigFromSnapshot(manifest.container_config, agentGroup);
   materializeContainerJsonToDir(groupDir, containerConfig);
   syncSkillSymlinks(claudeSharedDir, containerConfig);
   composeGroupClaudeMdAt({
     groupDir,
     mcpServers: containerConfig.mcpServers,
-    cliScope: job.agent_snapshot.cli_scope ?? 'group',
+    cliScope: manifest.cli_scope,
   });
 
   log.info('Worker workspace materialized', {
-    jobId: job.job_id,
+    workspaceId: manifest.workspace_id,
     workspaceRoot,
     groupDir,
+    filesWritten: filesWritten.length,
   });
 
-  return { workspaceRoot, groupDir, claudeSharedDir, containerConfig };
+  return {
+    workspaceRoot,
+    groupDir,
+    claudeSharedDir,
+    containerConfig,
+    filesWritten,
+  };
 }

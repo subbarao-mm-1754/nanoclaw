@@ -7,14 +7,14 @@ import {
 import { log } from '../log.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from '../session-manager.js';
 import { isContainerRunning } from '../container-runner.js';
-import type { WorkerCollectedOutbound, WorkerJobRequest } from './types.js';
+import type { WorkerCollectedOutbound, WorkerDelivery } from './types.js';
 
 const POLL_MS = 1000;
 const POST_STOP_GRACE_MS = 2000;
 
 function matchesDelivery(
   msg: { channel_type: string | null; platform_id: string | null; thread_id: string | null },
-  delivery: WorkerJobRequest['delivery'],
+  delivery: WorkerDelivery,
 ): boolean {
   if (msg.channel_type !== delivery.channel_type) return false;
   if (msg.platform_id !== delivery.platform_id) return false;
@@ -32,7 +32,7 @@ function encodeFiles(files: Array<{ filename: string; data: Buffer }>): WorkerCo
 export interface CollectOutboundOptions {
   agentGroupId: string;
   sessionId: string;
-  delivery: WorkerJobRequest['delivery'];
+  delivery: WorkerDelivery;
   timeoutMs: number;
 }
 
@@ -90,7 +90,7 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
 function drainOutboundBatch(
   agentGroupId: string,
   sessionId: string,
-  delivery: WorkerJobRequest['delivery'],
+  delivery: WorkerDelivery,
   skipIds: Set<string>,
 ): WorkerCollectedOutbound[] {
   const results: WorkerCollectedOutbound[] = [];

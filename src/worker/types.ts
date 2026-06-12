@@ -1,19 +1,46 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
 
-export interface WorkerJobRequest {
+export interface WorkerAgentFile {
+  path: string;
+  /** UTF-8 text or raw bytes (multipart attachments). */
+  content: string | Buffer;
+}
+
+export interface WorkerDelivery {
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  /** Local destination name for agent `<message to="...">` (default: `client`). */
+  name?: string;
+  display_name?: string;
+}
+
+export interface WorkerPrepareWorkspaceRequest {
+  workspace_id: string;
+  agent: {
+    /** Central agent group id — written to container.json and used for session DB paths. */
+    agent_group_id: string;
+    name: string;
+    folder?: string;
+    container_config: ContainerConfigSnapshot;
+    cli_scope?: string;
+    /** Agent files stored under the workspace agent dir at the given relative paths. */
+    files: WorkerAgentFile[];
+  };
+  options?: {
+    /** When true, replace an existing workspace with the same workspace_id. Default false. */
+    replace?: boolean;
+  };
+}
+
+export interface WorkerProcessMessageRequest {
   job_id: string;
+  workspace_id: string;
   session: {
     id: string;
     agent_group_id: string;
   };
-  delivery: {
-    channel_type: string;
-    platform_id: string;
-    thread_id: string | null;
-    /** Local destination name for agent `<message to="...">` (default: `client`). */
-    name?: string;
-    display_name?: string;
-  };
+  delivery: WorkerDelivery;
   inbound: {
     id: string;
     kind: string;
@@ -24,20 +51,24 @@ export interface WorkerJobRequest {
       display_name?: string;
     };
   };
-  agent_snapshot: {
-    name: string;
-    folder?: string;
-    container_config: ContainerConfigSnapshot;
-    instructions?: string;
-    cli_scope?: string;
-    files?: Array<{ path: string; content: string }>;
-  };
   options?: {
     timeout_ms?: number;
     trigger?: 0 | 1;
     /** When false, prepare session only (no container spawn). Default true. */
     run_container?: boolean;
   };
+}
+
+/** Persisted alongside the materialized workspace on prepare. */
+export interface WorkerWorkspaceManifest {
+  workspace_id: string;
+  agent_group_id: string;
+  name: string;
+  folder: string;
+  container_config: ContainerConfigSnapshot;
+  cli_scope: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export type WorkerJobStatus = 'prepared' | 'completed' | 'failed' | 'timeout';
@@ -53,22 +84,31 @@ export interface WorkerCollectedOutbound {
 }
 
 export interface WorkerMemoryPatch {
-  instructions?: string;
   files?: Array<{ path: string; content: string; deleted?: boolean }>;
 }
 
-export interface WorkerJobResponse {
+export interface WorkerWorkspacePaths {
+  root: string;
+  group_dir: string;
+  claude_shared_dir: string;
+}
+
+export interface WorkerPrepareWorkspaceResponse {
+  workspace_id: string;
+  status: 'prepared';
+  workspace: WorkerWorkspacePaths;
+  files_written: string[];
+}
+
+export interface WorkerProcessMessageResponse {
   job_id: string;
   status: WorkerJobStatus;
+  workspace_id: string;
   session: {
     id: string;
     agent_group_id: string;
   };
-  workspace: {
-    root: string;
-    group_dir: string;
-    claude_shared_dir: string;
-  };
+  workspace: WorkerWorkspacePaths;
   session_paths: {
     inbound_db: string;
     outbound_db: string;

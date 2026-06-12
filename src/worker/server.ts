@@ -2,9 +2,15 @@ import http from 'http';
 
 import { WORKER_AUTH_TOKEN, WORKER_HOST, WORKER_MAX_BODY_BYTES, WORKER_PORT } from '../config.js';
 import { log } from '../log.js';
-import { runWorkerJob } from './job-runner.js';
-import type { WorkerJobResponse } from './types.js';
-import { WorkerValidationError, parseWorkerJobRequest } from './validate.js';
+import { runProcessMessageJob } from './job-runner.js';
+import { runPrepareWorkspace } from './prepare-workspace.js';
+import type { WorkerPrepareWorkspaceResponse, WorkerProcessMessageResponse } from './types.js';
+import { isMultipartRequest, parseMultipartPrepareRequest } from './multipart.js';
+import {
+  WorkerValidationError,
+  parsePrepareWorkspaceRequest,
+  parseProcessMessageRequest,
+} from './validate.js';
 
 let server: http.Server | null = null;
 
@@ -55,6 +61,51 @@ function authorize(req: http.IncomingMessage): boolean {
   return header.slice('Bearer '.length) === WORKER_AUTH_TOKEN;
 }
 
+function validationErrorResponse(res: http.ServerResponse, err: WorkerValidationError): void {
+  jsonResponse(res, 400, { error: err.message });
+}
+
+async function handlePrepareWorkspace(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!authorize(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+
+  let prepareReq;
+  try {
+    if (isMultipartRequest(req)) {
+      const { metadata, attachments } = await parseMultipartPrepareRequest(req);
+      prepareReq = parsePrepareWorkspaceRequest(metadata, attachments);
+    } else {
+      const body = await readJsonBody(req);
+      prepareReq = parsePrepareWorkspaceRequest(body);
+    }
+  } catch (err) {
+    if (err instanceof WorkerValidationError) {
+      validationErrorResponse(res, err);
+      return;
+    }
+    jsonResponse(res, 400, { error: err instanceof Error ? err.message : 'Bad request' });
+    return;
+  }
+
+  try {
+    const result: WorkerPrepareWorkspaceResponse = runPrepareWorkspace(prepareReq);
+    jsonResponse(res, 200, result);
+  } catch (err) {
+    if (err instanceof WorkerValidationError) {
+      validationErrorResponse(res, err);
+      return;
+    }
+    log.error('Worker prepare-workspace failed', { workspaceId: prepareReq.workspace_id, err });
+    jsonResponse(res, 500, {
+      workspace_id: prepareReq.workspace_id,
+      status: 'failed',
+      error: err instanceof Error ? err.message : 'Internal error',
+    });
+  }
+}
+
 async function handleProcessMessage(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorize(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -71,22 +122,27 @@ async function handleProcessMessage(req: http.IncomingMessage, res: http.ServerR
 
   let job;
   try {
-    job = parseWorkerJobRequest(body);
+    job = parseProcessMessageRequest(body);
   } catch (err) {
     if (err instanceof WorkerValidationError) {
-      jsonResponse(res, 400, { error: err.message });
+      validationErrorResponse(res, err);
       return;
     }
     throw err;
   }
 
   try {
-    const result: WorkerJobResponse = await runWorkerJob(job);
+    const result: WorkerProcessMessageResponse = await runProcessMessageJob(job);
     jsonResponse(res, 200, result);
   } catch (err) {
-    log.error('Worker job failed', { jobId: job.job_id, err });
+    if (err instanceof WorkerValidationError) {
+      validationErrorResponse(res, err);
+      return;
+    }
+    log.error('Worker process-message failed', { jobId: job.job_id, err });
     jsonResponse(res, 500, {
       job_id: job.job_id,
+      workspace_id: job.workspace_id,
       status: 'failed',
       error: err instanceof Error ? err.message : 'Internal error',
     });
@@ -98,6 +154,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   if (req.method === 'GET' && url.pathname === '/health') {
     jsonResponse(res, 200, { status: 'ok' });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/workspaces/prepare') {
+    await handlePrepareWorkspace(req, res);
     return;
   }
 

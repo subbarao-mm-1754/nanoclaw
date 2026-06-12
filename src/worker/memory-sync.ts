@@ -3,42 +3,37 @@ import path from 'path';
 
 import type { WorkerMemoryPatch } from './types.js';
 
-const SKIP_FILES = new Set(['CLAUDE.md', 'CLAUDE.local.md', 'container.json', '.claude-shared.md']);
+/** Composed/read-only artifacts — not returned in memory patches. */
+const SKIP_FILES = new Set(['CLAUDE.md', 'container.json', '.claude-shared.md']);
 const SKIP_DIRS = new Set(['.claude-fragments']);
 
 export interface MemoryBaseline {
-  instructions: string;
   files: Map<string, string>;
 }
 
 export function captureMemoryBaseline(
   groupDir: string,
-  instructions: string,
   seedFiles?: Array<{ path: string; content: string }>,
 ): MemoryBaseline {
   const files = new Map<string, string>();
   if (seedFiles) {
     for (const f of seedFiles) {
-      files.set(normalizeRelPath(f.path), f.content);
+      const content = Buffer.isBuffer(f.content) ? f.content.toString('utf8') : f.content;
+      files.set(normalizeRelPath(f.path), content);
+    }
+  } else if (fs.existsSync(groupDir)) {
+    for (const [relPath, content] of listAgentFiles(groupDir)) {
+      files.set(relPath, content);
     }
   }
-  return { instructions, files };
+  return { files };
 }
 
 /** Diff workspace agent dir against baseline; returns undefined when nothing changed. */
 export function collectMemoryPatch(groupDir: string, baseline: MemoryBaseline): WorkerMemoryPatch | undefined {
-  const patch: WorkerMemoryPatch = {};
-  let changed = false;
-
-  const localPath = path.join(groupDir, 'CLAUDE.local.md');
-  const instructions = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf8') : '';
-  if (instructions !== baseline.instructions) {
-    patch.instructions = instructions;
-    changed = true;
-  }
-
   const currentFiles = listAgentFiles(groupDir);
   const fileChanges: NonNullable<WorkerMemoryPatch['files']> = [];
+  let changed = false;
 
   for (const [relPath, content] of currentFiles) {
     if (baseline.files.get(relPath) !== content) {
@@ -54,11 +49,7 @@ export function collectMemoryPatch(groupDir: string, baseline: MemoryBaseline): 
     }
   }
 
-  if (fileChanges.length > 0) {
-    patch.files = fileChanges;
-  }
-
-  return changed ? patch : undefined;
+  return changed ? { files: fileChanges } : undefined;
 }
 
 function listAgentFiles(groupDir: string): Map<string, string> {
