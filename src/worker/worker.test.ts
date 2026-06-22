@@ -163,6 +163,26 @@ describe('parsePrepareWorkspaceRequest', () => {
     const req = parsePrepareWorkspaceRequest(body);
     expect(req.agent.files[0].content).toBeInstanceOf(Buffer);
   });
+
+  it('reads container_config.mcpServers, not the whole agent object', () => {
+    const body = samplePrepareBody({
+      agent: {
+        ...samplePrepareBody().agent,
+        container_config: {
+          ...samplePrepareBody().agent.container_config,
+          mcpServers: {
+            ZohoMCP: {
+              command: 'npx',
+              args: ['mcp-remote', 'https://example.test/mcp', '--transport', 'http-only'],
+            },
+          },
+        },
+      },
+    });
+    const req = parsePrepareWorkspaceRequest(body);
+    expect(req.agent.container_config.mcpServers?.ZohoMCP?.command).toBe('npx');
+    expect(req.agent.container_config).not.toHaveProperty('agent_group_id');
+  });
 });
 
 describe('multipart prepare', () => {
@@ -240,6 +260,32 @@ describe('runPrepareWorkspace', () => {
 
     const manifest = loadWorkspaceManifest(WORKSPACE_ID);
     expect(manifest.agent_group_id).toBe(AGENT_GROUP_ID);
+    expect(manifest.container_config).not.toHaveProperty('agent_group_id');
+  });
+
+  it('materializes mcpServers into container.json', () => {
+    const result = runPrepareWorkspace(
+      parsePrepareWorkspaceRequest(
+        samplePrepareBody({
+          agent: {
+            ...samplePrepareBody().agent,
+            container_config: {
+              ...samplePrepareBody().agent.container_config,
+              mcpServers: {
+                ZohoMCP: {
+                  command: 'npx',
+                  args: ['mcp-remote', 'https://example.test/mcp'],
+                },
+              },
+            },
+          },
+        }),
+      ),
+    );
+    const containerJson = JSON.parse(
+      fs.readFileSync(path.join(result.workspace.group_dir, 'container.json'), 'utf8'),
+    );
+    expect(containerJson.mcpServers.ZohoMCP.command).toBe('npx');
   });
 
   it('rejects duplicate workspace without replace', () => {

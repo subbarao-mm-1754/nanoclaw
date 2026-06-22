@@ -52,8 +52,11 @@ export function mergeAgentFiles(inline: WorkerAgentFile[], attachments: WorkerAg
   return [...byPath.values()];
 }
 
-function parseContainerConfig(obj: Record<string, unknown>, path: string) {
-  return requireObject(obj, path) as WorkerPrepareWorkspaceRequest['agent']['container_config'];
+function parseContainerConfig(
+  agent: Record<string, unknown>,
+  path: string,
+): WorkerPrepareWorkspaceRequest['agent']['container_config'] {
+  return requireObject(agent.container_config, path) as WorkerPrepareWorkspaceRequest['agent']['container_config'];
 }
 
 function parseProcessOptions(root: Record<string, unknown>): WorkerProcessMessageRequest['options'] {
