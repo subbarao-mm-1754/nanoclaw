@@ -76,3 +76,23 @@ export const WORKER_JOB_TIMEOUT_MS = parseInt(process.env.WORKER_JOB_TIMEOUT_MS 
 export const WORKER_CLEANUP_WORKSPACE = process.env.WORKER_CLEANUP_WORKSPACE === 'true';
 /** Skip OneCLI wiring when spawning worker containers (local dev only). */
 export const WORKER_SKIP_ONECLI = process.env.WORKER_SKIP_ONECLI === 'true';
+
+// NanoClaw gateway — channel connections + customer message queue (separate process).
+export const GATEWAY_HOST = process.env.GATEWAY_HOST || '127.0.0.1';
+export const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || '8090', 10);
+export const GATEWAY_AUTH_TOKEN = process.env.GATEWAY_AUTH_TOKEN || '';
+export const GATEWAY_DB_PATH =
+  process.env.GATEWAY_DB_PATH || path.resolve(DATA_DIR, 'gateway.db');
+export const GATEWAY_WORKER_URL =
+  process.env.GATEWAY_WORKER_URL || `http://${WORKER_HOST}:${WORKER_PORT}`;
+export const GATEWAY_PROCESS_INTERVAL_MS = parseInt(process.env.GATEWAY_PROCESS_INTERVAL_MS || '1000', 10);
+export const GATEWAY_DEFAULT_WORKSPACE_ID = process.env.GATEWAY_DEFAULT_WORKSPACE_ID || '';
+export const GATEWAY_DEFAULT_AGENT_GROUP_ID = process.env.GATEWAY_DEFAULT_AGENT_GROUP_ID || '';
+export const GATEWAY_DEFAULT_WORKSPACE_NAME = process.env.GATEWAY_DEFAULT_WORKSPACE_NAME || 'Default Agent';
+/** Registry names to skip when the gateway starts channel adapters. Default skips `cli` (Unix socket; host-only). Set to empty to enable all. */
+export const GATEWAY_SKIP_CHANNELS: string[] = (() => {
+  const raw = process.env.GATEWAY_SKIP_CHANNELS;
+  if (raw === undefined) return ['cli'];
+  if (raw.trim() === '') return [];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+})();

@@ -46,12 +46,25 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
   return registry.get(name)?.containerConfig;
 }
 
+export interface InitChannelAdapterOptions {
+  /** Registry names to skip (e.g. `cli` on the gateway — Unix socket is host-only). */
+  skip?: string[];
+}
+
 /**
  * Instantiate and set up all registered channel adapters.
  * Skips adapters that return null (missing credentials).
  */
-export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+export async function initChannelAdapters(
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+  options?: InitChannelAdapterOptions,
+): Promise<void> {
+  const skip = new Set(options?.skip ?? []);
   for (const [name, registration] of registry) {
+    if (skip.has(name)) {
+      log.info('Skipping channel adapter', { channel: name });
+      continue;
+    }
     try {
       const adapter = await registration.factory();
       if (!adapter) {
