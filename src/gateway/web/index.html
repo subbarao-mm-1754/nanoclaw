@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NanoClaw Agent Studio</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>NanoClaw Agent Studio</h1>
+      <div class="user-bar hidden" id="user-bar">
+        <span id="user-name"></span>
+        <button type="button" class="secondary" id="logout-btn">Sign out</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="auth-section" class="card">
+        <div class="tabs">
+          <button type="button" class="tab active" data-auth-tab="login">Sign in</button>
+          <button type="button" class="tab" data-auth-tab="register">Create account</button>
+        </div>
+        <div id="auth-error" class="error hidden"></div>
+        <form id="login-form">
+          <label for="login-email">Email</label>
+          <input id="login-email" type="email" required autocomplete="username" />
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" required autocomplete="current-password" />
+          <button type="submit">Sign in</button>
+        </form>
+        <form id="register-form" class="hidden">
+          <label for="register-name">Display name</label>
+          <input id="register-name" type="text" required autocomplete="name" />
+          <label for="register-email">Email</label>
+          <input id="register-email" type="email" required autocomplete="username" />
+          <label for="register-password">Password (min 8 characters)</label>
+          <input id="register-password" type="password" required minlength="8" autocomplete="new-password" />
+          <button type="submit">Create account</button>
+        </form>
+      </section>
+
+      <section id="dashboard-section" class="hidden">
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
+            <h2 style="margin: 0">Your agents</h2>
+            <button type="button" id="new-agent-btn">New agent</button>
+          </div>
+          <ul class="agent-list" id="agent-list"></ul>
+          <p class="empty hidden" id="no-agents">No agents yet. Create one to get started.</p>
+        </div>
+      </section>
+
+      <section id="editor-section" class="hidden">
+        <div class="card">
+          <h2 id="editor-title">New agent</h2>
+          <div id="editor-error" class="error hidden"></div>
+          <div id="editor-success" class="success hidden"></div>
+
+          <div class="grid-2">
+            <div>
+              <label for="agent-name">Agent name</label>
+              <input id="agent-name" type="text" placeholder="My Assistant" required />
+            </div>
+            <div>
+              <label for="agent-folder">Workspace folder</label>
+              <input id="agent-folder" type="text" placeholder="my-assistant" />
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <label for="agent-provider">Provider</label>
+              <select id="agent-provider">
+                <option value="claude">Claude</option>
+              </select>
+            </div>
+            <div>
+              <label for="agent-model">Model (optional)</label>
+              <input id="agent-model" type="text" placeholder="claude-sonnet-4-20250514" />
+            </div>
+          </div>
+
+          <label for="agent-cli-scope">CLI scope</label>
+          <select id="agent-cli-scope">
+            <option value="group">Group (scoped ncl)</option>
+            <option value="disabled">Disabled</option>
+            <option value="global">Global</option>
+          </select>
+
+          <label>
+            <input type="checkbox" id="agent-default" />
+            Set as default agent for incoming messages
+          </label>
+
+          <h2 style="margin-top: 1.5rem">MCP servers</h2>
+          <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
+            Optional MCP servers for the agent container. Saved with the agent and
+            sent to the worker on every create or update (written to
+            <code>container.json</code>).
+          </p>
+          <div id="mcp-server-list"></div>
+          <div class="file-upload-row">
+            <button type="button" class="secondary" id="add-mcp-server-btn">Add MCP server</button>
+          </div>
+
+          <h2 style="margin-top: 1.5rem">Agent files (.md)</h2>
+          <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
+            Upload markdown files or add them manually. Each file is stored at its
+            <strong>relative path</strong> under the agent workspace (e.g.
+            <code>CLAUDE.local.md</code>, <code>notes/context.md</code>). At least
+            <code>CLAUDE.local.md</code> is required.
+          </p>
+          <div class="file-upload-row">
+            <label class="btn secondary upload-label" for="md-upload-input">Upload .md files</label>
+            <input
+              type="file"
+              id="md-upload-input"
+              class="file-input-offscreen"
+              accept=".md,.markdown,text/markdown,text/x-markdown"
+              multiple
+            />
+            <label class="btn secondary upload-label" for="md-folder-input">Upload folder</label>
+            <input
+              type="file"
+              id="md-folder-input"
+              class="file-input-offscreen"
+              webkitdirectory
+              directory
+              multiple
+            />
+            <button type="button" class="secondary" id="add-file-btn">Add empty file</button>
+          </div>
+          <div id="file-list"></div>
+
+          <div class="actions">
+            <button type="button" id="save-agent-btn">Save agent</button>
+            <button type="button" class="secondary" id="cancel-editor-btn">Cancel</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>

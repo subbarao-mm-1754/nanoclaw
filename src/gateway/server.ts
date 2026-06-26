@@ -6,6 +6,16 @@ import {
   GATEWAY_PORT,
   WORKER_MAX_BODY_BYTES,
 } from '../config.js';
+import type { ContainerConfigSnapshot } from '../container-config.js';
+import { createAgent, getAgent, updateAgent } from './agent-service.js';
+import {
+  bearerToken,
+  jsonResponse,
+  parseAgentFiles,
+  readJsonBody,
+  requireString,
+  serveStatic,
+} from './http-utils.js';
 import { log } from '../log.js';
 import { listChannelConnections } from './store/channels.js';
 import { countMessagesByStatus, getMessage } from './store/messages.js';
@@ -13,66 +23,122 @@ import { listWorkspaces, registerWorkspace } from './store/workspaces.js';
 import { enqueueInboundMessage } from './store/messages.js';
 import { getOrCreateConversation } from './store/conversations.js';
 import { getHttpResponse, listHttpResponses } from './store/http-responses.js';
+import { AuthError, createSession, createUser, deleteSession, getSession, loginUser } from './store/users.js';
+import { AgentAccessError } from './store/agent-files.js';
+import { listAgentsForUser } from './store/agents.js';
+import type { GatewayUser } from './types.js';
 
 let server: http.Server | null = null;
 
-function jsonResponse(res: http.ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Content-Length': Buffer.byteLength(payload),
-  });
-  res.end(payload);
-}
-
-function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > WORKER_MAX_BODY_BYTES) {
-        reject(new Error('Request body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-
-    req.on('end', () => {
-      if (chunks.length === 0) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        reject(new Error('Invalid JSON body'));
-      }
-    });
-
-    req.on('error', reject);
-  });
-}
-
-function authorize(req: http.IncomingMessage): boolean {
+function authorizeLegacy(req: http.IncomingMessage): boolean {
   if (!GATEWAY_AUTH_TOKEN) return true;
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return false;
   return header.slice('Bearer '.length) === GATEWAY_AUTH_TOKEN;
 }
 
-function requireString(obj: Record<string, unknown>, key: string): string {
-  const value = obj[key];
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`${key} must be a non-empty string`);
+function requireUserSession(req: http.IncomingMessage): GatewayUser {
+  const token = bearerToken(req);
+  if (!token) throw new AuthError('Authentication required', 401);
+  const session = getSession(token);
+  if (!session) throw new AuthError('Invalid or expired session', 401);
+  return session.user;
+}
+
+function parseContainerConfig(raw: unknown): ContainerConfigSnapshot | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('container_config must be an object');
   }
-  return value;
+  return raw as ContainerConfigSnapshot;
+}
+
+async function handleRegister(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const user = createUser({
+    email: requireString(body, 'email'),
+    password: requireString(body, 'password'),
+    display_name: requireString(body, 'display_name'),
+  });
+  const session = createSession(user.id);
+  jsonResponse(res, 201, { user, token: session.token, expires_at: session.expires_at });
+}
+
+async function handleLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const { user, session } = loginUser(requireString(body, 'email'), requireString(body, 'password'));
+  jsonResponse(res, 200, { user, token: session.token, expires_at: session.expires_at });
+}
+
+function handleLogout(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const token = bearerToken(req);
+  if (token) deleteSession(token);
+  jsonResponse(res, 200, { ok: true });
+}
+
+function handleMe(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, { user });
+}
+
+async function handleCreateAgent(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const files = parseAgentFiles(body.files);
+
+  const agent = await createAgent({
+    name: requireString(body, 'name'),
+    owner_user_id: user.id,
+    folder: typeof body.folder === 'string' ? body.folder : undefined,
+    cli_scope: typeof body.cli_scope === 'string' ? body.cli_scope : undefined,
+    container_config: parseContainerConfig(body.container_config),
+    files,
+    is_default: body.is_default === true,
+  });
+
+  jsonResponse(res, 201, { agent });
+}
+
+function handleListAgents(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  const agents = listAgentsForUser(user.id).map((workspace) => ({
+    ...workspace,
+    files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
+  }));
+  jsonResponse(res, 200, { agents });
+}
+
+function handleGetAgent(req: http.IncomingMessage, res: http.ServerResponse, workspaceId: string): void {
+  const user = requireUserSession(req);
+  const agent = getAgent(workspaceId, user.id);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return;
+  }
+  jsonResponse(res, 200, { agent });
+}
+
+async function handleUpdateAgent(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+
+  const agent = await updateAgent(workspaceId, user.id, {
+    name: typeof body.name === 'string' ? body.name : undefined,
+    cli_scope: typeof body.cli_scope === 'string' ? body.cli_scope : undefined,
+    container_config: parseContainerConfig(body.container_config),
+    is_default: typeof body.is_default === 'boolean' ? body.is_default : undefined,
+    files: body.files !== undefined ? parseAgentFiles(body.files) : undefined,
+  });
+
+  jsonResponse(res, 200, { agent });
 }
 
 async function handleRegisterWorkspace(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const body = (await readJsonBody(req)) as Record<string, unknown>;
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
   const workspace = registerWorkspace({
     workspace_id: requireString(body, 'workspace_id'),
     agent_group_id: requireString(body, 'agent_group_id'),
@@ -83,7 +149,7 @@ async function handleRegisterWorkspace(req: http.IncomingMessage, res: http.Serv
 }
 
 async function handleInjectInbound(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const body = (await readJsonBody(req)) as Record<string, unknown>;
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
   const channelType = requireString(body, 'channel_type');
   const platformId = requireString(body, 'platform_id');
   const threadId =
@@ -182,16 +248,62 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
     return;
   }
 
-  const needsAuth =
+  if (pathname.startsWith('/assets/') || pathname === '/') {
+    if (req.method === 'GET' && serveStatic(req, res, pathname)) return;
+    if (req.method === 'GET' && pathname === '/') {
+      if (serveStatic(req, res, '/index.html')) return;
+    }
+  }
+
+  const legacyAuth =
     pathname.startsWith('/v1/workspaces') ||
     pathname.startsWith('/v1/messages') ||
     pathname.startsWith('/v1/channels');
-  if (needsAuth && !authorize(req)) {
+  if (legacyAuth && !authorizeLegacy(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
     return;
   }
 
   try {
+    if (req.method === 'POST' && pathname === '/v1/auth/register') {
+      await handleRegister(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/auth/login') {
+      await handleLogin(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/auth/logout') {
+      handleLogout(req, res);
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/v1/auth/me') {
+      handleMe(req, res);
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/agents') {
+      handleListAgents(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/agents') {
+      await handleCreateAgent(req, res);
+      return;
+    }
+
+    const agentMatch = pathname.match(/^\/v1\/agents\/([^/]+)$/);
+    if (agentMatch) {
+      const workspaceId = decodeURIComponent(agentMatch[1]!);
+      if (req.method === 'GET') {
+        handleGetAgent(req, res, workspaceId);
+        return;
+      }
+      if (req.method === 'PATCH') {
+        await handleUpdateAgent(req, res, workspaceId);
+        return;
+      }
+    }
+
     if (req.method === 'GET' && pathname === '/v1/workspaces') {
       jsonResponse(res, 200, { workspaces: listWorkspaces() });
       return;
@@ -230,6 +342,14 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     jsonResponse(res, 404, { error: 'Not found' });
   } catch (err) {
+    if (err instanceof AuthError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
+    if (err instanceof AgentAccessError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
     jsonResponse(res, 400, { error: message });
   }

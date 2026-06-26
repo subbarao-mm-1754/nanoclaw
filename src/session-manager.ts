@@ -330,6 +330,45 @@ export function writeSessionMessage(
   }
 }
 
+/** Count pending rows in a session's inbound.db (host read-only). */
+export function countPendingSessionInbound(
+  agentGroupId: string,
+  sessionId: string,
+): number {
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    const row = db
+      .prepare("SELECT COUNT(*) AS c FROM messages_in WHERE status = 'pending'")
+      .get() as { c: number };
+    return row.c;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Write a message to inbound.db only if that id is not already present.
+ * Returns true when a new row was inserted, false when skipped as duplicate.
+ */
+export function writeSessionMessageIfAbsent(
+  agentGroupId: string,
+  sessionId: string,
+  message: Parameters<typeof writeSessionMessage>[2],
+): boolean {
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    const existing = db
+      .prepare('SELECT id FROM messages_in WHERE id = ?')
+      .get(message.id) as { id: string } | undefined;
+    if (existing) return false;
+  } finally {
+    db.close();
+  }
+
+  writeSessionMessage(agentGroupId, sessionId, message);
+  return true;
+}
+
 /**
  * If message content has attachments with base64 `data`, save them to
  * the session's inbox directory and replace with `localPath`.

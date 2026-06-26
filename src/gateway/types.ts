@@ -1,3 +1,5 @@
+import type { ContainerConfigSnapshot } from '../container-config.js';
+
 export type MessageDirection = 'inbound' | 'outbound';
 export type MessageStatus = 'pending' | 'processing' | 'delivered' | 'failed';
 export type ChannelConnectionStatus = 'connected' | 'disconnected' | 'error';
@@ -11,13 +13,40 @@ export interface ChannelConnection {
   updated_at: string;
 }
 
+export interface GatewayUser {
+  id: string;
+  email: string;
+  display_name: string;
+  created_at: string;
+}
+
+export interface GatewaySession {
+  token: string;
+  user_id: string;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface GatewayAgentFile {
+  path: string;
+  content: string;
+}
+
 export interface GatewayWorkspace {
   workspace_id: string;
   agent_group_id: string;
   name: string;
   is_default: boolean;
+  owner_user_id: string | null;
+  folder: string | null;
+  cli_scope: string;
+  container_config: ContainerConfigSnapshot | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface GatewayAgent extends GatewayWorkspace {
+  files: GatewayAgentFile[];
 }
 
 export interface Conversation {

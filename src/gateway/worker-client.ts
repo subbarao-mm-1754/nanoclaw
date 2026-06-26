@@ -8,6 +8,8 @@ import type {
   WorkerMemoryPatch,
   WorkerProcessMessageRequest,
   WorkerProcessMessageResponse,
+  WorkerPrepareWorkspaceRequest,
+  WorkerPrepareWorkspaceResponse,
 } from '../worker/types.js';
 
 function workerHeaders(): Record<string, string> {
@@ -55,4 +57,40 @@ export async function processMessageOnWorker(
   }
 }
 
-export type { WorkerMemoryPatch };
+export async function prepareWorkspaceOnWorker(
+  payload: WorkerPrepareWorkspaceRequest,
+): Promise<WorkerPrepareWorkspaceResponse> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const res = await fetch(`${GATEWAY_WORKER_URL}/v1/workspaces/prepare`, {
+      method: 'POST',
+      headers: workerHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const text = await res.text();
+    let body: WorkerPrepareWorkspaceResponse & { error?: string };
+    try {
+      body = JSON.parse(text) as WorkerPrepareWorkspaceResponse & { error?: string };
+    } catch {
+      throw new Error(`Worker returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+    }
+
+    if (!res.ok) {
+      throw new Error(body.error || `Worker HTTP ${res.status}`);
+    }
+
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type {
+  WorkerMemoryPatch,
+  WorkerPrepareWorkspaceRequest,
+  WorkerPrepareWorkspaceResponse,
+};

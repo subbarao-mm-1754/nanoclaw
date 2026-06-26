@@ -385,6 +385,29 @@ describe('runProcessMessageJob', () => {
     expect(wakeContainerMock).not.toHaveBeenCalled();
   });
 
+  it('skips duplicate inbound id without failing', async () => {
+    prepareTestWorkspace();
+    const job = parseProcessMessageRequest(sampleProcessBody());
+    await runProcessMessageJob(job);
+
+    const duplicate = await runProcessMessageJob({
+      ...job,
+      job_id: 'job-duplicate',
+      options: { run_container: false },
+    });
+
+    expect(duplicate.status).toBe('prepared');
+    const db = openInboundDb(job.session.agent_group_id, job.session.id);
+    try {
+      const count = db
+        .prepare('SELECT COUNT(*) AS c FROM messages_in WHERE id = ?')
+        .get(job.inbound.id) as { c: number };
+      expect(count.c).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it('serializes structured inbound content into text when text is omitted', async () => {
     prepareTestWorkspace();
     const job = parseProcessMessageRequest(

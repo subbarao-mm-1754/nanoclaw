@@ -6,7 +6,8 @@ import {
   ensureSessionWorkspace,
   inboundDbPath,
   outboundDbPath,
-  writeSessionMessage,
+  writeSessionMessageIfAbsent,
+  countPendingSessionInbound,
   writeSessionRoutingFromJob,
   writeDestinationsFromJob,
 } from '../session-manager.js';
@@ -119,7 +120,7 @@ export async function runProcessMessageJob(
     display_name: job.delivery.display_name ?? job.inbound.sender?.display_name,
   });
 
-  writeSessionMessage(agentGroupId, sessionId, {
+  const wroteInbound = writeSessionMessageIfAbsent(agentGroupId, sessionId, {
     id: job.inbound.id,
     kind: job.inbound.kind,
     timestamp: job.inbound.timestamp,
@@ -151,6 +152,20 @@ export async function runProcessMessageJob(
     return {
       ...baseResponse,
       detail: 'Session prepared; run_container=false skipped container spawn.',
+    };
+  }
+
+  if (!wroteInbound && countPendingSessionInbound(agentGroupId, sessionId) === 0) {
+    log.info('Worker skipping duplicate inbound (session already processed)', {
+      jobId: job.job_id,
+      inboundMessageId: job.inbound.id,
+      sessionId,
+    });
+    return {
+      ...baseResponse,
+      status: 'completed',
+      outbound: [],
+      detail: 'Duplicate platform message; session already has no pending inbound.',
     };
   }
 

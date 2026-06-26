@@ -6,4 +6,4 @@
 // ...) copy their module from the `channels` branch and append a
 // self-registration import below.
 
-import './cli.js';
+import './zoho-cliq.js';

@@ -31,26 +31,45 @@ export function enqueueInboundMessage(
   input: InboundEnqueueInput,
   conversationId: string,
 ): CustomerMessage {
+  const existing = getMessage(input.id);
+  if (
+    existing?.direction === 'inbound' &&
+    (existing.status === 'pending' ||
+      existing.status === 'processing' ||
+      existing.status === 'failed')
+  ) {
+    return existing;
+  }
+
   const ts = now();
   const db = getGatewayDb();
-  db.prepare(
-    `INSERT INTO customer_messages
-      (id, direction, status, channel_type, platform_id, thread_id, conversation_id,
-       kind, content_json, sender_id, sender_display_name, created_at, updated_at)
-     VALUES (?, 'inbound', 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    input.id,
-    input.channel_type,
-    input.platform_id,
-    input.thread_id,
-    conversationId,
-    input.kind,
-    JSON.stringify(input.content),
-    input.sender_id ?? null,
-    input.sender_display_name ?? null,
-    ts,
-    ts,
-  );
+  try {
+    db.prepare(
+      `INSERT INTO customer_messages
+        (id, direction, status, channel_type, platform_id, thread_id, conversation_id,
+         kind, content_json, sender_id, sender_display_name, created_at, updated_at)
+       VALUES (?, 'inbound', 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.id,
+      input.channel_type,
+      input.platform_id,
+      input.thread_id,
+      conversationId,
+      input.kind,
+      JSON.stringify(input.content),
+      input.sender_id ?? null,
+      input.sender_display_name ?? null,
+      ts,
+      ts,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes('UNIQUE constraint failed')) {
+      const row = getMessage(input.id);
+      if (row) return row;
+    }
+    throw err;
+  }
   return getMessage(input.id)!;
 }
 

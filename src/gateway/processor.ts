@@ -1,4 +1,5 @@
 import { log } from '../log.js';
+import { sessionInboundMessageId } from '../session-message-id.js';
 import { workerWorkspacePaths } from '../worker/workspace-store.js';
 import { applyMemoryPatch, deliverOutboundMessage } from './delivery.js';
 import { getConversation } from './store/conversations.js';
@@ -47,7 +48,7 @@ async function processOneInbound(): Promise<boolean> {
       display_name: inbound.sender_display_name ?? conversation.display_name ?? undefined,
     },
     inbound: {
-      id: inbound.id,
+      id: sessionInboundMessageId(inbound.id, conversation.agent_group_id),
       kind: inbound.kind,
       timestamp: inbound.created_at,
       content,
