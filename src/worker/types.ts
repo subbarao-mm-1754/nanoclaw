@@ -35,6 +35,8 @@ export interface WorkerPrepareWorkspaceRequest {
 
 export interface WorkerProcessMessageRequest {
   job_id: string;
+  /** Gateway build job id (full agent build). Echoed in async callbacks. */
+  build_job_id?: string;
   workspace_id: string;
   session: {
     id: string;
@@ -56,6 +58,9 @@ export interface WorkerProcessMessageRequest {
     trigger?: 0 | 1;
     /** When false, prepare session only (no container spawn). Default true. */
     run_container?: boolean;
+    /** When true, respond 202 and POST result to callback_url. */
+    async?: boolean;
+    callback_url?: string;
   };
 }
 
@@ -102,6 +107,7 @@ export interface WorkerPrepareWorkspaceResponse {
 
 export interface WorkerProcessMessageResponse {
   job_id: string;
+  build_job_id?: string;
   status: WorkerJobStatus;
   workspace_id: string;
   session: {
@@ -118,4 +124,15 @@ export interface WorkerProcessMessageResponse {
   memory_patch?: WorkerMemoryPatch;
   detail?: string;
   error?: string;
+}
+
+export interface WorkerDestroyWorkspaceRequest {
+  workspace_id: string;
+  session_id?: string;
+}
+
+export interface WorkerDestroyWorkspaceResponse {
+  workspace_id: string;
+  status: 'destroyed';
+  container_killed: boolean;
 }

@@ -52,9 +52,9 @@ export function runPrepareWorkspace(req: WorkerPrepareWorkspaceRequest): WorkerP
     workspace_id: req.workspace_id,
     status: 'prepared',
     workspace: {
-      root: materialized.workspaceRoot,
-      group_dir: materialized.groupDir,
-      claude_shared_dir: materialized.claudeSharedDir,
+      root: materialized.root,
+      group_dir: materialized.group_dir,
+      claude_shared_dir: materialized.claude_shared_dir,
     },
     files_written: materialized.filesWritten,
   };

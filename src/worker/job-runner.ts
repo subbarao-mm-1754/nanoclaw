@@ -133,6 +133,7 @@ export async function runProcessMessageJob(
 
   const baseResponse: WorkerProcessMessageResponse = {
     job_id: job.job_id,
+    build_job_id: job.build_job_id,
     status: 'prepared',
     workspace_id: job.workspace_id,
     session: { id: sessionId, agent_group_id: agentGroupId },
@@ -175,22 +176,32 @@ export async function runProcessMessageJob(
   const session = buildSession(job, provider);
   const spawnContext = buildSpawnContext(manifest, paths);
 
+  const spawnStartedAt = Date.now();
   const spawned = await wakeContainer(session, spawnContext);
+  const spawnMs = Date.now() - spawnStartedAt;
   if (!spawned) {
+    log.warn('Worker process-message spawn failed', {
+      jobId: job.job_id,
+      sessionId,
+      spawnMs,
+    });
     return {
       ...baseResponse,
       status: 'failed',
       error: 'Container spawn failed (check Docker, image, and OneCLI gateway)',
     };
   }
+  log.info('Worker container ready', { jobId: job.job_id, sessionId, spawnMs });
 
   const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+  const collectStartedAt = Date.now();
   const outbound = await collectOutboundMessages({
     agentGroupId,
     sessionId,
     delivery: job.delivery,
     timeoutMs: remainingMs,
   });
+  const collectMs = Date.now() - collectStartedAt;
 
   const memoryPatch = collectMemoryPatch(paths.group_dir, memoryBaseline);
 
@@ -199,7 +210,8 @@ export async function runProcessMessageJob(
     log.debug('Worker workspace cleaned up', { workspaceId: job.workspace_id });
   }
 
-  const timedOut = outbound.length === 0 && Date.now() - startedAt >= timeoutMs;
+  const elapsedMs = Date.now() - startedAt;
+  const timedOut = outbound.length === 0 && elapsedMs >= timeoutMs;
 
   log.info('Worker process-message finished', {
     jobId: job.job_id,
@@ -207,6 +219,9 @@ export async function runProcessMessageJob(
     sessionId,
     outboundCount: outbound.length,
     timedOut,
+    spawnMs,
+    collectMs,
+    elapsedMs,
   });
 
   return {

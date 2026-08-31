@@ -6,12 +6,21 @@ import {
 } from '../channels/channel-registry.js';
 import { GATEWAY_SKIP_CHANNELS } from '../config.js';
 import { log } from '../log.js';
+import { routeChannelInbound } from './channel-router.js';
 import { upsertChannelConnection } from './store/channels.js';
 import { enqueueInboundMessage } from './store/messages.js';
 import { getOrCreateConversation } from './store/conversations.js';
 
 function newMessageId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function extractSenderId(content: unknown, platformId: string): string {
+  if (content && typeof content === 'object') {
+    const obj = content as Record<string, unknown>;
+    if (typeof obj.senderId === 'string' && obj.senderId.trim()) return obj.senderId.trim();
+  }
+  return platformId;
 }
 
 async function handleInbound(
@@ -27,6 +36,26 @@ async function handleInbound(
   },
   senderDisplayName?: string,
 ): Promise<void> {
+  // Same Cliq chat: /build → builder; active build → continue; else → user agent.
+  const routed = await routeChannelInbound({
+    channel_type: adapter.channelType,
+    platform_id: platformId,
+    thread_id: threadId,
+    content: message.content,
+    sender_display_name: senderDisplayName,
+  });
+
+  if (routed.kind === 'builder') {
+    log.info('Gateway routed inbound to builder', {
+      messageId: message.id,
+      channelType: adapter.channelType,
+      platformId,
+      action: routed.action,
+      jobId: routed.jobId,
+    });
+    return;
+  }
+
   const conversation = getOrCreateConversation({
     channel_type: adapter.channelType,
     platform_id: platformId,
@@ -44,7 +73,7 @@ async function handleInbound(
       kind: message.kind,
       content: message.content,
       timestamp: message.timestamp,
-      sender_id: platformId,
+      sender_id: extractSenderId(message.content, platformId),
       sender_display_name: senderDisplayName,
     },
     conversation.id,

@@ -225,10 +225,17 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
   markContainerRunning(session.id);
 
   // Log stderr (buffered so non-zero exits can surface the runtime error).
+  // TIMING lines from the agent-runner are promoted to info so workers can
+  // see LLM round-trips / tool latency without setting LOG_LEVEL=debug.
   container.stderr?.on('data', (data) => {
     stderrBuf += data.toString();
     for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
+      if (!line) continue;
+      if (line.includes('TIMING ') || line.includes('[claude-provider] TIMING')) {
+        log.info(line, { container: agentGroup.folder, sessionId: session.id });
+      } else {
+        log.debug(line, { container: agentGroup.folder });
+      }
     }
   });
 

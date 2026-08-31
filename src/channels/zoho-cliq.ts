@@ -58,6 +58,7 @@ interface ZohoMessage {
   sender: { name: string; id: string };
   content: { text?: string };
   meta?: { message_source?: { type?: string } };
+  bot?: { name?: string; id?: string };
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -96,9 +97,15 @@ function createAdapter(): ChannelAdapter | null {
   let setupConfig: ChannelSetup;
   let connected = false;
   let currentUserId = '';
+  let botUserId = '';
 
   // Track last-seen message time per chat to skip already-processed messages.
   const lastSeenTime = new Map<string, number>();
+  const pollBaselined = new Set<string>();
+
+  // Outbound message IDs returned by deliver() — skip if poll picks them up.
+  const deliveredMessageIds = new Set<string>();
+  const MAX_DELIVERED_ID_CACHE = 500;
 
   // ── Token management ─────────────────────────────────────────────────
 
@@ -269,6 +276,39 @@ function createAdapter(): ChannelAdapter | null {
     return (await res.json()) as T;
   }
 
+  /** True when a polled message was sent by our bot (not a human user). */
+  function isBotOrOwnMessage(msg: ZohoMessage): boolean {
+    if (msg.meta?.message_source?.type === 'bot') return true;
+    if (deliveredMessageIds.has(msg.id)) return true;
+
+    const senderId = msg.sender.id;
+    // Cliq bots always send with a b-{id} sender ZUID (see Zoho poll payloads).
+    if (senderId.startsWith('b-')) return true;
+    if (botUserId && (senderId === botUserId || senderId === `b-${botUserId}`)) return true;
+    const botSenderId = msg.bot?.id;
+    if (botSenderId && senderId === botSenderId) return true;
+
+    return false;
+  }
+
+  /** Best-effort lookup of the bot's ZUID for sender filtering. */
+  async function resolveBotUserId(): Promise<void> {
+    try {
+      const token = await ensureToken();
+      const res = await fetch(`${apiBase}/api/v3/bots/${encodeURIComponent(botUniqueName)}`, {
+        headers: { Authorization: `Zoho-oauthtoken ${token}` },
+      });
+      if (!res.ok) return;
+      const body = (await res.json()) as { data?: { id?: string } };
+      botUserId = body.data?.id ?? '';
+      if (botUserId) {
+        log.info('Zoho Cliq bot identity resolved', { botUserId, botUniqueName });
+      }
+    } catch (err) {
+      log.warn('Zoho Cliq: could not resolve bot user id', { err });
+    }
+  }
+
   // ── Poll loop ────────────────────────────────────────────────────────
 
   async function poll(): Promise<void> {
@@ -290,26 +330,59 @@ function createAdapter(): ChannelAdapter | null {
   async function pollMessages(chatId: string, chatName: string, isDm: boolean): Promise<void> {
     try {
       const lastTime = lastSeenTime.get(chatId) ?? 0;
-      const params = lastTime ? `?fromtime=${lastTime + 1}&limit=20` : '?limit=1';
+      const isColdStart = !pollBaselined.has(chatId);
+      // Cold start: snapshot recent history without processing it (avoids echo + stale backlog).
+      // Warm polls: only fetch messages newer than our watermark.
+      const params = isColdStart ? '?limit=20' : `?fromtime=${lastTime + 1}&limit=20`;
 
       const res = await api<{ data?: ZohoMessage[] }>('GET', `/chats/${chatId}/messages${params}`);
       const messages = res.data ?? [];
+
+      log.debug('Zoho Cliq poll tick', {
+        chatId,
+        isColdStart,
+        fetched: messages.length,
+        lastTime,
+      });
 
       // Report metadata to the router so it can auto-create messaging groups.
       setupConfig.onMetadata(`${CHANNEL_TYPE}:${chatId}`, chatName, !isDm);
 
       for (const msg of messages) {
-        // Skip messages sent by a bot (including our own outbound replies).
-        if (msg.meta?.message_source?.type === 'bot') continue;
-        // Only process text messages (skip system/info/file messages for now)
-        if (msg.type !== 'text' || !msg.content.text) continue;
-        // Skip messages at or before the high-water mark (re-poll / batch overlap).
-        if (msg.time <= lastTime) continue;
-
-        // Advance high-water mark
+        // Advance high-water mark for every message we see (including bot echoes),
+        // so fromtime-based polls don't keep re-fetching skipped bot replies.
         if (msg.time > (lastSeenTime.get(chatId) ?? 0)) {
           lastSeenTime.set(chatId, msg.time);
         }
+      }
+
+      if (isColdStart) {
+        pollBaselined.add(chatId);
+        log.info('Zoho Cliq poll baseline established', {
+          chatId,
+          messagesSeen: messages.length,
+          watermark: lastSeenTime.get(chatId) ?? 0,
+        });
+        return;
+      }
+
+      for (const msg of messages) {
+        // Skip messages at or before the high-water mark (re-poll / batch overlap).
+        if (msg.time <= lastTime) continue;
+
+        // Skip messages sent by a bot (including our own outbound replies).
+        if (isBotOrOwnMessage(msg)) {
+          log.debug('Zoho Cliq skipped bot/own message', {
+            chatId,
+            messageId: msg.id,
+            senderId: msg.sender.id,
+            senderName: msg.sender.name,
+          });
+          continue;
+        }
+
+        // Only process text messages (skip system/info/file messages for now)
+        if (msg.type !== 'text' || !msg.content.text) continue;
 
         const inbound: InboundMessage = {
           id: msg.id,
@@ -358,7 +431,8 @@ function createAdapter(): ChannelAdapter | null {
         await ensureToken();
         const me = await api<{ id?: string; data?: { id?: string } }>('GET', '/me?source=remote_tools');
         currentUserId = me.data?.id ?? me.id ?? '';
-        log.info('Zoho Cliq adapter authenticated', { userId: currentUserId });
+        await resolveBotUserId();
+        log.info('Zoho Cliq adapter authenticated', { userId: currentUserId, botUserId: botUserId || null });
       } catch (err) {
         log.warn('Zoho Cliq: initial auth failed — starting poll loop anyway, will retry on each tick', { err });
       }
@@ -368,6 +442,7 @@ function createAdapter(): ChannelAdapter | null {
       }
 
       pollTimer = setInterval(() => void poll(), POLL_INTERVAL_MS);
+      void poll();
       connected = true;
       log.info('Zoho Cliq adapter started', { apiBase, accountsBase, chatIds: configuredChatIds });
     },
@@ -434,6 +509,13 @@ function createAdapter(): ChannelAdapter | null {
             throw new Error(`Zoho Cliq bot send failed (${res.status}): ${body}`);
           }
           const data = await parseOptionalJsonBody<{ message_id?: string }>(res);
+          if (data.message_id) {
+            deliveredMessageIds.add(data.message_id);
+            if (deliveredMessageIds.size > MAX_DELIVERED_ID_CACHE) {
+              const oldest = deliveredMessageIds.values().next().value;
+              if (oldest) deliveredMessageIds.delete(oldest);
+            }
+          }
           log.info('Zoho Cliq message delivered', {
             chatId,
             messageId: data.message_id ?? null,

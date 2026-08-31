@@ -4,10 +4,19 @@ import {
   GATEWAY_AUTH_TOKEN,
   GATEWAY_HOST,
   GATEWAY_PORT,
+  WORKER_AUTH_TOKEN,
   WORKER_MAX_BODY_BYTES,
 } from '../config.js';
 import type { ContainerConfigSnapshot } from '../container-config.js';
 import { createAgent, getAgent, updateAgent } from './agent-service.js';
+import {
+  BuildError,
+  continueBuild,
+  getBuild,
+  handleBuilderRunCallback,
+  listBuilds,
+  startBuild,
+} from './builder/service.js';
 import {
   bearerToken,
   jsonResponse,
@@ -27,6 +36,7 @@ import { AuthError, createSession, createUser, deleteSession, getSession, loginU
 import { AgentAccessError } from './store/agent-files.js';
 import { listAgentsForUser } from './store/agents.js';
 import type { GatewayUser } from './types.js';
+import type { WorkerProcessMessageResponse } from '../worker/types.js';
 
 let server: http.Server | null = null;
 
@@ -35,6 +45,13 @@ function authorizeLegacy(req: http.IncomingMessage): boolean {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return false;
   return header.slice('Bearer '.length) === GATEWAY_AUTH_TOKEN;
+}
+
+function authorizeWorkerCallback(req: http.IncomingMessage): boolean {
+  if (!WORKER_AUTH_TOKEN) return true;
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return false;
+  return header.slice('Bearer '.length) === WORKER_AUTH_TOKEN;
 }
 
 function requireUserSession(req: http.IncomingMessage): GatewayUser {
@@ -101,10 +118,12 @@ async function handleCreateAgent(req: http.IncomingMessage, res: http.ServerResp
 
 function handleListAgents(req: http.IncomingMessage, res: http.ServerResponse): void {
   const user = requireUserSession(req);
-  const agents = listAgentsForUser(user.id).map((workspace) => ({
-    ...workspace,
-    files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
-  }));
+  const agents = listAgentsForUser(user.id)
+    .filter((workspace) => !workspace.workspace_id.startsWith('ws-builder-'))
+    .map((workspace) => ({
+      ...workspace,
+      files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
+    }));
   jsonResponse(res, 200, { agents });
 }
 
@@ -135,6 +154,56 @@ async function handleUpdateAgent(
   });
 
   jsonResponse(res, 200, { agent });
+}
+
+async function handleStartBuild(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const job = await startBuild(user, {
+    message: requireString(body, 'message'),
+    title: typeof body.title === 'string' ? body.title : undefined,
+  });
+  jsonResponse(res, 202, { job });
+}
+
+function handleListBuilds(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+  const user = requireUserSession(req);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '20', 10) || 20, 100);
+  jsonResponse(res, 200, { jobs: listBuilds(user, limit) });
+}
+
+function handleGetBuild(req: http.IncomingMessage, res: http.ServerResponse, jobId: string): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, { job: getBuild(user, jobId) });
+}
+
+async function handleContinueBuild(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const job = await continueBuild(user, jobId, {
+    message: requireString(body, 'message'),
+  });
+  jsonResponse(res, 202, { job });
+}
+
+async function handleWorkerRunCallback(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as WorkerProcessMessageResponse;
+  if (!body || typeof body !== 'object' || typeof body.job_id !== 'string') {
+    jsonResponse(res, 400, { error: 'job_id is required' });
+    return;
+  }
+
+  await handleBuilderRunCallback(body);
+  jsonResponse(res, 200, { ok: true });
 }
 
 async function handleRegisterWorkspace(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -304,6 +373,32 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       }
     }
 
+    if (req.method === 'GET' && pathname === '/v1/builds') {
+      handleListBuilds(req, res, url);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/builds') {
+      await handleStartBuild(req, res);
+      return;
+    }
+
+    const buildMatch = pathname.match(/^\/v1\/builds\/([^/]+)$/);
+    if (buildMatch && req.method === 'GET') {
+      handleGetBuild(req, res, decodeURIComponent(buildMatch[1]!));
+      return;
+    }
+
+    const buildMessageMatch = pathname.match(/^\/v1\/builds\/([^/]+)\/messages$/);
+    if (buildMessageMatch && req.method === 'POST') {
+      await handleContinueBuild(req, res, decodeURIComponent(buildMessageMatch[1]!));
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/worker/callbacks/run-result') {
+      await handleWorkerRunCallback(req, res);
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/v1/workspaces') {
       jsonResponse(res, 200, { workspaces: listWorkspaces() });
       return;
@@ -347,6 +442,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
     if (err instanceof AgentAccessError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
+    if (err instanceof BuildError) {
       jsonResponse(res, err.status, { error: err.message });
       return;
     }

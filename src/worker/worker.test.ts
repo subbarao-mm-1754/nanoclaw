@@ -317,7 +317,7 @@ describe('materializeWorkspace', () => {
     const manifest = sampleManifest();
     saveWorkspaceManifest(manifest);
     const result = materializeWorkspace(manifest, [{ path: 'subdir/foo.txt', content: 'bar' }]);
-    expect(fs.readFileSync(path.join(result.groupDir, 'subdir/foo.txt'), 'utf8')).toBe('bar');
+    expect(fs.readFileSync(path.join(result.group_dir, 'subdir/foo.txt'), 'utf8')).toBe('bar');
   });
 });
 

@@ -37,7 +37,7 @@ const DEFAULT_AGENT_NAME = 'Nano';
 const OAUTH_CALLBACK_PORT = 8484;
 const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_CALLBACK_PORT}/callback`;
 const OAUTH_SCOPES =
-  'ZohoCliq.Webhooks.CREATE,ZohoCliq.Messages.ALL,ZohoCliq.Chats.READ,ZohoCliq.Channels.READ,ZohoCliq.Profile.READ';
+  'ZohoCliq.Webhooks.CREATE,ZohoCliq.Messages.ALL,ZohoCliq.Chats.READ,ZohoCliq.Channels.READ,ZohoCliq.Profile.READ,ZohoCliq.Bots.READ';
 
 /**
  * Derive the Zoho Accounts (IAM) base URL from the Cliq API URL.

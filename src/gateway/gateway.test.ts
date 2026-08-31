@@ -17,6 +17,8 @@ const prepareWorkspaceOnWorkerMock = vi.fn();
 vi.mock('./worker-client.js', () => ({
   processMessageOnWorker: (...args: unknown[]) => processMessageOnWorkerMock(...args),
   prepareWorkspaceOnWorker: (...args: unknown[]) => prepareWorkspaceOnWorkerMock(...args),
+  enqueueProcessMessageOnWorker: vi.fn(),
+  destroyWorkspaceOnWorker: vi.fn(),
 }));
 
 const deliverOutboundMessageMock = vi.fn();

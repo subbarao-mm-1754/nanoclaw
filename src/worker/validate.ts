@@ -81,6 +81,29 @@ function parseProcessOptions(root: Record<string, unknown>): WorkerProcessMessag
     }
     options.run_container = opts.run_container;
   }
+  if (opts.async !== undefined) {
+    if (typeof opts.async !== 'boolean') {
+      throw new WorkerValidationError('body.options.async must be a boolean');
+    }
+    options.async = opts.async;
+  }
+  if (opts.callback_url !== undefined) {
+    if (typeof opts.callback_url !== 'string' || opts.callback_url.trim() === '') {
+      throw new WorkerValidationError('body.options.callback_url must be a non-empty string');
+    }
+    try {
+      const url = new URL(opts.callback_url);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error('bad protocol');
+      }
+    } catch {
+      throw new WorkerValidationError('body.options.callback_url must be a valid http(s) URL');
+    }
+    options.callback_url = opts.callback_url.trim();
+  }
+  if (options.async && !options.callback_url) {
+    throw new WorkerValidationError('body.options.callback_url is required when options.async is true');
+  }
   return options;
 }
 
@@ -184,6 +207,10 @@ export function parseProcessMessageRequest(body: unknown): WorkerProcessMessageR
 
   return {
     job_id: jobId,
+    build_job_id:
+      typeof root.build_job_id === 'string' && root.build_job_id.trim() !== ''
+        ? root.build_job_id.trim()
+        : undefined,
     workspace_id: workspaceId,
     session: { id: sessionId, agent_group_id: agentGroupId },
     delivery: {
@@ -202,4 +229,17 @@ export function parseProcessMessageRequest(body: unknown): WorkerProcessMessageR
     },
     options: parseProcessOptions(root),
   };
+}
+
+export function parseDestroyWorkspaceRequest(body: unknown): {
+  workspace_id: string;
+  session_id?: string;
+} {
+  const root = requireObject(body, 'body');
+  const workspaceId = requireString(root, 'workspace_id', 'body');
+  let sessionId: string | undefined;
+  if (root.session_id !== undefined) {
+    sessionId = requireString(root, 'session_id', 'body');
+  }
+  return { workspace_id: workspaceId, session_id: sessionId };
 }

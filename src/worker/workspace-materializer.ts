@@ -76,9 +76,9 @@ export function materializeWorkspace(
   });
 
   return {
-    workspaceRoot,
-    groupDir,
-    claudeSharedDir,
+    root: workspaceRoot,
+    group_dir: groupDir,
+    claude_shared_dir: claudeSharedDir,
     containerConfig,
     filesWritten,
   };

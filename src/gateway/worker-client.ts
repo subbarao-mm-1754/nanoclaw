@@ -1,4 +1,5 @@
 import {
+  GATEWAY_PUBLIC_URL,
   GATEWAY_WORKER_URL,
   WORKER_AUTH_TOKEN,
   WORKER_JOB_TIMEOUT_MS,
@@ -57,6 +58,46 @@ export async function processMessageOnWorker(
   }
 }
 
+/**
+ * Enqueue a Worker run asynchronously. Worker returns 202 immediately and later
+ * POSTs the result to the Gateway callback URL.
+ */
+export async function enqueueProcessMessageOnWorker(
+  payload: WorkerProcessMessageRequest,
+  buildJobId: string,
+): Promise<{ run_id: string; status: 'accepted' }> {
+  const callbackUrl = `${GATEWAY_PUBLIC_URL.replace(/\/$/, '')}/v1/worker/callbacks/run-result`;
+  const body = {
+    ...payload,
+    build_job_id: buildJobId,
+    options: {
+      ...payload.options,
+      async: true,
+      callback_url: callbackUrl,
+    },
+  };
+
+  const res = await fetch(`${GATEWAY_WORKER_URL}/v1/jobs/process-message`, {
+    method: 'POST',
+    headers: workerHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let parsed: { job_id?: string; status?: string; error?: string };
+  try {
+    parsed = JSON.parse(text) as { job_id?: string; status?: string; error?: string };
+  } catch {
+    throw new Error(`Worker returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+  }
+
+  if (res.status !== 202 && !res.ok) {
+    throw new Error(parsed.error || `Worker HTTP ${res.status}`);
+  }
+
+  return { run_id: parsed.job_id || payload.job_id, status: 'accepted' };
+}
+
 export async function prepareWorkspaceOnWorker(
   payload: WorkerPrepareWorkspaceRequest,
 ): Promise<WorkerPrepareWorkspaceResponse> {
@@ -86,6 +127,29 @@ export async function prepareWorkspaceOnWorker(
     return body;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+export async function destroyWorkspaceOnWorker(input: {
+  workspace_id: string;
+  session_id?: string;
+}): Promise<void> {
+  const res = await fetch(`${GATEWAY_WORKER_URL}/v1/workspaces/destroy`, {
+    method: 'POST',
+    headers: workerHeaders(),
+    body: JSON.stringify(input),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let error = `Worker HTTP ${res.status}`;
+    try {
+      const body = JSON.parse(text) as { error?: string };
+      if (body.error) error = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(error);
   }
 }
 

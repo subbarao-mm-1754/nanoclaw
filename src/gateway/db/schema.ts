@@ -29,6 +29,33 @@ function migrateGatewaySchema(db: Database.Database): void {
       db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN container_config_json TEXT`);
     }
   }
+
+  if (tableExists(db, 'build_jobs')) {
+    if (!columnExists(db, 'build_jobs', 'delivery_channel_type')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN delivery_channel_type TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'delivery_platform_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN delivery_platform_id TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'delivery_thread_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN delivery_thread_id TEXT`);
+    }
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_channel_identities (
+      channel_type  TEXT NOT NULL,
+      sender_id     TEXT NOT NULL,
+      user_id       TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      display_name  TEXT,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL,
+      PRIMARY KEY (channel_type, sender_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_channel_identities_user
+      ON gateway_channel_identities(user_id);
+  `);
 }
 
 /** Create the full gateway database schema (idempotent — safe on existing gateway.db). */
@@ -142,6 +169,63 @@ export function initGatewaySchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_http_responses_platform
       ON http_responses(platform_id, created_at);
+
+    -- One agent build = one job (unique id, never reused). Messages and Worker
+    -- runs hang off the job; the job stays open across clarifying Q&A.
+    CREATE TABLE IF NOT EXISTS build_jobs (
+      id                       TEXT PRIMARY KEY,
+      user_id                  TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      status                   TEXT NOT NULL CHECK(status IN (
+                                 'in_progress', 'waiting_for_user', 'completed', 'failed'
+                               )),
+      title                    TEXT,
+      builder_workspace_id     TEXT NOT NULL,
+      builder_agent_group_id   TEXT NOT NULL,
+      builder_session_id       TEXT NOT NULL,
+      result_workspace_id      TEXT,
+      result_agent_group_id    TEXT,
+      delivery_channel_type    TEXT,
+      delivery_platform_id     TEXT,
+      delivery_thread_id       TEXT,
+      error                    TEXT,
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_build_jobs_user
+      ON build_jobs(user_id, updated_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_build_jobs_user_active
+      ON build_jobs(user_id)
+      WHERE status IN ('in_progress', 'waiting_for_user');
+
+    CREATE TABLE IF NOT EXISTS build_messages (
+      id            TEXT PRIMARY KEY,
+      job_id        TEXT NOT NULL REFERENCES build_jobs(id) ON DELETE CASCADE,
+      direction     TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
+      role          TEXT NOT NULL CHECK(role IN ('user', 'builder', 'system')),
+      content_json  TEXT NOT NULL,
+      run_id        TEXT,
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_build_messages_job
+      ON build_messages(job_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS build_runs (
+      id             TEXT PRIMARY KEY,
+      job_id         TEXT NOT NULL REFERENCES build_jobs(id) ON DELETE CASCADE,
+      status         TEXT NOT NULL CHECK(status IN (
+                       'accepted', 'running', 'completed', 'failed'
+                     )),
+      worker_status  TEXT,
+      error          TEXT,
+      created_at     TEXT NOT NULL,
+      updated_at     TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_build_runs_job
+      ON build_runs(job_id, created_at);
   `);
 
   migrateGatewaySchema(db);

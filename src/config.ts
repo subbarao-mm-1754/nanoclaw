@@ -85,6 +85,9 @@ export const GATEWAY_DB_PATH =
   process.env.GATEWAY_DB_PATH || path.resolve(DATA_DIR, 'gateway.db');
 export const GATEWAY_WORKER_URL =
   process.env.GATEWAY_WORKER_URL || `http://${WORKER_HOST}:${WORKER_PORT}`;
+/** Base URL the Worker uses to POST run callbacks back to the Gateway. */
+export const GATEWAY_PUBLIC_URL =
+  process.env.GATEWAY_PUBLIC_URL || `http://${GATEWAY_HOST}:${GATEWAY_PORT}`;
 export const GATEWAY_PROCESS_INTERVAL_MS = parseInt(process.env.GATEWAY_PROCESS_INTERVAL_MS || '1000', 10);
 export const GATEWAY_DEFAULT_WORKSPACE_ID = process.env.GATEWAY_DEFAULT_WORKSPACE_ID || '';
 export const GATEWAY_DEFAULT_AGENT_GROUP_ID = process.env.GATEWAY_DEFAULT_AGENT_GROUP_ID || '';
