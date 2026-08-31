@@ -114,3 +114,54 @@ export function getConversation(id: string): Conversation | null {
     .get(id) as Record<string, unknown> | undefined;
   return row ? rowToConversation(row) : null;
 }
+
+/**
+ * Bind (or create) this channel chat to a specific agent workspace.
+ * Uses a fresh session id so context from a previous agent does not carry over.
+ */
+export function setConversationWorkspace(input: {
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  workspace_id: string;
+  display_name?: string;
+}): Conversation {
+  const workspace = getWorkspace(input.workspace_id);
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${input.workspace_id}`);
+  }
+
+  const existing = findConversation(input.channel_type, input.platform_id, input.thread_id);
+  const ts = now();
+
+  if (existing) {
+    const sessionId = `sess-${existing.id}-${workspace.workspace_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}`;
+    getGatewayDb()
+      .prepare(
+        `UPDATE conversations SET
+           workspace_id = ?,
+           agent_group_id = ?,
+           session_id = ?,
+           display_name = COALESCE(?, display_name),
+           updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(
+        workspace.workspace_id,
+        workspace.agent_group_id,
+        sessionId,
+        input.display_name ?? null,
+        ts,
+        existing.id,
+      );
+    return getConversation(existing.id)!;
+  }
+
+  return getOrCreateConversation({
+    channel_type: input.channel_type,
+    platform_id: input.platform_id,
+    thread_id: input.thread_id,
+    workspace_id: workspace.workspace_id,
+    display_name: input.display_name,
+  });
+}

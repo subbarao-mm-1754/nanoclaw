@@ -12,10 +12,12 @@ import {
   getBuildRun,
   insertBuildMessage,
   listBuildJobsForUser,
+  listBuildMessages,
   updateBuildJobStatus,
   updateBuildRun,
 } from '../store/builds.js';
 import { getWorkspace, registerWorkspace } from '../store/workspaces.js';
+import { setConversationWorkspace } from '../store/conversations.js';
 import type {
   BuildJob,
   BuildJobDetail,
@@ -31,7 +33,14 @@ import {
 } from '../worker-client.js';
 import type { WorkerProcessMessageResponse } from '../../worker/types.js';
 import { builderAgentFiles } from './prompt.js';
-import { parseBuildResultFromOutbound, stripBuildFence } from './parse-result.js';
+import {
+  filesFromMemoryPatch,
+  looksLikeUnregisteredCompletion,
+  parseBuildResultFromOutbound,
+  parseBuildResultFromText,
+  stripBuildFence,
+} from './parse-result.js';
+import type { ParsedBuildResult } from '../types.js';
 
 const BUILDER_NAME = 'Agent Builder';
 
@@ -63,7 +72,10 @@ export class BuildError extends Error {
   }
 }
 
-export async function ensureBuilderWorkspace(user: GatewayUser): Promise<{
+export async function ensureBuilderWorkspace(
+  user: GatewayUser,
+  options?: { forceReplace?: boolean },
+): Promise<{
   workspace_id: string;
   agent_group_id: string;
 }> {
@@ -71,19 +83,29 @@ export async function ensureBuilderWorkspace(user: GatewayUser): Promise<{
   const agentGroupId = builderAgentGroupId(user.id);
   const files = builderAgentFiles();
   const containerConfig = defaultContainerConfig(BUILDER_NAME);
+  const forceReplace = options?.forceReplace === true;
 
-  await prepareWorkspaceOnWorker({
-    workspace_id: workspaceId,
-    agent: {
-      agent_group_id: agentGroupId,
-      name: BUILDER_NAME,
-      folder: `builder-${user.id}`,
-      container_config: containerConfig,
-      cli_scope: 'group',
-      files,
-    },
-    options: { replace: true },
-  });
+  try {
+    await prepareWorkspaceOnWorker({
+      workspace_id: workspaceId,
+      agent: {
+        agent_group_id: agentGroupId,
+        name: BUILDER_NAME,
+        folder: `builder-${user.id}`,
+        container_config: containerConfig,
+        cli_scope: 'group',
+        files,
+      },
+      options: { replace: forceReplace },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!forceReplace && /already exists/i.test(message)) {
+      // Keep existing on-disk builder workspace between turns.
+    } else {
+      throw err;
+    }
+  }
 
   if (!getWorkspace(workspaceId)) {
     registerWorkspace({
@@ -145,6 +167,9 @@ async function deliverBuildText(job: BuildJob, text: string): Promise<void> {
 }
 
 async function startRun(job: BuildJob, inboundMessage: BuildMessage, user: GatewayUser): Promise<BuildRun> {
+  // Recreate builder workspace if it was deleted from disk (e.g. wiped worker-workspaces/).
+  await ensureBuilderWorkspace(user);
+
   const runId = generateId('run');
   createBuildRun({ id: runId, job_id: job.id });
   updateBuildJobStatus(job.id, 'in_progress');
@@ -212,7 +237,7 @@ export async function startBuild(
     );
   }
 
-  const builder = await ensureBuilderWorkspace(user);
+  const builder = await ensureBuilderWorkspace(user, { forceReplace: true });
   const jobId = generateId('job');
   const job = createBuildJob({
     id: jobId,
@@ -292,6 +317,44 @@ export async function cancelBuild(user: GatewayUser, jobId?: string): Promise<Bu
   return getBuildJobDetail(job.id)!;
 }
 
+/**
+ * Re-parse the latest builder messages for a completed nanoclaw-build block and
+ * register the agent. Used when the block was emitted but an older parser missed
+ * it (e.g. nested ``` inside file content), or via `/register`.
+ */
+export async function registerBuildFromStoredMessages(
+  user: GatewayUser,
+  jobId?: string,
+): Promise<BuildJobDetail> {
+  const job = jobId ? getBuildJobForUser(jobId, user.id) : getActiveBuildJobForUser(user.id);
+  if (!job) throw new BuildError('No active build to register', 404);
+  if (job.status === 'completed') return getBuildJobDetail(job.id)!;
+  if (job.status === 'failed') {
+    throw new BuildError('Build already failed — start a new one with `/build …`.', 409);
+  }
+
+  const messages = listBuildMessages(job.id);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]!;
+    if (msg.role !== 'builder') continue;
+    const text =
+      typeof msg.content.raw_text === 'string'
+        ? msg.content.raw_text
+        : typeof msg.content.text === 'string'
+          ? msg.content.text
+          : '';
+    const parsed = parseBuildResultFromText(text);
+    if (parsed?.status === 'completed' && parsed.files && parsed.files.length > 0) {
+      await finalizeCompletedBuild(job, parsed);
+      return getBuildJobDetail(job.id)!;
+    }
+  }
+
+  throw new BuildError(
+    'No completed nanoclaw-build block with files found yet. Ask the builder to emit one, or reply "Register it now".',
+  );
+}
+
 export function getBuild(user: GatewayUser, jobId: string): BuildJobDetail {
   const job = getBuildJobForUser(jobId, user.id);
   if (!job) throw new BuildError('Build job not found', 404);
@@ -319,13 +382,17 @@ async function cleanupBuilder(job: BuildJob): Promise<void> {
 
 async function finalizeCompletedBuild(
   job: BuildJob,
-  parsed: NonNullable<ReturnType<typeof parseBuildResultFromOutbound>>,
+  parsed: ParsedBuildResult,
 ): Promise<GatewayAgent | null> {
-  if (!parsed.files || parsed.files.length === 0) {
+  let files = parsed.files ?? [];
+  if (files.length === 0) {
     updateBuildJobStatus(job.id, 'failed', {
       error: 'Builder marked completed but returned no agent files',
     });
-    await deliverBuildText(job, 'Build failed: no agent files were produced.');
+    await deliverBuildText(
+      job,
+      'Build failed: no agent files were produced. Start again with `/build …` and make sure the final reply includes a ```nanoclaw-build completed block with files.',
+    );
     await cleanupBuilder(job);
     return null;
   }
@@ -334,7 +401,7 @@ async function finalizeCompletedBuild(
   const agent = await createAgent({
     name: agentName,
     owner_user_id: job.user_id,
-    files: parsed.files,
+    files,
     is_default: false,
   });
 
@@ -344,7 +411,32 @@ async function finalizeCompletedBuild(
     title: agentName,
   });
 
-  const doneText = `Agent "${agentName}" created. Further messages in this chat go to your agents (not the builder). Start another with \`/build …\`.`;
+  // Bind this channel chat to the new agent so the next message goes there.
+  if (job.delivery_channel_type && job.delivery_platform_id) {
+    try {
+      setConversationWorkspace({
+        channel_type: job.delivery_channel_type,
+        platform_id: job.delivery_platform_id,
+        thread_id: job.delivery_thread_id,
+        workspace_id: agent.workspace_id,
+      });
+    } catch (err) {
+      log.warn('Failed to bind chat to newly built agent', {
+        jobId: job.id,
+        workspaceId: agent.workspace_id,
+        err,
+      });
+    }
+  }
+
+  const doneText = [
+    `Agent "${agentName}" created and this chat is now using it.`,
+    `id: \`${agent.workspace_id}\``,
+    '',
+    'Next messages here go to this agent. Switch later with `/agents` and `/use <name>`.',
+    'Build another with `/build …`.',
+  ].join('\n');
+
   insertBuildMessage({
     id: generateId('bmsg'),
     job_id: job.id,
@@ -405,10 +497,12 @@ export async function handleBuilderRunCallback(
   updateBuildRun(runId, 'completed', { worker_status: result.status });
 
   const outbound = result.outbound ?? [];
+  const outboundTexts: string[] = [];
   for (const out of outbound) {
     const rawText =
       typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
     const displayText = stripBuildFence(rawText) || rawText;
+    outboundTexts.push(rawText);
     insertBuildMessage({
       id: generateId('bmsg'),
       job_id: detail.id,
@@ -420,10 +514,28 @@ export async function handleBuilderRunCallback(
     await deliverBuildText(detail, displayText);
   }
 
-  const parsed = parseBuildResultFromOutbound(outbound);
+  let parsed = parseBuildResultFromOutbound(outbound);
+  const patchFiles = filesFromMemoryPatch(result.memory_patch);
+
+  if (parsed?.status === 'completed' && (!parsed.files || parsed.files.length === 0) && patchFiles.length > 0) {
+    parsed = { ...parsed, files: patchFiles };
+  }
 
   if (!parsed) {
     updateBuildJobStatus(detail.id, 'waiting_for_user');
+    if (outboundTexts.some((t) => looksLikeUnregisteredCompletion(t))) {
+      const nudge =
+        'I described the agent, but it is **not registered yet** — `/agents` will stay empty until I emit a final ```nanoclaw-build block with `"status":"completed"` and the full `files` (at least `CLAUDE.local.md`).\n\nReply: **Register it now** (and include that block).';
+      insertBuildMessage({
+        id: generateId('bmsg'),
+        job_id: detail.id,
+        direction: 'outbound',
+        role: 'system',
+        content: { text: nudge },
+        run_id: runId,
+      });
+      await deliverBuildText(detail, nudge);
+    }
     return;
   }
 
@@ -441,8 +553,6 @@ export async function handleBuilderRunCallback(
   }
 
   if (parsed.status === 'completed') {
-    // System completion notice is delivered inside finalizeCompletedBuild.
-    // Avoid double-sending if builder already included human text above.
     await finalizeCompletedBuild(detail, parsed);
   }
 }

@@ -14,15 +14,29 @@ export function builderAgentFiles(): GatewayAgentFile[] {
 You help the user design a NanoClaw agent. Ask clarifying questions when needed.
 When you have enough detail, produce the agent definition files.
 
+## Critical: how registration works
+
+The Gateway **only** creates the user agent when your reply includes a valid
+\`\`\`nanoclaw-build\`\`\` block with \`"status":"completed"\` and a non-empty \`files\`
+array. Human text like "Done", "ready to register", or "the agent is defined"
+does **nothing** by itself — without that block, no agent is stored and
+\`/agents\` will stay empty.
+
 ## Conversation rules
 
 - Keep questions short and specific.
 - You may send progress updates while working.
 - Do not invent credentials or ask the user for API keys in chat.
+- Do **not** claim the agent is registered/created until you emit \`status: completed\`.
 
 ## Output protocol (required)
 
-Every reply must end with exactly one fenced JSON block tagged \`nanoclaw-build\`:
+Every reply must end with exactly one fenced JSON block tagged \`nanoclaw-build\`.
+
+**Important for file contents:** inside \`files[].content\`, do **not** use triple
+backticks. If you need to show an example code block in the agent instructions,
+write it as indented monospace or say "use a fenced code block" in words.
+Nested \`\`\` inside the JSON breaks some chat renderers.
 
 \`\`\`nanoclaw-build
 {
@@ -37,11 +51,12 @@ Every reply must end with exactly one fenced JSON block tagged \`nanoclaw-build\
 
 Status meanings:
 - \`needs_input\` — you asked the user something; wait for their next message
-- \`progress\` — status update only; you are still working this turn (rare; prefer needs_input or completed)
-- \`completed\` — build is done; \`files\` must include at least \`CLAUDE.local.md\`
+- \`progress\` — status update only; still working this turn
+- \`completed\` — build is done; \`files\` MUST include at least \`CLAUDE.local.md\` with the **full** file body (not a summary). Prefer a short human note above the fence, then the fence.
 - \`failed\` — cannot complete; include \`error\`
 
-When \`status\` is \`completed\`, \`files\` is the full agent file set the gateway will register.
+When completing, put the entire agent instructions in \`files[].content\`. Do not
+omit the fence. Do not say "ready to register" instead of emitting \`completed\`.
 `,
     },
   ];

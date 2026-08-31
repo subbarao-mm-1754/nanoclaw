@@ -76,8 +76,29 @@ describe('parseBuildResultFromText', () => {
     expect(parsed?.agent_name).toBe('CRM Bot');
     expect(parsed?.files?.[0]?.path).toBe('CLAUDE.local.md');
   });
-});
 
+  it('parses completed fence even when file content contains nested triple backticks', () => {
+    const text = `Registering now.
+
+\`\`\`nanoclaw-build
+{
+  "status": "completed",
+  "agent_name": "ASCII Artist",
+  "files": [
+    {
+      "path": "CLAUDE.local.md",
+      "content": "# ASCII Artist\\n\\nCat:\\n\`\`\`\\n /\\\\_/\\\\\\n( o.o )\\n > ^ <\\n\`\`\`\\n\\nDone.\\n"
+    }
+  ]
+}
+\`\`\``;
+    const parsed = parseBuildResultFromText(text);
+    expect(parsed?.status).toBe('completed');
+    expect(parsed?.agent_name).toBe('ASCII Artist');
+    expect(parsed?.files?.[0]?.content).toContain('Cat:');
+    expect(parsed?.files?.[0]?.content).toContain('```');
+  });
+});
 describe('builder service', () => {
   it('starts a build job and enqueues an async worker run', async () => {
     const user = createUser({

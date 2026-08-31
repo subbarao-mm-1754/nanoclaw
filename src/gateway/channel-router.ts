@@ -4,10 +4,17 @@ import {
   BuildError,
   cancelBuild,
   continueBuild,
+  registerBuildFromStoredMessages,
   startBuild,
 } from './builder/service.js';
+import {
+  AgentResolveError,
+  formatAgentsForUser,
+  resolveUserAgent,
+} from './store/agent-select.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
+import { setConversationWorkspace } from './store/conversations.js';
 import type { GatewayUser } from './types.js';
 
 export const BUILD_HELP_TEXT = [
@@ -17,14 +24,22 @@ export const BUILD_HELP_TEXT = [
   '• `/build <what you want>` — start the Agent Builder',
   '• While a build is waiting for you — just reply normally (no command)',
   '• `/cancel` — cancel the active build',
+  '• `/chat` — cancel any active build and switch to user-agent mode',
+  '• `/agents` — list your user agents (marks which is active in this chat)',
+  '• `/use <name or id>` — bind this chat to a user agent',
+  '• `/register` — if the builder already emitted a completed block, force Gateway to create the agent',
   '• `/help` — show this help',
   '',
-  'Anything else (when no build is active) goes to your user agent.',
+  'Anything else (when no build is active) goes to the agent bound to this chat.',
 ].join('\n');
 
 export type ChannelRouteResult =
-  | { kind: 'builder'; action: 'started' | 'continued' | 'cancelled' | 'busy' | 'help'; jobId?: string }
-  | { kind: 'agent' };
+  | {
+      kind: 'builder';
+      action: 'started' | 'continued' | 'cancelled' | 'busy' | 'help' | 'agents' | 'use' | 'register';
+      jobId?: string;
+    }
+  | { kind: 'agent'; content?: unknown };
 
 function extractText(content: unknown): string {
   if (!content || typeof content !== 'object') return '';
@@ -72,12 +87,6 @@ async function replyToChannel(
 
 /**
  * Decide whether a channel message belongs to the builder or the user agent.
- *
- * Differentiation (same Cliq chat):
- * - `/build …` starts builder
- * - active build in waiting_for_user → continue builder
- * - `/cancel` cancels builder
- * - otherwise → user agent path
  */
 export async function routeChannelInbound(input: {
   channel_type: string;
@@ -112,6 +121,72 @@ export async function routeChannelInbound(input: {
     return { kind: 'builder', action: 'help' };
   }
 
+  if (lower === '/agents' || lower === '/agent' || lower === '/list') {
+    await replyToChannel(
+      input.channel_type,
+      input.platform_id,
+      input.thread_id,
+      formatAgentsForUser(user, input.channel_type, input.platform_id, input.thread_id),
+    );
+    return { kind: 'builder', action: 'agents' };
+  }
+
+  if (lower === '/register') {
+    try {
+      const job = await registerBuildFromStoredMessages(user);
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        job.status === 'completed'
+          ? `Registered. This chat should now use "${job.title ?? 'your agent'}". Try \`/agents\`.`
+          : `Build status is now ${job.status}.`,
+      );
+      return { kind: 'builder', action: 'register', jobId: job.id };
+    } catch (err) {
+      const message = err instanceof BuildError ? err.message : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help' };
+    }
+  }
+
+  const useMatch = text.match(/^\/use(?:\s+|:)([\s\S]+)$/i);
+  if (lower === '/use' || useMatch) {
+    const query = useMatch?.[1]?.trim() ?? '';
+    if (!query) {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        'Usage: `/use <agent name or workspace id>`\n\n' +
+          formatAgentsForUser(user, input.channel_type, input.platform_id, input.thread_id),
+      );
+      return { kind: 'builder', action: 'help' };
+    }
+
+    try {
+      const agent = resolveUserAgent(user.id, query);
+      setConversationWorkspace({
+        channel_type: input.channel_type,
+        platform_id: input.platform_id,
+        thread_id: input.thread_id,
+        workspace_id: agent.workspace_id,
+        display_name: displayName,
+      });
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        `This chat is now using agent "${agent.name}" (\`${agent.workspace_id}\`). Send a normal message to talk to it.`,
+      );
+      return { kind: 'builder', action: 'use' };
+    } catch (err) {
+      const message = err instanceof AgentResolveError ? err.message : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help' };
+    }
+  }
+
   if (lower === '/cancel' || lower.startsWith('/cancel ')) {
     try {
       const job = await cancelBuild(user);
@@ -121,6 +196,32 @@ export async function routeChannelInbound(input: {
       await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
       return { kind: 'builder', action: 'cancelled' };
     }
+  }
+
+  if (lower === '/chat' || lower.startsWith('/chat ')) {
+    const active = getActiveBuildJobForUser(user.id);
+    if (active) {
+      try {
+        await cancelBuild(user);
+      } catch {
+        /* ignore */
+      }
+    }
+    const rest = text.replace(/^\/chat\s*/i, '').trim();
+    if (!rest) {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        'User-agent mode. Send your next message normally, or `/agents` / `/use <name>` to pick an agent.',
+      );
+      return { kind: 'builder', action: 'cancelled', jobId: active?.id };
+    }
+    const content =
+      typeof input.content === 'object' && input.content
+        ? { ...(input.content as Record<string, unknown>), text: rest }
+        : { text: rest };
+    return { kind: 'agent', content };
   }
 
   const buildMatch = text.match(/^\/build(?:\s+|:)([\s\S]+)$/i);

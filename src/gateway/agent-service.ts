@@ -1,4 +1,5 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
+import { log } from '../log.js';
 import { generateId, slugifyName } from './auth.js';
 import type { GatewayAgent, GatewayAgentFile } from './types.js';
 import { prepareWorkspaceOnWorker } from './worker-client.js';
@@ -9,7 +10,7 @@ import {
   updateAgentFilesRecord,
   updateAgentMetadata,
 } from './store/agents.js';
-import { defaultContainerConfig } from './store/agent-files.js';
+import { defaultContainerConfig, listAgentFiles } from './store/agent-files.js';
 import { getWorkspace } from './store/workspaces.js';
 
 function buildPreparePayload(
@@ -36,6 +37,36 @@ function buildPreparePayload(
     },
     options: { replace },
   };
+}
+
+function isAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /already exists/i.test(message);
+}
+
+/**
+ * Ensure the Worker has an on-disk workspace for this agent.
+ * Creates from Gateway DB files when missing (e.g. after deleting worker-workspaces/).
+ * No-op if the workspace already exists on the Worker.
+ */
+export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void> {
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) {
+    throw new Error(`Gateway workspace not found: ${workspaceId}`);
+  }
+
+  let files = listAgentFiles(workspaceId);
+  if (files.length === 0) {
+    files = [{ path: 'CLAUDE.local.md', content: `# ${workspace.name}\n` }];
+  }
+
+  try {
+    await prepareWorkspaceOnWorker(buildPreparePayload(workspace, files, false));
+    log.info('Worker workspace prepared (was missing)', { workspaceId });
+  } catch (err) {
+    if (isAlreadyExistsError(err)) return;
+    throw err;
+  }
 }
 
 export async function createAgent(input: {

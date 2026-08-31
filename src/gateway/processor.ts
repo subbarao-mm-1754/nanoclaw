@@ -1,6 +1,7 @@
 import { log } from '../log.js';
 import { sessionInboundMessageId } from '../session-message-id.js';
 import { workerWorkspacePaths } from '../worker/workspace-store.js';
+import { ensureWorkspaceOnWorker } from './agent-service.js';
 import { applyMemoryPatch, deliverOutboundMessage } from './delivery.js';
 import { getConversation } from './store/conversations.js';
 import {
@@ -59,6 +60,9 @@ async function processOneInbound(): Promise<boolean> {
   };
 
   try {
+    // Recreate on-disk workspace from Gateway DB if it was deleted.
+    await ensureWorkspaceOnWorker(conversation.workspace_id);
+
     const result = await processMessageOnWorker(payload);
     updateMessageStatus(inbound.id, 'processing', {
       worker_job_id: jobId,
