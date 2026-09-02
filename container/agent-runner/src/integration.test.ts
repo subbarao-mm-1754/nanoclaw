@@ -113,20 +113,41 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text produces no outbound messages (scratchpad only)', async () => {
+  it('bare text auto-delivers when there is a single destination', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    // Agent responds with bare text — no <message to="..."> wrapping
     const provider = new MockProvider({}, () => 'I am thinking about this...');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
-    // Wait long enough for the poll loop to process
-    await sleep(1000);
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(0);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('I am thinking about this...');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('bare text produces no outbound when multiple destinations exist', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('slack-test', 'Slack Test', 'channel', 'slack', 'chan-2', NULL)`,
+      )
+      .run();
+
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new MockProvider({}, () => 'I am thinking about this...');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await sleep(1000);
+    controller.abort();
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
 
     await loopPromise.catch(() => {});
   });

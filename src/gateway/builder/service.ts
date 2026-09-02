@@ -7,6 +7,7 @@ import {
   createBuildJob,
   createBuildRun,
   getActiveBuildJobForUser,
+  getBuildJob,
   getBuildJobDetail,
   getBuildJobForUser,
   getBuildRun,
@@ -404,6 +405,27 @@ async function finalizeCompletedBuild(
     files,
     is_default: false,
   });
+
+  // Attach remote MCP authorized during the build (Zoho-hosted URL, etc.).
+  const freshJob = getBuildJob(job.id) ?? job;
+  if (freshJob.pending_connection_id) {
+    try {
+      const { applyBuildPendingMcpToAgent } = await import('../integrations/broker.js');
+      const { ensureWorkspaceOnWorker } = await import('../agent-service.js');
+      await applyBuildPendingMcpToAgent(
+        freshJob,
+        agent.workspace_id,
+        agent.agent_group_id,
+      );
+      await ensureWorkspaceOnWorker(agent.workspace_id);
+    } catch (err) {
+      log.warn('Failed to attach pending MCP to new agent', {
+        jobId: job.id,
+        workspaceId: agent.workspace_id,
+        err,
+      });
+    }
+  }
 
   updateBuildJobStatus(job.id, 'completed', {
     result_workspace_id: agent.workspace_id,

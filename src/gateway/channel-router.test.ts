@@ -10,6 +10,9 @@ const enqueueProcessMessageOnWorkerMock = vi.fn();
 const destroyWorkspaceOnWorkerMock = vi.fn();
 const createAgentMock = vi.fn();
 const deliverMock = vi.fn();
+const { startOAuthConnectMock } = vi.hoisted(() => ({
+  startOAuthConnectMock: vi.fn(),
+}));
 
 vi.mock('./worker-client.js', () => ({
   prepareWorkspaceOnWorker: (...args: unknown[]) => prepareWorkspaceOnWorkerMock(...args),
@@ -20,7 +23,16 @@ vi.mock('./worker-client.js', () => ({
 
 vi.mock('./agent-service.js', () => ({
   createAgent: (...args: unknown[]) => createAgentMock(...args),
+  ensureWorkspaceOnWorker: vi.fn(async () => undefined),
 }));
+
+vi.mock('./integrations/broker.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./integrations/broker.js')>();
+  return {
+    ...actual,
+    startOAuthConnect: (...args: unknown[]) => startOAuthConnectMock(...args),
+  };
+});
 
 vi.mock('../channels/channel-registry.js', () => ({
   getChannelAdapter: () => ({
@@ -35,6 +47,7 @@ beforeEach(() => {
   destroyWorkspaceOnWorkerMock.mockReset();
   createAgentMock.mockReset();
   deliverMock.mockReset();
+  startOAuthConnectMock.mockReset();
 
   prepareWorkspaceOnWorkerMock.mockResolvedValue({
     workspace_id: 'ws-builder',
@@ -45,6 +58,13 @@ beforeEach(() => {
   enqueueProcessMessageOnWorkerMock.mockResolvedValue({ run_id: 'run-1', status: 'accepted' });
   destroyWorkspaceOnWorkerMock.mockResolvedValue(undefined);
   deliverMock.mockResolvedValue(undefined);
+  startOAuthConnectMock.mockResolvedValue({
+    authorize_url: 'https://accounts.zoho.in/oauth/v2/auth?state=test',
+    connection_id: 'conn-1',
+    state: 'test',
+    provider: 'zoho-hosted',
+    mcp_url: 'https://example.zohomcp.com/mcp/KEY/message',
+  });
   createAgentMock.mockResolvedValue({
     workspace_id: 'ws-result',
     agent_group_id: 'ag-result',
@@ -182,5 +202,85 @@ describe('routeChannelInbound', () => {
       true,
     );
     expect(BUILD_HELP_TEXT).toContain('/build');
+    expect(BUILD_HELP_TEXT).toContain('MCP URL');
+  });
+
+  it('starts OAuth when /build includes a Zoho MCP URL', async () => {
+    const mcp =
+      'https://mail-mcp.zohomcp.com/mcp/message?key=abc123';
+    const result = await routeChannelInbound({
+      ...base,
+      content: {
+        text: `/build CRM agent that uses ${mcp}`,
+        senderId: 'zoho-cliq:u5',
+        sender: 'Eve',
+      },
+    });
+
+    expect(result.kind).toBe('builder');
+    if (result.kind !== 'builder') return;
+    expect(result.action).toBe('started');
+    expect(startOAuthConnectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mcpUrl: expect.stringContaining('zohomcp.com'),
+        buildJobId: result.jobId,
+      }),
+    );
+    const oauthReply = deliverMock.mock.calls.some((c) =>
+      String(c[2]?.content?.text ?? '').includes('Open this link:'),
+    );
+    expect(oauthReply).toBe(true);
+  });
+
+  it('starts OAuth on /mcp during a waiting build without enqueueing builder', async () => {
+    const started = await routeChannelInbound({
+      ...base,
+      content: { text: '/build Make a mail bot', senderId: 'zoho-cliq:u6', sender: 'Fay' },
+    });
+    expect(started.kind).toBe('builder');
+    if (started.kind !== 'builder' || !started.jobId) throw new Error('expected job');
+
+    const runId = enqueueProcessMessageOnWorkerMock.mock.calls[0]![0].job_id as string;
+    await handleBuilderRunCallback({
+      job_id: runId,
+      build_job_id: started.jobId,
+      status: 'completed',
+      workspace_id: 'ws-builder',
+      session: { id: 's', agent_group_id: 'ag' },
+      workspace: { root: '', group_dir: '', claude_shared_dir: '' },
+      session_paths: { inbound_db: '', outbound_db: '' },
+      inbound_message_id: 'm1',
+      outbound: [
+        {
+          id: 'o1',
+          kind: 'chat',
+          channel_type: 'zoho-cliq',
+          platform_id: base.platform_id,
+          thread_id: null,
+          content: { text: 'Paste MCP?\n\n```nanoclaw-build\n{"status":"needs_input"}\n```' },
+        },
+      ],
+    });
+
+    enqueueProcessMessageOnWorkerMock.mockClear();
+    startOAuthConnectMock.mockClear();
+    deliverMock.mockClear();
+
+    const continued = await routeChannelInbound({
+      ...base,
+      content: {
+        text: '/mcp https://mail-mcp.zohomcp.com/mcp/message?key=xyz',
+        senderId: 'zoho-cliq:u6',
+        sender: 'Fay',
+      },
+    });
+
+    expect(continued).toEqual({
+      kind: 'builder',
+      action: 'continued',
+      jobId: started.jobId,
+    });
+    expect(startOAuthConnectMock).toHaveBeenCalled();
+    expect(enqueueProcessMessageOnWorkerMock).not.toHaveBeenCalled();
   });
 });

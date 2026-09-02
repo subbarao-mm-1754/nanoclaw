@@ -8,6 +8,14 @@ import {
   startBuild,
 } from './builder/service.js';
 import {
+  IntegrationError,
+  startOAuthConnect,
+} from './integrations/broker.js';
+import {
+  extractPrimaryRemoteMcpUrl,
+  suggestMcpServerName,
+} from './integrations/mcp-url.js';
+import {
   AgentResolveError,
   formatAgentsForUser,
   resolveUserAgent,
@@ -23,6 +31,7 @@ export const BUILD_HELP_TEXT = [
   'Commands:',
   '• `/build <what you want>` — start the Agent Builder',
   '• While a build is waiting for you — just reply normally (no command)',
+  '• Paste a Zoho-managed MCP URL (or `/mcp <url>`) during a build — Gateway sends an authorize link; after you consent, the MCP attaches to the new agent automatically',
   '• `/cancel` — cancel the active build',
   '• `/chat` — cancel any active build and switch to user-agent mode',
   '• `/agents` — list your user agents (marks which is active in this chat)',
@@ -83,6 +92,58 @@ async function replyToChannel(
     kind: 'chat',
     content: { text },
   });
+}
+
+/**
+ * If the message contains a remote MCP URL, start OAuth and tell the user to
+ * open the authorize link. Returns true when a URL was found (OAuth attempted).
+ */
+async function maybeStartBuildMcpOAuth(input: {
+  user: GatewayUser;
+  buildJobId: string;
+  text: string;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+}): Promise<boolean> {
+  const mcpUrl = extractPrimaryRemoteMcpUrl(input.text);
+  if (!mcpUrl) return false;
+
+  try {
+    const result = await startOAuthConnect({
+      userId: input.user.id,
+      mcpUrl,
+      mcpServerName: suggestMcpServerName(mcpUrl),
+      buildJobId: input.buildJobId,
+    });
+    await replyToChannel(
+      input.channel_type,
+      input.platform_id,
+      input.thread_id,
+      [
+        'Remote MCP detected. Complete authorization in your browser, then continue this chat.',
+        '',
+        `Open this link: ${result.authorize_url}`,
+        '',
+        'After you authorize, this MCP will attach automatically when the agent is created.',
+      ].join('\n'),
+    );
+  } catch (err) {
+    const message =
+      err instanceof IntegrationError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    log.warn('Build MCP OAuth start failed', { buildJobId: input.buildJobId, err });
+    await replyToChannel(
+      input.channel_type,
+      input.platform_id,
+      input.thread_id,
+      `Could not start MCP authorization for that URL: ${message}`,
+    );
+  }
+  return true;
 }
 
 /**
@@ -255,6 +316,14 @@ export async function routeChannelInbound(input: {
       input.thread_id,
       'Starting agent build… I’ll ask questions here as needed. Use `/cancel` to stop.',
     );
+    await maybeStartBuildMcpOAuth({
+      user,
+      buildJobId: job.id,
+      text: description,
+      channel_type: input.channel_type,
+      platform_id: input.platform_id,
+      thread_id: input.thread_id,
+    });
     return { kind: 'builder', action: 'started', jobId: job.id };
   }
 
@@ -279,6 +348,18 @@ export async function routeChannelInbound(input: {
           'Send a text reply to continue the build (or `/cancel`).',
         );
         return { kind: 'builder', action: 'help', jobId: active.id };
+      }
+      await maybeStartBuildMcpOAuth({
+        user,
+        buildJobId: active.id,
+        text,
+        channel_type: input.channel_type,
+        platform_id: input.platform_id,
+        thread_id: input.thread_id,
+      });
+      // Pure `/mcp <url>` — only start OAuth; don't bounce the builder.
+      if (/^\/mcp(?:\s|$)/i.test(text)) {
+        return { kind: 'builder', action: 'continued', jobId: active.id };
       }
       await continueBuild(user, active.id, { message: text });
       return { kind: 'builder', action: 'continued', jobId: active.id };

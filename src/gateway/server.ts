@@ -18,6 +18,19 @@ import {
   startBuild,
 } from './builder/service.js';
 import {
+  bindIntegrationToWorkspace,
+  discoverAndRegister,
+  handleOAuthCallback,
+  IntegrationError,
+  listProvidersPublic,
+  listRegistrationsPublic,
+  listUserIntegrations,
+  listWorkspaceIntegrations,
+  preRegisterClient,
+  startOAuthConnect,
+  unbindIntegrationFromWorkspace,
+} from './integrations/broker.js';
+import {
   bearerToken,
   jsonResponse,
   parseAgentFiles,
@@ -308,6 +321,158 @@ function handleListHttpResponses(url: URL, res: http.ServerResponse): void {
   jsonResponse(res, 200, { responses: listHttpResponses(platformId, limit) });
 }
 
+function handleListIntegrationProviders(_req: http.IncomingMessage, res: http.ServerResponse): void {
+  requireUserSession(_req);
+  jsonResponse(res, 200, {
+    providers: listProvidersPublic(),
+    registrations: listRegistrationsPublic(),
+  });
+}
+
+function handleListIntegrations(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, { integrations: listUserIntegrations(user.id) });
+}
+
+async function handleDiscoverRegister(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const mcpUrl = requireString(body, 'mcp_url');
+  const scopes = Array.isArray(body.scopes)
+    ? body.scopes.filter((s): s is string => typeof s === 'string')
+    : undefined;
+  const registration = await discoverAndRegister({ mcpUrl, scopes });
+  jsonResponse(res, 200, { registration });
+}
+
+async function handlePreRegister(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const registration = await preRegisterClient({
+    issuer: requireString(body, 'issuer'),
+    client_id: requireString(body, 'client_id'),
+    client_secret: typeof body.client_secret === 'string' ? body.client_secret : null,
+    mcp_url: typeof body.mcp_url === 'string' ? body.mcp_url : null,
+    host_pattern: typeof body.host_pattern === 'string' ? body.host_pattern : null,
+    scopes: Array.isArray(body.scopes)
+      ? body.scopes.filter((s): s is string => typeof s === 'string')
+      : undefined,
+    authorization_endpoint:
+      typeof body.authorization_endpoint === 'string' ? body.authorization_endpoint : undefined,
+    token_endpoint: typeof body.token_endpoint === 'string' ? body.token_endpoint : undefined,
+  });
+  jsonResponse(res, 201, { registration });
+}
+
+async function handleStartIntegrationConnectGeneric(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : undefined;
+  const mcpUrl = typeof body.mcp_url === 'string' ? body.mcp_url : undefined;
+  const provider = typeof body.provider === 'string' ? body.provider : undefined;
+  const mcpServerName =
+    typeof body.mcp_server_name === 'string' ? body.mcp_server_name : undefined;
+  const scopes = Array.isArray(body.scopes)
+    ? body.scopes.filter((s): s is string => typeof s === 'string')
+    : undefined;
+
+  const result = await startOAuthConnect({
+    userId: user.id,
+    mcpUrl,
+    provider,
+    mcpServerName,
+    workspaceId,
+    scopes,
+  });
+  jsonResponse(res, 200, result);
+}
+
+async function handleStartIntegrationConnect(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  provider: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES).catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  const workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : undefined;
+  const result = await startOAuthConnect({
+    userId: user.id,
+    provider,
+    workspaceId,
+  });
+  jsonResponse(res, 200, result);
+}
+
+async function handleOAuthCallbackHttp(url: URL, res: http.ServerResponse): Promise<void> {
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+  const error = url.searchParams.get('error');
+  if (error) {
+    res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<html><body><h1>OAuth failed</h1><p>${error}</p></body></html>`);
+    return;
+  }
+  if (!code || !state) {
+    jsonResponse(res, 400, { error: 'code and state are required' });
+    return;
+  }
+  const result = await handleOAuthCallback({ code, state });
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(
+    `<html><body><h1>Connected</h1><p>Provider linked. You can close this window and return to Cliq.</p>` +
+      `<pre>${JSON.stringify(result.connection, null, 2)}</pre></body></html>`,
+  );
+}
+
+function handleListAgentIntegrations(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, {
+    integrations: listWorkspaceIntegrations(workspaceId, user.id),
+  });
+}
+
+async function handleBindAgentIntegration(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const connection = bindIntegrationToWorkspace(
+    workspaceId,
+    requireString(body, 'connection_id'),
+    user.id,
+  );
+  jsonResponse(res, 200, { integration: connection });
+}
+
+function handleUnbindAgentIntegration(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  connectionId: string,
+): void {
+  const user = requireUserSession(req);
+  unbindIntegrationFromWorkspace(workspaceId, connectionId, user.id);
+  jsonResponse(res, 200, { ok: true });
+}
+
 async function route(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const { pathname } = url;
@@ -435,6 +600,69 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/v1/integrations/providers') {
+      handleListIntegrationProviders(req, res);
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/v1/integrations') {
+      handleListIntegrations(req, res);
+      return;
+    }
+    if (req.method === 'GET' && pathname === '/v1/integrations/registrations') {
+      requireUserSession(req);
+      jsonResponse(res, 200, { registrations: listRegistrationsPublic() });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/integrations/registrations') {
+      await handlePreRegister(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/integrations/discover') {
+      await handleDiscoverRegister(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/integrations/connect') {
+      await handleStartIntegrationConnectGeneric(req, res);
+      return;
+    }
+    const connectMatch = pathname.match(/^\/v1\/integrations\/([^/]+)\/connect$/);
+    if (connectMatch && req.method === 'POST') {
+      const name = decodeURIComponent(connectMatch[1]!);
+      if (name !== 'oauth' && name !== 'discover' && name !== 'registrations' && name !== 'connect') {
+        await handleStartIntegrationConnect(req, res, name);
+        return;
+      }
+    }
+    if (req.method === 'GET' && pathname === '/v1/integrations/oauth/callback') {
+      await handleOAuthCallbackHttp(url, res);
+      return;
+    }
+
+    const agentIntegrationsMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/integrations$/);
+    if (agentIntegrationsMatch) {
+      const workspaceId = decodeURIComponent(agentIntegrationsMatch[1]!);
+      if (req.method === 'GET') {
+        handleListAgentIntegrations(req, res, workspaceId);
+        return;
+      }
+      if (req.method === 'POST') {
+        await handleBindAgentIntegration(req, res, workspaceId);
+        return;
+      }
+    }
+    const agentIntegrationItemMatch = pathname.match(
+      /^\/v1\/agents\/([^/]+)\/integrations\/([^/]+)$/,
+    );
+    if (agentIntegrationItemMatch && req.method === 'DELETE') {
+      handleUnbindAgentIntegration(
+        req,
+        res,
+        decodeURIComponent(agentIntegrationItemMatch[1]!),
+        decodeURIComponent(agentIntegrationItemMatch[2]!),
+      );
+      return;
+    }
+
     jsonResponse(res, 404, { error: 'Not found' });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -446,6 +674,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
     if (err instanceof BuildError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
+    if (err instanceof IntegrationError) {
       jsonResponse(res, err.status, { error: err.message });
       return;
     }

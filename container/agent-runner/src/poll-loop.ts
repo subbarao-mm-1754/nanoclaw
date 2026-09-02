@@ -540,9 +540,21 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  const hasUnwrapped = sent === 0 && !!scratchpad;
+  let hasUnwrapped = sent === 0 && !!scratchpad.trim();
   if (hasUnwrapped) {
-    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    // Gateway / worker jobs usually have one destination (`client`). Auto-deliver
+    // so the host is not left polling outbound.db until timeout when the model
+    // forgets `<message to="...">` wrapping.
+    const destinations = getAllDestinations();
+    if (destinations.length === 1) {
+      const body = scratchpad.trim();
+      sendToDestination(destinations[0]!, body, routing);
+      sent = 1;
+      hasUnwrapped = false;
+      log(`Auto-delivered unwrapped reply to sole destination "${destinations[0]!.name}"`);
+    } else {
+      log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    }
   }
   return { sent, hasUnwrapped };
 }

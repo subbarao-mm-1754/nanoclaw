@@ -28,6 +28,9 @@ function rowToJob(row: Record<string, unknown>): BuildJob {
     delivery_channel_type: (row.delivery_channel_type as string | null) ?? null,
     delivery_platform_id: (row.delivery_platform_id as string | null) ?? null,
     delivery_thread_id: (row.delivery_thread_id as string | null) ?? null,
+    pending_mcp_url: (row.pending_mcp_url as string | null) ?? null,
+    pending_connection_id: (row.pending_connection_id as string | null) ?? null,
+    pending_mcp_server_name: (row.pending_mcp_server_name as string | null) ?? null,
     error: (row.error as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
@@ -173,6 +176,36 @@ export function updateBuildJobStatus(
     )
     .run(status, error, resultWorkspaceId, resultAgentGroupId, title, ts, jobId);
 
+  return getBuildJob(jobId)!;
+}
+
+export function setBuildJobPendingMcp(
+  jobId: string,
+  input: {
+    mcpUrl?: string | null;
+    connectionId?: string | null;
+    mcpServerName?: string | null;
+  },
+): BuildJob {
+  const current = getBuildJob(jobId);
+  if (!current) throw new Error(`Build job not found: ${jobId}`);
+  const ts = now();
+  getGatewayDb()
+    .prepare(
+      `UPDATE build_jobs SET
+         pending_mcp_url = ?,
+         pending_connection_id = ?,
+         pending_mcp_server_name = ?,
+         updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      input.mcpUrl !== undefined ? input.mcpUrl : current.pending_mcp_url,
+      input.connectionId !== undefined ? input.connectionId : current.pending_connection_id,
+      input.mcpServerName !== undefined ? input.mcpServerName : current.pending_mcp_server_name,
+      ts,
+      jobId,
+    );
   return getBuildJob(jobId)!;
 }
 

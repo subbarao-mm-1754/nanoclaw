@@ -152,6 +152,10 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
   return lines.join('\n');
 }
 
+/** In-flight tool starts for TIMING logs (keyed by tool_use_id when present). */
+const toolStarts = new Map<string, { name: string; startedAt: number }>();
+let toolSeq = 0;
+
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
@@ -159,7 +163,11 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  * block the call here instead of letting the agent hang.
  */
 const preToolUseHook: HookCallback = async (input) => {
-  const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+  const i = input as {
+    tool_name?: string;
+    tool_input?: Record<string, unknown>;
+    tool_use_id?: string;
+  };
   const toolName = i.tool_name ?? '';
   if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
     return {
@@ -171,6 +179,16 @@ const preToolUseHook: HookCallback = async (input) => {
   // tool: no declared timeout.
   const declaredTimeoutMs =
     toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
+  const key = i.tool_use_id ?? `seq-${++toolSeq}`;
+  toolStarts.set(key, { name: toolName, startedAt: Date.now() });
+  let inputPreview = '';
+  try {
+    const raw = JSON.stringify(i.tool_input ?? {});
+    inputPreview = raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
+  } catch {
+    inputPreview = '{}';
+  }
+  log(`TIMING tool_start name=${toolName} id=${key} input=${inputPreview}`);
   try {
     setContainerToolInFlight(toolName, declaredTimeoutMs);
   } catch (err) {
@@ -180,7 +198,28 @@ const preToolUseHook: HookCallback = async (input) => {
 };
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+const postToolUseHook: HookCallback = async (input) => {
+  const i = input as { tool_name?: string; tool_use_id?: string };
+  const key = i.tool_use_id;
+  let durationMs: number | null = null;
+  let toolName = i.tool_name ?? '';
+  if (key && toolStarts.has(key)) {
+    const started = toolStarts.get(key)!;
+    durationMs = Date.now() - started.startedAt;
+    toolName = toolName || started.name;
+    toolStarts.delete(key);
+  } else if (toolStarts.size === 1) {
+    // Fallback when tool_use_id is missing from PostToolUse.
+    const [fallbackKey, started] = toolStarts.entries().next().value!;
+    durationMs = Date.now() - started.startedAt;
+    toolName = toolName || started.name;
+    toolStarts.delete(fallbackKey);
+  }
+  log(
+    `TIMING tool_end name=${toolName || 'unknown'}` +
+      (durationMs !== null ? ` durationMs=${durationMs}` : '') +
+      (key ? ` id=${key}` : ''),
+  );
   try {
     clearContainerToolInFlight();
   } catch (err) {
@@ -430,32 +469,108 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let llmRounds = 0;
+      let toolUseBlocks = 0;
+      const queryStartedAt = Date.now();
+      let lastEventAt = queryStartedAt;
+
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
+        const now = Date.now();
+        const sinceLastMs = now - lastEventAt;
+        lastEventAt = now;
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          const init = message as {
+            session_id: string;
+            model?: string;
+            mcp_servers?: Array<{ name: string; status: string }>;
+            tools?: string[];
+          };
+          const mcp = (init.mcp_servers ?? [])
+            .map((s) => `${s.name}:${s.status}`)
+            .join(',') || 'none';
+          log(
+            `TIMING query_init sinceStartMs=${now - queryStartedAt} model=${init.model ?? 'default'} ` +
+              `mcp=[${mcp}] tools=${init.tools?.length ?? 0}`,
+          );
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          llmRounds++;
+          const content = (message as { message?: { content?: unknown } }).message?.content;
+          const blocks = Array.isArray(content) ? content : [];
+          const tools = blocks
+            .filter((b): b is { type: string; name?: string } =>
+              typeof b === 'object' && b !== null && (b as { type?: string }).type === 'tool_use',
+            )
+            .map((b) => b.name ?? 'tool');
+          toolUseBlocks += tools.length;
+          log(
+            `TIMING llm_round n=${llmRounds} sinceLastMs=${sinceLastMs} sinceStartMs=${now - queryStartedAt}` +
+              (tools.length ? ` tool_use=[${tools.join(',')}]` : ' text_only'),
+          );
+        } else if (message.type === 'user') {
+          // Tool results flowing back into the model (or other user content).
+          const content = (message as { message?: { content?: unknown } }).message?.content;
+          const blocks = Array.isArray(content) ? content : [];
+          const toolResults = blocks.filter(
+            (b) => typeof b === 'object' && b !== null && (b as { type?: string }).type === 'tool_result',
+          ).length;
+          if (toolResults > 0) {
+            log(
+              `TIMING tool_results count=${toolResults} sinceLastMs=${sinceLastMs} sinceStartMs=${now - queryStartedAt}`,
+            );
+          }
         } else if (message.type === 'result') {
-          const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
+          const resultMsg = message as {
+            result?: string;
+            duration_ms?: number;
+            duration_api_ms?: number;
+            num_turns?: number;
+            total_cost_usd?: number;
+            usage?: {
+              input_tokens?: number;
+              output_tokens?: number;
+              cache_read_input_tokens?: number;
+              cache_creation_input_tokens?: number;
+            };
+            subtype?: string;
+          };
+          const text = 'result' in resultMsg ? resultMsg.result ?? null : null;
+          const u = resultMsg.usage;
+          log(
+            `TIMING query_result subtype=${resultMsg.subtype ?? 'unknown'} ` +
+              `llmRounds=${llmRounds} toolUses=${toolUseBlocks} ` +
+              `sdkDurationMs=${resultMsg.duration_ms ?? '?'} sdkApiMs=${resultMsg.duration_api_ms ?? '?'} ` +
+              `numTurns=${resultMsg.num_turns ?? '?'} costUsd=${resultMsg.total_cost_usd ?? '?'} ` +
+              `tokens_in=${u?.input_tokens ?? '?'} tokens_out=${u?.output_tokens ?? '?'} ` +
+              `cache_read=${u?.cache_read_input_tokens ?? '?'} ` +
+              `wallMs=${now - queryStartedAt}`,
+          );
           yield { type: 'result', text };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
+          log(`TIMING api_retry sinceLastMs=${sinceLastMs} sinceStartMs=${now - queryStartedAt}`);
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
+          log(`TIMING compact sinceStartMs=${now - queryStartedAt}${detail}`);
           yield { type: 'result', text: `Context compacted${detail}.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };
         }
       }
-      log(`Query completed after ${messageCount} SDK messages`);
+      log(
+        `TIMING query_done sdkMessages=${messageCount} llmRounds=${llmRounds} toolUses=${toolUseBlocks} ` +
+          `wallMs=${Date.now() - queryStartedAt}`,
+      );
     }
 
     return {

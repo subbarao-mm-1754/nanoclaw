@@ -73,7 +73,10 @@ async function main(): Promise<void> {
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
   // Build MCP servers config: nanoclaw built-in + any from container.json
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
+  // Supports stdio ({command,args}) and remote ({type:'http'|'sse', url, headers}).
+  // Remote MCP auth uses OneCLI: headers carry Bearer onecli-managed; the proxy
+  // rewrites Authorization for the MCP host.
+  const mcpServers: Record<string, Record<string, unknown>> = {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
@@ -82,13 +85,19 @@ async function main(): Promise<void> {
   };
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    mcpServers[name] = serverConfig;
-    log(`Additional MCP server: ${name} (${serverConfig.command})`);
+    mcpServers[name] = serverConfig as Record<string, unknown>;
+    if ('url' in serverConfig && serverConfig.url) {
+      log(`Additional remote MCP server: ${name} (${serverConfig.type ?? 'http'} ${serverConfig.url})`);
+    } else if ('command' in serverConfig) {
+      log(`Additional MCP server: ${name} (${serverConfig.command})`);
+    } else {
+      log(`Additional MCP server: ${name}`);
+    }
   }
 
   const provider = createProvider(providerName, {
     assistantName: config.assistantName || undefined,
-    mcpServers,
+    mcpServers: mcpServers as never,
     env: { ...process.env },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,

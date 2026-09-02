@@ -180,7 +180,8 @@ describe('parsePrepareWorkspaceRequest', () => {
       },
     });
     const req = parsePrepareWorkspaceRequest(body);
-    expect(req.agent.container_config.mcpServers?.ZohoMCP?.command).toBe('npx');
+    const zoho = req.agent.container_config.mcpServers?.ZohoMCP;
+    expect(zoho && 'command' in zoho ? zoho.command : undefined).toBe('npx');
     expect(req.agent.container_config).not.toHaveProperty('agent_group_id');
   });
 });

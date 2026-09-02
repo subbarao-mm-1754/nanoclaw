@@ -1,6 +1,8 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
 import { log } from '../log.js';
 import { generateId, slugifyName } from './auth.js';
+import { ensureWorkspaceIntegrations } from './integrations/broker.js';
+import { ensureOnecliAgent } from './integrations/onecli-sync.js';
 import type { GatewayAgent, GatewayAgentFile } from './types.js';
 import { prepareWorkspaceOnWorker } from './worker-client.js';
 import {
@@ -60,11 +62,23 @@ export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void
     files = [{ path: 'CLAUDE.local.md', content: `# ${workspace.name}\n` }];
   }
 
+  await ensureWorkspaceIntegrations(workspaceId);
+  // Re-read workspace — integrations may have updated container_config (remote MCP).
+  const refreshed = getWorkspace(workspaceId) ?? workspace;
+  files = listAgentFiles(workspaceId);
+  if (files.length === 0) {
+    files = [{ path: 'CLAUDE.local.md', content: `# ${refreshed.name}\n` }];
+  }
+
   try {
-    await prepareWorkspaceOnWorker(buildPreparePayload(workspace, files, false));
+    await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, false));
     log.info('Worker workspace prepared (was missing)', { workspaceId });
   } catch (err) {
-    if (isAlreadyExistsError(err)) return;
+    if (isAlreadyExistsError(err)) {
+      // Refresh disk materialization so OneCLI-synced remote MCP config is current.
+      await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, true));
+      return;
+    }
     throw err;
   }
 }
@@ -112,6 +126,15 @@ export async function createAgent(input: {
     cli_scope: cliScope,
   });
 
+  try {
+    await ensureOnecliAgent({ name: input.name, identifier: agentGroupId });
+  } catch (err) {
+    log.warn('OneCLI ensureAgent failed during gateway createAgent', { agentGroupId, err });
+  }
+
+  // Refresh/sync any integrations bound after create (usually none yet).
+  await ensureWorkspaceIntegrations(workspaceId);
+
   return getAgentForUser(agent.workspace_id, input.owner_user_id)!;
 }
 
@@ -123,6 +146,7 @@ export async function updateAgentFiles(
   if (files.length === 0) throw new Error('At least one file update is required');
 
   const agent = updateAgentFilesRecord(workspaceId, userId, files);
+  await ensureWorkspaceIntegrations(workspaceId);
   await prepareWorkspaceOnWorker(buildPreparePayload(agent, agent.files, true));
   return getAgentForUser(workspaceId, userId)!;
 }
@@ -162,6 +186,7 @@ export async function updateAgent(
 
   if (hasMeta) {
     const files = getAgentFilesForPrepare(workspaceId);
+    await ensureWorkspaceIntegrations(workspaceId);
     await prepareWorkspaceOnWorker(buildPreparePayload(agent, files, true));
     return getAgentForUser(workspaceId, userId)!;
   }

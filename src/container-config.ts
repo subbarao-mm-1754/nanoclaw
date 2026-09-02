@@ -16,12 +16,24 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface McpServerConfig {
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
   instructions?: string;
 }
+
+export interface McpRemoteServerConfig {
+  type: 'http' | 'sse';
+  url: string;
+  headers?: Record<string, string>;
+  instructions?: string;
+  /** Optional: linked Gateway OAuth connection / provider key. */
+  oauthProvider?: string;
+}
+
+export type McpServerConfig = McpStdioServerConfig | McpRemoteServerConfig;
 
 export interface AdditionalMountConfig {
   hostPath: string;

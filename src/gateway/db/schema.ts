@@ -56,6 +56,77 @@ function migrateGatewaySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_gateway_channel_identities_user
       ON gateway_channel_identities(user_id);
   `);
+
+  if (tableExists(db, 'gateway_oauth_connections')) {
+    if (!columnExists(db, 'gateway_oauth_connections', 'registration_id')) {
+      db.exec(`ALTER TABLE gateway_oauth_connections ADD COLUMN registration_id TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_connections', 'resource')) {
+      db.exec(`ALTER TABLE gateway_oauth_connections ADD COLUMN resource TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_connections', 'mcp_url')) {
+      db.exec(`ALTER TABLE gateway_oauth_connections ADD COLUMN mcp_url TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_connections', 'mcp_server_name')) {
+      db.exec(`ALTER TABLE gateway_oauth_connections ADD COLUMN mcp_server_name TEXT`);
+    }
+  }
+
+  if (tableExists(db, 'gateway_oauth_states')) {
+    if (!columnExists(db, 'gateway_oauth_states', 'registration_id')) {
+      db.exec(`ALTER TABLE gateway_oauth_states ADD COLUMN registration_id TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_states', 'resource')) {
+      db.exec(`ALTER TABLE gateway_oauth_states ADD COLUMN resource TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_states', 'mcp_url')) {
+      db.exec(`ALTER TABLE gateway_oauth_states ADD COLUMN mcp_url TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_states', 'mcp_server_name')) {
+      db.exec(`ALTER TABLE gateway_oauth_states ADD COLUMN mcp_server_name TEXT`);
+    }
+    if (!columnExists(db, 'gateway_oauth_states', 'build_job_id')) {
+      db.exec(`ALTER TABLE gateway_oauth_states ADD COLUMN build_job_id TEXT`);
+    }
+  }
+
+  if (tableExists(db, 'build_jobs')) {
+    if (!columnExists(db, 'build_jobs', 'pending_mcp_url')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN pending_mcp_url TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'pending_connection_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN pending_connection_id TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'pending_mcp_server_name')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN pending_mcp_server_name TEXT`);
+    }
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_oauth_registrations (
+      id                          TEXT PRIMARY KEY,
+      issuer                      TEXT NOT NULL UNIQUE,
+      resource                    TEXT,
+      registration_method         TEXT NOT NULL CHECK(registration_method IN (
+                                    'dcr', 'pre_registered'
+                                  )),
+      client_id                   TEXT NOT NULL,
+      client_secret               TEXT,
+      authorization_endpoint      TEXT NOT NULL,
+      token_endpoint              TEXT NOT NULL,
+      registration_endpoint       TEXT,
+      redirect_uris_json          TEXT NOT NULL DEFAULT '[]',
+      scopes_supported_json       TEXT NOT NULL DEFAULT '[]',
+      token_endpoint_auth_method  TEXT NOT NULL DEFAULT 'none',
+      host_pattern                TEXT NOT NULL,
+      header_name                 TEXT NOT NULL DEFAULT 'Authorization',
+      value_format                TEXT NOT NULL DEFAULT 'Bearer {value}',
+      mcp_url                     TEXT,
+      metadata_json               TEXT,
+      created_at                  TEXT NOT NULL,
+      updated_at                  TEXT NOT NULL
+    );
+  `);
 }
 
 /** Create the full gateway database schema (idempotent — safe on existing gateway.db). */
@@ -226,6 +297,79 @@ export function initGatewaySchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_build_runs_job
       ON build_runs(job_id, created_at);
+
+    -- OAuth connections owned by Gateway users. Refresh tokens live here
+    -- (plaintext for now; encrypt later). Access tokens are synced into
+    -- OneCLI for request-time injection — containers never see refresh tokens.
+    CREATE TABLE IF NOT EXISTS gateway_oauth_connections (
+      id                       TEXT PRIMARY KEY,
+      user_id                  TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      provider                 TEXT NOT NULL,
+      status                   TEXT NOT NULL CHECK(status IN (
+                                 'pending', 'connected', 'revoked', 'error'
+                               )),
+      scopes                   TEXT,
+      refresh_token            TEXT,
+      access_token             TEXT,
+      access_token_expires_at  TEXT,
+      token_type               TEXT NOT NULL DEFAULT 'Bearer',
+      onecli_secret_id         TEXT,
+      account_label            TEXT,
+      metadata_json            TEXT,
+      last_error               TEXT,
+      created_at               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL,
+      UNIQUE(user_id, provider)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_oauth_connections_user
+      ON gateway_oauth_connections(user_id);
+
+    CREATE TABLE IF NOT EXISTS gateway_oauth_states (
+      state          TEXT PRIMARY KEY,
+      user_id        TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      provider       TEXT NOT NULL,
+      code_verifier  TEXT,
+      workspace_id   TEXT,
+      build_job_id   TEXT,
+      created_at     TEXT NOT NULL,
+      expires_at     TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_workspace_integrations (
+      workspace_id   TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      connection_id  TEXT NOT NULL REFERENCES gateway_oauth_connections(id) ON DELETE CASCADE,
+      created_at     TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, connection_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_workspace_integrations_connection
+      ON gateway_workspace_integrations(connection_id);
+
+    -- OAuth client registrations (DCR or pre-registered), keyed by AS issuer.
+    CREATE TABLE IF NOT EXISTS gateway_oauth_registrations (
+      id                          TEXT PRIMARY KEY,
+      issuer                      TEXT NOT NULL UNIQUE,
+      resource                    TEXT,
+      registration_method         TEXT NOT NULL CHECK(registration_method IN (
+                                    'dcr', 'pre_registered'
+                                  )),
+      client_id                   TEXT NOT NULL,
+      client_secret               TEXT,
+      authorization_endpoint      TEXT NOT NULL,
+      token_endpoint              TEXT NOT NULL,
+      registration_endpoint       TEXT,
+      redirect_uris_json          TEXT NOT NULL DEFAULT '[]',
+      scopes_supported_json       TEXT NOT NULL DEFAULT '[]',
+      token_endpoint_auth_method  TEXT NOT NULL DEFAULT 'none',
+      host_pattern                TEXT NOT NULL,
+      header_name                 TEXT NOT NULL DEFAULT 'Authorization',
+      value_format                TEXT NOT NULL DEFAULT 'Bearer {value}',
+      mcp_url                     TEXT,
+      metadata_json               TEXT,
+      created_at                  TEXT NOT NULL,
+      updated_at                  TEXT NOT NULL
+    );
   `);
 
   migrateGatewaySchema(db);

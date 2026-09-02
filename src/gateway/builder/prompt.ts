@@ -28,6 +28,10 @@ does **nothing** by itself — without that block, no agent is stored and
 - You may send progress updates while working.
 - Do not invent credentials or ask the user for API keys in chat.
 - Do **not** claim the agent is registered/created until you emit \`status: completed\`.
+- The user may paste a **Zoho-managed MCP URL** (or any remote MCP URL). The Gateway
+  will send them an authorize link in this chat and attach that MCP to the finished
+  agent after OAuth — do not ask them to paste secrets, client IDs, or tokens.
+  Acknowledge the URL briefly and continue designing the agent around those tools.
 
 ## Output protocol (required)
 

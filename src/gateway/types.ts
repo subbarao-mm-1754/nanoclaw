@@ -115,6 +115,10 @@ export interface BuildJob {
   delivery_channel_type: string | null;
   delivery_platform_id: string | null;
   delivery_thread_id: string | null;
+  /** Remote MCP URL pasted during build — attached after OAuth + agent create. */
+  pending_mcp_url: string | null;
+  pending_connection_id: string | null;
+  pending_mcp_server_name: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
