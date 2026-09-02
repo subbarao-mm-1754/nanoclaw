@@ -41,6 +41,7 @@ describe('agent-select', () => {
     expect(listed).toContain('HubSpot Bot');
     expect(listed).toContain('Support Bot');
     expect(listed).toContain('/use');
+    expect(listed).toContain('/delete');
   });
 
   it('setConversationWorkspace binds chat to agent', async () => {

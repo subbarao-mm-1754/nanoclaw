@@ -14,6 +14,8 @@
     "dev": "tsx src/index.ts",
     "worker": "node dist/worker/index.js",
     "worker:dev": "tsx src/worker/index.ts",
+    "gateway": "node dist/gateway/index.js",
+    "gateway:dev": "tsx src/gateway/index.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",

@@ -1,11 +1,17 @@
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import { log } from '../log.js';
+import { deleteAgent } from './agent-service.js';
 import {
   BuildError,
   cancelBuild,
   continueBuild,
+  isEditJob,
+  looksLikeRegisterIntent,
   registerBuildFromStoredMessages,
+  runPreviewTest,
+  saveEdit,
   startBuild,
+  startEdit,
 } from './builder/service.js';
 import {
   IntegrationError,
@@ -18,34 +24,53 @@ import {
 import {
   AgentResolveError,
   formatAgentsForUser,
+  listUserAgents,
   resolveUserAgent,
 } from './store/agent-select.js';
+import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
-import { setConversationWorkspace } from './store/conversations.js';
-import type { GatewayUser } from './types.js';
+import { findConversation, setConversationWorkspace } from './store/conversations.js';
+import type { GatewayAgent, GatewayUser } from './types.js';
 
 export const BUILD_HELP_TEXT = [
-  'Same Cliq chat is used for building agents and talking to them.',
+  'Same Cliq chat is used for building agents, editing them, and talking to them.',
   '',
   'Commands:',
-  '• `/build <what you want>` — start the Agent Builder',
-  '• While a build is waiting for you — just reply normally (no command)',
-  '• Paste a Zoho-managed MCP URL (or `/mcp <url>`) during a build — Gateway sends an authorize link; after you consent, the MCP attaches to the new agent automatically',
-  '• `/cancel` — cancel the active build',
-  '• `/chat` — cancel any active build and switch to user-agent mode',
+  '• `/build <what you want>` — start the Agent Builder (creates a new agent)',
+  '• `/edit <name or id>` — edit an existing agent without switching this chat’s agent',
+  '• `/edit` — edit the agent currently bound to this chat',
+  '• `/test <message>` — while editing, send that message to the draft (edits so far). Does not switch this chat’s agent',
+  '• `/save` — apply the current draft to the live agent (chat binding unchanged)',
+  '• While a build/edit is waiting for you — just reply normally (no command)',
+  '• Paste a Zoho-managed MCP URL (or `/mcp <url>`) during a build/edit — Gateway sends an authorize link',
+  '• `/cancel` — cancel the active build or edit',
+  '• `/chat` — cancel any active build/edit and switch to user-agent mode',
   '• `/agents` — list your user agents (marks which is active in this chat)',
   '• `/use <name or id>` — bind this chat to a user agent',
-  '• `/register` — if the builder already emitted a completed block, force Gateway to create the agent',
+  '• `/delete <name or id>` — permanently delete a user agent',
+  '• `/register` or reply **Register it now** — after a finished `/build`, create the agent and clean up the builder',
   '• `/help` — show this help',
   '',
-  'Anything else (when no build is active) goes to the agent bound to this chat.',
+  'Anything else (when no build/edit is active) goes to the agent bound to this chat.',
 ].join('\n');
 
 export type ChannelRouteResult =
   | {
       kind: 'builder';
-      action: 'started' | 'continued' | 'cancelled' | 'busy' | 'help' | 'agents' | 'use' | 'register';
+      action:
+        | 'started'
+        | 'continued'
+        | 'cancelled'
+        | 'busy'
+        | 'help'
+        | 'agents'
+        | 'use'
+        | 'delete'
+        | 'register'
+        | 'edit'
+        | 'test'
+        | 'save';
       jobId?: string;
     }
   | { kind: 'agent'; content?: unknown };
@@ -75,6 +100,48 @@ function extractSender(
     }
   }
   return { senderId: fallbackPlatformId, displayName: fallbackDisplayName };
+}
+
+function resolveEditTarget(
+  user: GatewayUser,
+  query: string,
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+): { agent: GatewayAgent; instruction: string } {
+  const conv = findConversation(channelType, platformId, threadId);
+  const current =
+    conv && listUserAgents(user.id).find((a) => a.workspace_id === conv.workspace_id);
+
+  const asAgent = (workspaceId: string): GatewayAgent => {
+    const agent = getAgentForUser(workspaceId, user.id);
+    if (!agent) throw new AgentResolveError('Agent not found', 404);
+    return agent;
+  };
+
+  if (!query) {
+    if (!current) {
+      throw new AgentResolveError(
+        'Usage: `/edit <agent name or id>` (or bind an agent with `/use` and then `/edit`).',
+      );
+    }
+    return { agent: asAgent(current.workspace_id), instruction: '' };
+  }
+
+  try {
+    const resolved = resolveUserAgent(user.id, query);
+    return { agent: asAgent(resolved.workspace_id), instruction: '' };
+  } catch (err) {
+    const split = query.match(/^(.+?)\s*[:|]\s*([\s\S]+)$/);
+    if (split) {
+      const resolved = resolveUserAgent(user.id, split[1]!.trim());
+      return { agent: asAgent(resolved.workspace_id), instruction: split[2]!.trim() };
+    }
+    if (current) {
+      return { agent: asAgent(current.workspace_id), instruction: query };
+    }
+    throw err;
+  }
 }
 
 async function replyToChannel(
@@ -116,18 +183,32 @@ async function maybeStartBuildMcpOAuth(input: {
       mcpServerName: suggestMcpServerName(mcpUrl),
       buildJobId: input.buildJobId,
     });
-    await replyToChannel(
-      input.channel_type,
-      input.platform_id,
-      input.thread_id,
-      [
-        'Remote MCP detected. Complete authorization in your browser, then continue this chat.',
-        '',
-        `Open this link: ${result.authorize_url}`,
-        '',
-        'After you authorize, this MCP will attach automatically when the agent is created.',
-      ].join('\n'),
-    );
+    if (result.reused) {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        [
+          'Remote MCP detected — already authorized for your account.',
+          '',
+          `Using existing connection (\`${result.provider}\`).`,
+          'It will attach automatically when the agent is registered. No need to authorize again.',
+        ].join('\n'),
+      );
+    } else {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        [
+          'Remote MCP detected. Complete authorization in your browser, then continue this chat.',
+          '',
+          `Open this link: ${result.authorize_url}`,
+          '',
+          'After you authorize, this MCP will attach automatically when the agent is created.',
+        ].join('\n'),
+      );
+    }
   } catch (err) {
     const message =
       err instanceof IntegrationError
@@ -192,7 +273,7 @@ export async function routeChannelInbound(input: {
     return { kind: 'builder', action: 'agents' };
   }
 
-  if (lower === '/register') {
+  if (lower === '/register' || looksLikeRegisterIntent(text)) {
     try {
       const job = await registerBuildFromStoredMessages(user);
       await replyToChannel(
@@ -200,14 +281,17 @@ export async function routeChannelInbound(input: {
         input.platform_id,
         input.thread_id,
         job.status === 'completed'
-          ? `Registered. This chat should now use "${job.title ?? 'your agent'}". Try \`/agents\`.`
+          ? isEditJob(job)
+            ? `Saved. This chat is still using the same agent as before. Try \`/agents\` if you want to switch.`
+            : `Registered. This chat should now use "${job.title ?? 'your agent'}". Try \`/agents\`.`
           : `Build status is now ${job.status}.`,
       );
       return { kind: 'builder', action: 'register', jobId: job.id };
     } catch (err) {
       const message = err instanceof BuildError ? err.message : String(err);
       await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
-      return { kind: 'builder', action: 'help' };
+      // Nudge path still counts as register intent handled.
+      return { kind: 'builder', action: 'register' };
     }
   }
 
@@ -248,6 +332,46 @@ export async function routeChannelInbound(input: {
     }
   }
 
+  const deleteMatch = text.match(/^\/delete(?:\s+|:)([\s\S]+)$/i);
+  if (lower === '/delete' || deleteMatch) {
+    const query = deleteMatch?.[1]?.trim() ?? '';
+    if (!query) {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        'Usage: `/delete <agent name or workspace id>` (permanent).\n\n' +
+          formatAgentsForUser(user, input.channel_type, input.platform_id, input.thread_id),
+      );
+      return { kind: 'builder', action: 'help' };
+    }
+
+    try {
+      const agent = resolveUserAgent(user.id, query);
+      const result = await deleteAgent(agent.workspace_id, user.id);
+      const lines = [
+        `Deleted agent "${result.agent.name}" (\`${result.agent.workspace_id}\`).`,
+      ];
+      if (result.rebound_agent_name && result.rebound_workspace_id) {
+        lines.push(
+          `Chats that were using it now use "${result.rebound_agent_name}" (\`${result.rebound_workspace_id}\`).`,
+        );
+      } else if (result.conversations_cleared > 0) {
+        lines.push('No other agents left — those chats need `/use <name>` or `/build …` before chatting again.');
+      }
+      lines.push('List remaining agents with `/agents`.');
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, lines.join('\n'));
+      return { kind: 'builder', action: 'delete' };
+    } catch (err) {
+      const message =
+        err instanceof AgentResolveError || err instanceof AgentDeleteError
+          ? err.message
+          : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help' };
+    }
+  }
+
   if (lower === '/cancel' || lower.startsWith('/cancel ')) {
     try {
       const job = await cancelBuild(user);
@@ -274,7 +398,7 @@ export async function routeChannelInbound(input: {
         input.channel_type,
         input.platform_id,
         input.thread_id,
-        'User-agent mode. Send your next message normally, or `/agents` / `/use <name>` to pick an agent.',
+        'User-agent mode. Send your next message normally, or `/agents` / `/use <name>` to pick an agent. This chat’s bound agent was not changed.',
       );
       return { kind: 'builder', action: 'cancelled', jobId: active?.id };
     }
@@ -304,7 +428,7 @@ export async function routeChannelInbound(input: {
         input.channel_type,
         input.platform_id,
         input.thread_id,
-        `You already have an active build (${active.status}). Reply to continue, or \`/cancel\` first.`,
+        `You already have an active ${isEditJob(active) ? 'edit' : 'build'} (${active.status}). Reply to continue, or \`/cancel\` first.`,
       );
       return { kind: 'builder', action: 'busy', jobId: active.id };
     }
@@ -327,6 +451,135 @@ export async function routeChannelInbound(input: {
     return { kind: 'builder', action: 'started', jobId: job.id };
   }
 
+  const editMatch = text.match(/^\/edit(?:\s+|:)([\s\S]*)$/i);
+  if (lower === '/edit' || editMatch) {
+    const query = (editMatch?.[1] ?? '').trim();
+    try {
+      const { agent, instruction } = resolveEditTarget(
+        user,
+        query,
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      );
+      const boundBefore = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      const job = await startEdit(user, {
+        agent,
+        message: instruction,
+        delivery,
+      });
+      const boundAfter = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      if (boundBefore && boundAfter && boundBefore !== boundAfter) {
+        log.warn('Edit start unexpectedly changed chat agent binding', {
+          boundBefore,
+          boundAfter,
+          jobId: job.id,
+        });
+      }
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        [
+          `Editing "${agent.name}" (\`${agent.workspace_id}\`).`,
+          'This chat’s bound agent is unchanged — replies here go to the editor, not a switched user agent.',
+          '`/test <message>` runs that message on the draft with edits so far.',
+          '`/save` applies the draft. `/cancel` discards it.',
+        ].join('\n'),
+      );
+      await maybeStartBuildMcpOAuth({
+        user,
+        buildJobId: job.id,
+        text: instruction || query,
+        channel_type: input.channel_type,
+        platform_id: input.platform_id,
+        thread_id: input.thread_id,
+      });
+      return { kind: 'builder', action: 'edit', jobId: job.id };
+    } catch (err) {
+      const message =
+        err instanceof AgentResolveError || err instanceof BuildError ? err.message : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help' };
+    }
+  }
+
+  const testMatch = text.match(/^\/test(?:\s+|:)([\s\S]*)$/i);
+  if (lower === '/test' || testMatch) {
+    const activeForTest = getActiveBuildJobForUser(user.id);
+    const testMessage = (testMatch?.[1] ?? '').trim();
+    if (!activeForTest) {
+      await replyToChannel(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+        'No active edit. Start one with `/edit <agent>`, then `/test <message>`.',
+      );
+      return { kind: 'builder', action: 'help' };
+    }
+    try {
+      const boundBefore = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      await runPreviewTest(user, activeForTest.id, { message: testMessage });
+      const boundAfter = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      if (boundBefore && boundAfter && boundBefore !== boundAfter) {
+        log.warn('Preview test unexpectedly changed chat agent binding', {
+          boundBefore,
+          boundAfter,
+          jobId: activeForTest.id,
+        });
+      }
+      return { kind: 'builder', action: 'test', jobId: activeForTest.id };
+    } catch (err) {
+      const message = err instanceof BuildError ? err.message : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help', jobId: activeForTest.id };
+    }
+  }
+
+  if (lower === '/save' || lower.startsWith('/save ')) {
+    try {
+      const boundBefore = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      const job = await saveEdit(user);
+      const boundAfter = findConversation(
+        input.channel_type,
+        input.platform_id,
+        input.thread_id,
+      )?.workspace_id;
+      if (boundBefore && boundAfter && boundBefore !== boundAfter) {
+        log.warn('Save edit unexpectedly changed chat agent binding', {
+          boundBefore,
+          boundAfter,
+          jobId: job.id,
+        });
+      }
+      return { kind: 'builder', action: 'save', jobId: job.id };
+    } catch (err) {
+      const message = err instanceof BuildError ? err.message : String(err);
+      await replyToChannel(input.channel_type, input.platform_id, input.thread_id, message);
+      return { kind: 'builder', action: 'help' };
+    }
+  }
+
   const active = getActiveBuildJobForUser(user.id);
   if (active) {
     if (active.status === 'in_progress') {
@@ -345,7 +598,9 @@ export async function routeChannelInbound(input: {
           input.channel_type,
           input.platform_id,
           input.thread_id,
-          'Send a text reply to continue the build (or `/cancel`).',
+          isEditJob(active)
+            ? 'Send a text reply to continue the edit (or `/test <message>`, `/save`, `/cancel`).'
+            : 'Send a text reply to continue the build (or `/cancel`).',
         );
         return { kind: 'builder', action: 'help', jobId: active.id };
       }

@@ -242,6 +242,65 @@ describe('gateway oauth store', () => {
     expect(authorize).toContain('resource=');
   });
 
+  it('reuses an existing connected OAuth connection for the same user', async () => {
+    const { findReusableUserConnection, startOAuthConnect } = await import('./broker.js');
+    const { createBuildJob, getBuildJob } = await import('../store/builds.js');
+
+    const fakeProvider: OAuthProviderConfig = {
+      id: 'reuseprovider',
+      displayName: 'Reuse',
+      hostPattern: 'api.reuse.example.com',
+      scopes: ['read'],
+      buildAuthorizeUrl: () => 'https://example.com/auth',
+      exchangeCode: async () => ({ access_token: 'a', refresh_token: 'r', expires_in: 120 }),
+      refresh: async () => ({ access_token: 'a2', expires_in: 120 }),
+    };
+    registerOAuthProvider(fakeProvider);
+
+    const user = createUser({
+      email: 'reuse@example.com',
+      password: 'password123',
+      display_name: 'Reuse User',
+    });
+    const pending = upsertPendingConnection(user.id, 'reuseprovider', {
+      mcpUrl: 'https://mcp.reuse.example.com/sse',
+      mcpServerName: 'reuseprovider',
+    });
+    applyTokenSet(pending.id, {
+      access_token: 'atk',
+      refresh_token: 'rtk',
+      expires_in: 3600,
+    });
+
+    const found = findReusableUserConnection(
+      user.id,
+      'reuseprovider',
+      'https://mcp.reuse.example.com/sse?v=2',
+    );
+    expect(found?.id).toBe(pending.id);
+
+    const job = createBuildJob({
+      id: 'job-reuse-mcp',
+      user_id: user.id,
+      builder_workspace_id: 'ws-b',
+      builder_agent_group_id: 'ag-b',
+      builder_session_id: 'sess-b',
+    });
+
+    const result = await startOAuthConnect({
+      userId: user.id,
+      provider: 'reuseprovider',
+      buildJobId: job.id,
+    });
+    expect(result.reused).toBe(true);
+    expect(result.authorize_url).toBeNull();
+    expect(result.connection_id).toBe(pending.id);
+
+    const updatedJob = getBuildJob(job.id)!;
+    expect(updatedJob.pending_connection_id).toBe(pending.id);
+    expect(getConnection(pending.id)!.status).toBe('connected');
+  });
+
   it('consumes oauth state once with registration fields', () => {
     const user = createUser({
       email: 'state@example.com',

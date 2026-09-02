@@ -177,7 +177,42 @@ export function stripBuildFence(text: string): string {
 /** True when the builder claimed the agent is done but forgot a parseable registration fence. */
 export function looksLikeUnregisteredCompletion(text: string): boolean {
   if (parseBuildResultFromText(text)?.status === 'completed') return false;
-  return /\b(ready to register|agent is defined|is defined and ready|done[—.!\s].*\bagent\b|build(?:ing)? (?:is )?complete|agent is ready|emitted the completed)\b/i.test(
+  // Negatives: still asking / clarifying that nothing is registered yet.
+  if (
+    /\b(not|n't|never|nothing is|isn'?t|is not)\s+(?:yet\s+)?(?:been\s+)?(?:registered|created|built)\b/i.test(
+      text,
+    ) ||
+    /\buntil i emit\b/i.test(text) ||
+    /\bstill waiting\b/i.test(text)
+  ) {
+    return false;
+  }
+  return /\b(ready to register|submitting the registration|submitted the completed|registering\b|agent is defined|is defined and ready|build(?:ing)? (?:is )?complete(?:d)?|agent is ready|emitted the completed|emitting the completed|create(?:d)? this agent|block below[, ].{0,40}[Gg]ateway|defined below)\b/i.test(
+    text,
+  );
+}
+
+/** User wants Gateway to finish registration without typing `/register`. */
+export function looksLikeRegisterIntent(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (/^\/register\b/i.test(t)) return true;
+  return /^(please\s+)?(register(\s+it)?(\s+now)?|create(\s+it|\s+the\s+agent)?(\s+now)?)\.?$/i.test(
+    t,
+  );
+}
+
+/**
+ * True when an edit turn claims the draft was updated but there is no parseable
+ * files payload — `/test` would still run the original agent.
+ *
+ * Keep this conservative: bare words like "caption" false-positive on MoodEmoji's
+ * intro ("short caption… What would you like to change?").
+ */
+export function looksLikeEditClaimWithoutFiles(text: string): boolean {
+  const parsed = parseBuildResultFromText(text);
+  if (parsed?.files && parsed.files.length > 0) return false;
+  return /\b(i(?:'ve| have)\s+(?:updated|changed|edited|modified)|i\s+updated|draft\s+(?:is\s+)?(?:updated|ready)|try(?:\s+it)?\s+with\s+`?\/test|will now|now (?:reply|respond)|key changes|i made|added (?:an? )?explicit|reinforced that)\b/i.test(
     text,
   );
 }

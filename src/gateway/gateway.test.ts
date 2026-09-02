@@ -345,6 +345,48 @@ describe('gateway auth and agents', () => {
       prepareWorkspaceOnWorkerMock.mock.calls[0][0].agent.container_config.mcpServers.ZohoMCP.args,
     ).toEqual(['mcp-remote', 'https://example.test/mcp-v2']);
   });
+
+  it('deletes an agent and rebinds conversations to another agent', async () => {
+    const { createUser } = await import('./store/users.js');
+    const { createAgent, deleteAgent, getAgent } = await import('./agent-service.js');
+    const { setConversationWorkspace, findConversation } = await import('./store/conversations.js');
+    const { destroyWorkspaceOnWorker } = await import('./worker-client.js');
+
+    const alice = createUser({
+      email: 'delete@example.com',
+      password: 'password123',
+      display_name: 'Delete User',
+    });
+
+    const keep = await createAgent({
+      name: 'Keep Me',
+      owner_user_id: alice.id,
+      is_default: true,
+      files: [{ path: 'CLAUDE.local.md', content: '# keep' }],
+    });
+    const doomed = await createAgent({
+      name: 'Delete Me',
+      owner_user_id: alice.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# gone' }],
+    });
+
+    setConversationWorkspace({
+      channel_type: 'zoho-cliq',
+      platform_id: 'zoho-cliq:chat-del',
+      thread_id: null,
+      workspace_id: doomed.workspace_id,
+    });
+
+    const result = await deleteAgent(doomed.workspace_id, alice.id);
+    expect(result.agent.workspace_id).toBe(doomed.workspace_id);
+    expect(result.rebound_workspace_id).toBe(keep.workspace_id);
+    expect(result.conversations_rebound).toBe(1);
+    expect(getAgent(doomed.workspace_id, alice.id)).toBeNull();
+    expect(findConversation('zoho-cliq', 'zoho-cliq:chat-del', null)?.workspace_id).toBe(
+      keep.workspace_id,
+    );
+    expect(destroyWorkspaceOnWorker).toHaveBeenCalledWith({ workspace_id: doomed.workspace_id });
+  });
 });
 
 describe('gateway schema', () => {

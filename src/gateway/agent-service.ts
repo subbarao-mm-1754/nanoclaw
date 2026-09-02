@@ -4,16 +4,21 @@ import { generateId, slugifyName } from './auth.js';
 import { ensureWorkspaceIntegrations } from './integrations/broker.js';
 import { ensureOnecliAgent } from './integrations/onecli-sync.js';
 import type { GatewayAgent, GatewayAgentFile } from './types.js';
-import { prepareWorkspaceOnWorker } from './worker-client.js';
 import {
+  AgentDeleteError,
   createAgentRecord,
+  deleteAgentRecord,
   getAgentFilesForPrepare,
   getAgentForUser,
   updateAgentFilesRecord,
   updateAgentMetadata,
+  type DeleteAgentResult,
 } from './store/agents.js';
 import { defaultContainerConfig, listAgentFiles } from './store/agent-files.js';
+import { getActiveBuildJobForUser } from './store/builds.js';
+import { getUserById } from './store/users.js';
 import { getWorkspace } from './store/workspaces.js';
+import { destroyWorkspaceOnWorker, prepareWorkspaceOnWorker } from './worker-client.js';
 
 function buildPreparePayload(
   workspace: {
@@ -200,4 +205,40 @@ export function getAgent(workspaceId: string, userId: string): GatewayAgent | nu
 
 export function agentExists(workspaceId: string): boolean {
   return getWorkspace(workspaceId) !== null;
+}
+
+export async function deleteAgent(workspaceId: string, userId: string): Promise<DeleteAgentResult> {
+  const agent = getAgentForUser(workspaceId, userId);
+  if (!agent) {
+    throw new AgentDeleteError('Agent not found', 404);
+  }
+
+  const active = getActiveBuildJobForUser(userId);
+  if (
+    active &&
+    (active.target_workspace_id === workspaceId || active.result_workspace_id === workspaceId) &&
+    (active.status === 'in_progress' || active.status === 'waiting_for_user')
+  ) {
+    const user = getUserById(userId);
+    if (user) {
+      try {
+        const { cancelBuild } = await import('./builder/service.js');
+        await cancelBuild(user, active.id);
+      } catch (err) {
+        log.warn('Failed to cancel active build/edit before deleting agent', {
+          workspaceId,
+          jobId: active.id,
+          err,
+        });
+      }
+    }
+  }
+
+  try {
+    await destroyWorkspaceOnWorker({ workspace_id: workspaceId });
+  } catch (err) {
+    log.warn('Failed to destroy worker workspace while deleting agent', { workspaceId, err });
+  }
+
+  return deleteAgentRecord(workspaceId, userId);
 }

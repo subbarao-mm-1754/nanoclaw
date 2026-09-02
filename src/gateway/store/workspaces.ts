@@ -109,6 +109,14 @@ export function listAgentsForUser(userId: string): GatewayWorkspace[] {
   return rows.map(rowToWorkspace);
 }
 
+export function deleteWorkspace(workspaceId: string): void {
+  const db = getGatewayDb();
+  const result = db.prepare('DELETE FROM gateway_workspaces WHERE workspace_id = ?').run(workspaceId);
+  if (result.changes === 0) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+}
+
 export function updateWorkspaceMetadata(
   workspaceId: string,
   input: { name?: string; container_config?: ContainerConfigSnapshot; cli_scope?: string; is_default?: boolean },

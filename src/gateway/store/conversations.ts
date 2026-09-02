@@ -115,6 +115,66 @@ export function getConversation(id: string): Conversation | null {
   return row ? rowToConversation(row) : null;
 }
 
+export function listConversationsForWorkspace(workspaceId: string): Conversation[] {
+  const rows = getGatewayDb()
+    .prepare('SELECT * FROM conversations WHERE workspace_id = ?')
+    .all(workspaceId) as Record<string, unknown>[];
+  return rows.map(rowToConversation);
+}
+
+/**
+ * Point every conversation on `fromWorkspaceId` at `toWorkspace`.
+ * Rotates session ids so prior agent context does not carry over.
+ */
+export function rebindConversationsToWorkspace(
+  fromWorkspaceId: string,
+  toWorkspace: { workspace_id: string; agent_group_id: string },
+): number {
+  const conversations = listConversationsForWorkspace(fromWorkspaceId);
+  if (conversations.length === 0) return 0;
+  const db = getGatewayDb();
+  const ts = now();
+  const update = db.prepare(
+    `UPDATE conversations SET
+       workspace_id = ?,
+       agent_group_id = ?,
+       session_id = ?,
+       updated_at = ?
+     WHERE id = ?`,
+  );
+  db.transaction(() => {
+    for (const conv of conversations) {
+      const sessionId = `sess-${conv.id}-${toWorkspace.workspace_id.replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)}`;
+      update.run(
+        toWorkspace.workspace_id,
+        toWorkspace.agent_group_id,
+        sessionId,
+        ts,
+        conv.id,
+      );
+    }
+  })();
+  return conversations.length;
+}
+
+/** Drop conversations bound to a workspace (and detach their customer_messages). */
+export function deleteConversationsForWorkspace(workspaceId: string): number {
+  const conversations = listConversationsForWorkspace(workspaceId);
+  if (conversations.length === 0) return 0;
+  const db = getGatewayDb();
+  const clearMessages = db.prepare(
+    'UPDATE customer_messages SET conversation_id = NULL WHERE conversation_id = ?',
+  );
+  const deleteConv = db.prepare('DELETE FROM conversations WHERE id = ?');
+  db.transaction(() => {
+    for (const conv of conversations) {
+      clearMessages.run(conv.id);
+      deleteConv.run(conv.id);
+    }
+  })();
+  return conversations.length;
+}
+
 /**
  * Bind (or create) this channel chat to a specific agent workspace.
  * Uses a fresh session id so context from a previous agent does not carry over.

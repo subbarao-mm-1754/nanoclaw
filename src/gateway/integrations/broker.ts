@@ -47,6 +47,7 @@ import {
   listConnectionsForUser,
   listConnectionsForWorkspace,
   listRegistrations,
+  patchConnectionMcpMeta,
   registrationToClient,
   setConnectionError,
   setOnecliSecretId,
@@ -87,6 +88,76 @@ function secretName(connection: OAuthConnection): string {
 function accessTokenFresh(connection: OAuthConnection): boolean {
   if (!connection.access_token || !connection.access_token_expires_at) return false;
   return new Date(connection.access_token_expires_at).getTime() - ACCESS_REFRESH_SKEW_MS > Date.now();
+}
+
+function mcpUrlsLikelySame(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    return (
+      ua.hostname === ub.hostname &&
+      ua.pathname.replace(/\/$/, '') === ub.pathname.replace(/\/$/, '')
+    );
+  } catch {
+    return a === b;
+  }
+}
+
+/** True when the user already has a usable OAuth connection for this MCP/provider. */
+export function findReusableUserConnection(
+  userId: string,
+  provider: string,
+  mcpUrl?: string | null,
+): OAuthConnection | null {
+  const usable = (c: OAuthConnection): boolean =>
+    c.status === 'connected' && Boolean(c.refresh_token || accessTokenFresh(c));
+
+  const byProvider = getConnectionForUserProvider(userId, provider);
+  if (byProvider && usable(byProvider)) return byProvider;
+
+  if (!mcpUrl) return null;
+  for (const c of listConnectionsForUser(userId)) {
+    if (!usable(c)) continue;
+    if (c.mcp_url && mcpUrlsLikelySame(c.mcp_url, mcpUrl)) return c;
+  }
+  return null;
+}
+
+async function attachExistingConnectionToContext(
+  connection: OAuthConnection,
+  input: {
+    workspaceId?: string | null;
+    buildJobId?: string | null;
+    mcpUrl?: string | null;
+    mcpServerName?: string | null;
+    registrationId?: string | null;
+    resource?: string | null;
+  },
+): Promise<OAuthConnection> {
+  const current = patchConnectionMcpMeta(connection.id, {
+    mcpUrl: input.mcpUrl,
+    mcpServerName: input.mcpServerName,
+    registrationId: input.registrationId,
+    resource: input.resource,
+  });
+
+  if (input.buildJobId) {
+    const { setBuildJobPendingMcp } = await import('../store/builds.js');
+    setBuildJobPendingMcp(input.buildJobId, {
+      mcpUrl: current.mcp_url ?? input.mcpUrl ?? null,
+      connectionId: current.id,
+      mcpServerName: current.mcp_server_name ?? input.mcpServerName ?? null,
+    });
+  }
+
+  if (input.workspaceId) {
+    bindWorkspaceIntegration(input.workspaceId, current.id);
+    if (current.mcp_url) {
+      await attachRemoteMcpToWorkspace(input.workspaceId, current);
+    }
+  }
+
+  return current;
 }
 
 export function listProvidersPublic() {
@@ -246,9 +317,10 @@ export async function startOAuthConnect(input: {
   buildJobId?: string | null;
   scopes?: string[];
 }): Promise<{
-  authorize_url: string;
+  authorize_url: string | null;
+  reused: boolean;
   connection_id: string;
-  state: string;
+  state: string | null;
   registration_id?: string;
   provider: string;
   mcp_url?: string;
@@ -296,6 +368,31 @@ export async function startOAuthConnect(input: {
       issuer: client.issuer,
     });
 
+    const reusable = findReusableUserConnection(
+      input.userId,
+      provider,
+      discovery.canonicalMcpUrl,
+    );
+    if (reusable) {
+      const current = await attachExistingConnectionToContext(reusable, {
+        workspaceId: input.workspaceId,
+        buildJobId: input.buildJobId,
+        mcpUrl: discovery.canonicalMcpUrl,
+        mcpServerName: input.mcpServerName ?? reusable.mcp_server_name,
+        registrationId: registration.id,
+        resource: discovery.resource.resource,
+      });
+      return {
+        authorize_url: null,
+        reused: true,
+        connection_id: current.id,
+        state: null,
+        registration_id: registration.id,
+        provider,
+        mcp_url: discovery.canonicalMcpUrl,
+      };
+    }
+
     const connection = upsertPendingConnection(input.userId, provider, {
       registrationId: registration.id,
       resource: discovery.resource.resource,
@@ -340,6 +437,7 @@ export async function startOAuthConnect(input: {
 
     return {
       authorize_url: authorizeUrl,
+      reused: false,
       connection_id: connection.id,
       state,
       registration_id: registration.id,
@@ -355,6 +453,21 @@ export async function startOAuthConnect(input: {
   }
   const provider = getOAuthProvider(providerId);
   if (!provider) throw new IntegrationError(`Unknown OAuth provider: ${providerId}`, 404);
+
+  const reusable = findReusableUserConnection(input.userId, provider.id);
+  if (reusable) {
+    const current = await attachExistingConnectionToContext(reusable, {
+      workspaceId: input.workspaceId,
+      buildJobId: input.buildJobId,
+    });
+    return {
+      authorize_url: null,
+      reused: true,
+      connection_id: current.id,
+      state: null,
+      provider: provider.id,
+    };
+  }
 
   const connection = upsertPendingConnection(input.userId, provider.id);
   const state = randomBytes(24).toString('hex');
@@ -376,6 +489,7 @@ export async function startOAuthConnect(input: {
 
   return {
     authorize_url: authorizeUrl,
+    reused: false,
     connection_id: connection.id,
     state,
     provider: provider.id,
@@ -445,7 +559,8 @@ export async function handleOAuthCallback(input: {
           mcpServerName: updated.mcp_server_name ?? oauthState.mcp_server_name,
         });
 
-        // If the agent was already created, attach now.
+        // If the agent was already created, attach now. During /edit, attach to
+        // the draft preview so `/test` can use the MCP without switching Cliq.
         if (job.result_workspace_id) {
           workspaceId = job.result_workspace_id;
           bindWorkspaceIntegration(job.result_workspace_id, updated.id);
@@ -460,6 +575,21 @@ export async function handleOAuthCallback(input: {
               );
             } catch (err) {
               log.warn('OneCLI agent secret assign deferred', { err });
+            }
+          }
+        } else if (job.preview_workspace_id && job.preview_agent_group_id) {
+          workspaceId = job.preview_workspace_id;
+          bindWorkspaceIntegration(job.preview_workspace_id, updated.id);
+          await attachRemoteMcpToWorkspace(job.preview_workspace_id, updated);
+          if (updated.onecli_secret_id) {
+            try {
+              await assignSecretToAgent(
+                job.preview_agent_group_id,
+                updated.onecli_secret_id,
+                'Edit preview',
+              );
+            } catch (err) {
+              log.warn('OneCLI preview secret assign deferred', { err });
             }
           }
         }
@@ -477,7 +607,9 @@ export async function handleOAuthCallback(input: {
                   updated.mcp_url ? `URL: ${updated.mcp_url}` : null,
                   job.result_workspace_id
                     ? 'It is attached to your agent — send a message to use it.'
-                    : 'Continue the build in this chat. When the agent is created, this MCP will be attached automatically.',
+                    : job.preview_workspace_id
+                      ? 'It is attached to the edit draft. `/test` can use it now; `/save` applies it to the live agent. This chat’s bound agent is unchanged.'
+                      : 'Continue the build in this chat. When the agent is created, this MCP will be attached automatically.',
                 ]
                   .filter(Boolean)
                   .join('\n'),

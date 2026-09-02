@@ -2,8 +2,12 @@ import type { GatewayUser, GatewayWorkspace } from '../types.js';
 import { listAgentsForUser } from './agents.js';
 import { findConversation } from './conversations.js';
 
+export function isUserFacingWorkspaceId(workspaceId: string): boolean {
+  return !workspaceId.startsWith('ws-builder-') && !workspaceId.startsWith('ws-preview-');
+}
+
 export function listUserAgents(userId: string): GatewayWorkspace[] {
-  return listAgentsForUser(userId).filter((w) => !w.workspace_id.startsWith('ws-builder-'));
+  return listAgentsForUser(userId).filter((w) => isUserFacingWorkspaceId(w.workspace_id));
 }
 
 export class AgentResolveError extends Error {
@@ -89,5 +93,7 @@ export function formatAgentsForUser(
     formatAgentList(agents, current),
     '',
     'Switch this chat with `/use <name or id>`.',
+    'Edit an agent (this chat stays on the current agent) with `/edit <name>`.',
+    'Delete an agent permanently with `/delete <name or id>`.',
   ].join('\n');
 }

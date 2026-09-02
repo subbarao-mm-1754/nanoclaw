@@ -2,10 +2,12 @@ import { getGatewayDb } from '../db/connection.js';
 import type {
   BuildJob,
   BuildJobDetail,
+  BuildJobKind,
   BuildJobStatus,
   BuildMessage,
   BuildMessageRole,
   BuildRun,
+  BuildRunKind,
   BuildRunStatus,
   MessageDirection,
 } from '../types.js';
@@ -15,14 +17,20 @@ function now(): string {
 }
 
 function rowToJob(row: Record<string, unknown>): BuildJob {
+  const jobKind = row.job_kind === 'edit' ? 'edit' : 'create';
   return {
     id: row.id as string,
     user_id: row.user_id as string,
     status: row.status as BuildJobStatus,
+    job_kind: jobKind,
     title: (row.title as string | null) ?? null,
     builder_workspace_id: row.builder_workspace_id as string,
     builder_agent_group_id: row.builder_agent_group_id as string,
     builder_session_id: row.builder_session_id as string,
+    target_workspace_id: (row.target_workspace_id as string | null) ?? null,
+    preview_workspace_id: (row.preview_workspace_id as string | null) ?? null,
+    preview_agent_group_id: (row.preview_agent_group_id as string | null) ?? null,
+    preview_session_id: (row.preview_session_id as string | null) ?? null,
     result_workspace_id: (row.result_workspace_id as string | null) ?? null,
     result_agent_group_id: (row.result_agent_group_id as string | null) ?? null,
     delivery_channel_type: (row.delivery_channel_type as string | null) ?? null,
@@ -59,6 +67,7 @@ function rowToRun(row: Record<string, unknown>): BuildRun {
   return {
     id: row.id as string,
     job_id: row.job_id as string,
+    kind: row.kind === 'test' ? 'test' : 'builder',
     status: row.status as BuildRunStatus,
     worker_status: (row.worker_status as string | null) ?? null,
     error: (row.error as string | null) ?? null,
@@ -71,9 +80,14 @@ export function createBuildJob(input: {
   id: string;
   user_id: string;
   title?: string;
+  job_kind?: BuildJobKind;
   builder_workspace_id: string;
   builder_agent_group_id: string;
   builder_session_id: string;
+  target_workspace_id?: string | null;
+  preview_workspace_id?: string | null;
+  preview_agent_group_id?: string | null;
+  preview_session_id?: string | null;
   delivery_channel_type?: string | null;
   delivery_platform_id?: string | null;
   delivery_thread_id?: string | null;
@@ -82,19 +96,25 @@ export function createBuildJob(input: {
   getGatewayDb()
     .prepare(
       `INSERT INTO build_jobs (
-         id, user_id, status, title,
+         id, user_id, status, job_kind, title,
          builder_workspace_id, builder_agent_group_id, builder_session_id,
+         target_workspace_id, preview_workspace_id, preview_agent_group_id, preview_session_id,
          delivery_channel_type, delivery_platform_id, delivery_thread_id,
          created_at, updated_at
-       ) VALUES (?, ?, 'in_progress', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, 'in_progress', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.id,
       input.user_id,
+      input.job_kind ?? 'create',
       input.title ?? null,
       input.builder_workspace_id,
       input.builder_agent_group_id,
       input.builder_session_id,
+      input.target_workspace_id ?? null,
+      input.preview_workspace_id ?? null,
+      input.preview_agent_group_id ?? null,
+      input.preview_session_id ?? null,
       input.delivery_channel_type ?? null,
       input.delivery_platform_id ?? null,
       input.delivery_thread_id ?? null,
@@ -145,6 +165,7 @@ export function updateBuildJobStatus(
     result_workspace_id?: string | null;
     result_agent_group_id?: string | null;
     title?: string | null;
+    preview_session_id?: string | null;
   },
 ): BuildJob {
   const current = getBuildJob(jobId);
@@ -162,6 +183,8 @@ export function updateBuildJobStatus(
       ? patch.result_agent_group_id
       : current.result_agent_group_id;
   const title = patch?.title !== undefined ? patch.title : current.title;
+  const previewSessionId =
+    patch?.preview_session_id !== undefined ? patch.preview_session_id : current.preview_session_id;
 
   getGatewayDb()
     .prepare(
@@ -171,10 +194,20 @@ export function updateBuildJobStatus(
          result_workspace_id = ?,
          result_agent_group_id = ?,
          title = ?,
+         preview_session_id = ?,
          updated_at = ?
        WHERE id = ?`,
     )
-    .run(status, error, resultWorkspaceId, resultAgentGroupId, title, ts, jobId);
+    .run(
+      status,
+      error,
+      resultWorkspaceId,
+      resultAgentGroupId,
+      title,
+      previewSessionId,
+      ts,
+      jobId,
+    );
 
   return getBuildJob(jobId)!;
 }
@@ -245,15 +278,34 @@ export function listBuildMessages(jobId: string): BuildMessage[] {
   return rows.map(rowToMessage);
 }
 
-export function createBuildRun(input: { id: string; job_id: string }): BuildRun {
+export function createBuildRun(input: { id: string; job_id: string; kind?: BuildRunKind }): BuildRun {
   const ts = now();
   getGatewayDb()
     .prepare(
-      `INSERT INTO build_runs (id, job_id, status, created_at, updated_at)
-       VALUES (?, ?, 'accepted', ?, ?)`,
+      `INSERT INTO build_runs (id, job_id, kind, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'accepted', ?, ?)`,
     )
-    .run(input.id, input.job_id, ts, ts);
+    .run(input.id, input.job_id, input.kind ?? 'builder', ts, ts);
   return getBuildRun(input.id)!;
+}
+
+export function getActiveRunForJob(jobId: string, kind?: BuildRunKind): BuildRun | null {
+  const row = kind
+    ? (getGatewayDb()
+        .prepare(
+          `SELECT * FROM build_runs
+           WHERE job_id = ? AND kind = ? AND status IN ('accepted', 'running')
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(jobId, kind) as Record<string, unknown> | undefined)
+    : (getGatewayDb()
+        .prepare(
+          `SELECT * FROM build_runs
+           WHERE job_id = ? AND status IN ('accepted', 'running')
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(jobId) as Record<string, unknown> | undefined);
+  return row ? rowToRun(row) : null;
 }
 
 export function getBuildRun(runId: string): BuildRun | null {

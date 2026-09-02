@@ -355,6 +355,7 @@ function resetEditor() {
   );
   resetMcpServers();
   clearEditorMessages();
+  hide($('delete-agent-btn'));
 }
 
 function fillEditor(agent) {
@@ -375,6 +376,7 @@ function fillEditor(agent) {
   }
   ensureAtLeastOneFile();
   clearEditorMessages();
+  show($('delete-agent-btn'));
 }
 
 async function loadAgents() {
@@ -396,10 +398,30 @@ async function loadAgents() {
         ${agent.is_default ? '<span class="badge default">default</span>' : ''}
         <div class="agent-meta">${escapeHtml(agent.workspace_id)} · ${agent.files?.length ?? 0} files</div>
       </div>
-      <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">Edit</button>
+      <div class="agent-actions">
+        <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">Edit</button>
+        <button type="button" class="danger secondary delete-agent-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Delete</button>
+      </div>
     `;
     li.querySelector('.edit-agent-btn').addEventListener('click', () => openAgent(agent.workspace_id));
+    li.querySelector('.delete-agent-btn').addEventListener('click', () =>
+      deleteAgent(agent.workspace_id, agent.name),
+    );
     list.appendChild(li);
+  }
+}
+
+async function deleteAgent(workspaceId, name) {
+  if (!confirm(`Delete agent "${name}" permanently?`)) return;
+  try {
+    await api(`/v1/agents/${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
+    if (editingWorkspaceId === workspaceId) {
+      editingWorkspaceId = null;
+      setView('dashboard');
+    }
+    await loadAgents();
+  } catch (err) {
+    alert(err.message || 'Failed to delete agent');
   }
 }
 
@@ -580,6 +602,11 @@ $('md-folder-input').addEventListener('change', (e) => {
 
 $('cancel-editor-btn').addEventListener('click', () => {
   setView('dashboard');
+});
+
+$('delete-agent-btn').addEventListener('click', () => {
+  if (!editingWorkspaceId) return;
+  void deleteAgent(editingWorkspaceId, $('agent-name').value.trim() || 'this agent');
 });
 
 $('save-agent-btn').addEventListener('click', () => void saveAgent());

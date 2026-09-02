@@ -198,6 +198,12 @@ button:disabled {
   color: var(--muted);
 }
 
+.agent-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .badge {
   display: inline-block;
   padding: 0.15rem 0.45rem;

@@ -8,14 +8,17 @@ import {
   WORKER_MAX_BODY_BYTES,
 } from '../config.js';
 import type { ContainerConfigSnapshot } from '../container-config.js';
-import { createAgent, getAgent, updateAgent } from './agent-service.js';
+import { createAgent, deleteAgent, getAgent, updateAgent } from './agent-service.js';
 import {
   BuildError,
   continueBuild,
   getBuild,
   handleBuilderRunCallback,
   listBuilds,
+  runPreviewTest,
+  saveEdit,
   startBuild,
+  startEdit,
 } from './builder/service.js';
 import {
   bindIntegrationToWorkspace,
@@ -47,7 +50,8 @@ import { getOrCreateConversation } from './store/conversations.js';
 import { getHttpResponse, listHttpResponses } from './store/http-responses.js';
 import { AuthError, createSession, createUser, deleteSession, getSession, loginUser } from './store/users.js';
 import { AgentAccessError } from './store/agent-files.js';
-import { listAgentsForUser } from './store/agents.js';
+import { AgentDeleteError } from './store/agents.js';
+import { listUserAgents } from './store/agent-select.js';
 import type { GatewayUser } from './types.js';
 import type { WorkerProcessMessageResponse } from '../worker/types.js';
 
@@ -131,12 +135,10 @@ async function handleCreateAgent(req: http.IncomingMessage, res: http.ServerResp
 
 function handleListAgents(req: http.IncomingMessage, res: http.ServerResponse): void {
   const user = requireUserSession(req);
-  const agents = listAgentsForUser(user.id)
-    .filter((workspace) => !workspace.workspace_id.startsWith('ws-builder-'))
-    .map((workspace) => ({
-      ...workspace,
-      files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
-    }));
+  const agents = listUserAgents(user.id).map((workspace) => ({
+    ...workspace,
+    files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
+  }));
   jsonResponse(res, 200, { agents });
 }
 
@@ -169,9 +171,43 @@ async function handleUpdateAgent(
   jsonResponse(res, 200, { agent });
 }
 
+async function handleDeleteAgent(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const result = await deleteAgent(workspaceId, user.id);
+  jsonResponse(res, 200, {
+    ok: true,
+    deleted: {
+      workspace_id: result.agent.workspace_id,
+      name: result.agent.name,
+    },
+    rebound_workspace_id: result.rebound_workspace_id,
+    rebound_agent_name: result.rebound_agent_name,
+    conversations_rebound: result.conversations_rebound,
+    conversations_cleared: result.conversations_cleared,
+  });
+}
+
 async function handleStartBuild(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const user = requireUserSession(req);
   const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  if (body.kind === 'edit') {
+    const workspaceId = requireString(body, 'workspace_id');
+    const agent = getAgent(workspaceId, user.id);
+    if (!agent) {
+      jsonResponse(res, 404, { error: 'Agent not found' });
+      return;
+    }
+    const job = await startEdit(user, {
+      agent,
+      message: typeof body.message === 'string' ? body.message : undefined,
+    });
+    jsonResponse(res, 202, { job });
+    return;
+  }
   const job = await startBuild(user, {
     message: requireString(body, 'message'),
     title: typeof body.title === 'string' ? body.title : undefined,
@@ -201,6 +237,29 @@ async function handleContinueBuild(
     message: requireString(body, 'message'),
   });
   jsonResponse(res, 202, { job });
+}
+
+async function handlePreviewTest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const job = await runPreviewTest(user, jobId, {
+    message: requireString(body, 'message'),
+  });
+  jsonResponse(res, 202, { job });
+}
+
+async function handleSaveEdit(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  jobId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const job = await saveEdit(user, jobId);
+  jsonResponse(res, 200, { job });
 }
 
 async function handleWorkerRunCallback(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -536,6 +595,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
         await handleUpdateAgent(req, res, workspaceId);
         return;
       }
+      if (req.method === 'DELETE') {
+        await handleDeleteAgent(req, res, workspaceId);
+        return;
+      }
     }
 
     if (req.method === 'GET' && pathname === '/v1/builds') {
@@ -556,6 +619,18 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
     const buildMessageMatch = pathname.match(/^\/v1\/builds\/([^/]+)\/messages$/);
     if (buildMessageMatch && req.method === 'POST') {
       await handleContinueBuild(req, res, decodeURIComponent(buildMessageMatch[1]!));
+      return;
+    }
+
+    const buildTestMatch = pathname.match(/^\/v1\/builds\/([^/]+)\/test$/);
+    if (buildTestMatch && req.method === 'POST') {
+      await handlePreviewTest(req, res, decodeURIComponent(buildTestMatch[1]!));
+      return;
+    }
+
+    const buildSaveMatch = pathname.match(/^\/v1\/builds\/([^/]+)\/save$/);
+    if (buildSaveMatch && req.method === 'POST') {
+      await handleSaveEdit(req, res, decodeURIComponent(buildSaveMatch[1]!));
       return;
     }
 
@@ -670,6 +745,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
     if (err instanceof AgentAccessError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
+    if (err instanceof AgentDeleteError) {
       jsonResponse(res, err.status, { error: err.message });
       return;
     }

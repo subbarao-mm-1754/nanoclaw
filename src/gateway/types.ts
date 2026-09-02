@@ -94,10 +94,14 @@ export interface InboundEnqueueInput {
   timestamp: string;
 }
 
-/** Full agent-build unit of work (one job per build; never reused). */
+/** Full agent-build unit of work (one job per build or edit; never reused). */
 export type BuildJobStatus = 'in_progress' | 'waiting_for_user' | 'completed' | 'failed';
 
+export type BuildJobKind = 'create' | 'edit';
+
 export type BuildRunStatus = 'accepted' | 'running' | 'completed' | 'failed';
+
+export type BuildRunKind = 'builder' | 'test';
 
 export type BuildMessageRole = 'user' | 'builder' | 'system';
 
@@ -105,10 +109,17 @@ export interface BuildJob {
   id: string;
   user_id: string;
   status: BuildJobStatus;
+  job_kind: BuildJobKind;
   title: string | null;
   builder_workspace_id: string;
   builder_agent_group_id: string;
   builder_session_id: string;
+  /** Existing user agent being edited (`edit` jobs only). */
+  target_workspace_id: string | null;
+  /** Draft workspace used for `/test` while editing — not bound to Cliq. */
+  preview_workspace_id: string | null;
+  preview_agent_group_id: string | null;
+  preview_session_id: string | null;
   result_workspace_id: string | null;
   result_agent_group_id: string | null;
   /** Where builder replies are delivered (e.g. zoho-cliq chat). */
@@ -137,6 +148,7 @@ export interface BuildMessage {
 export interface BuildRun {
   id: string;
   job_id: string;
+  kind: BuildRunKind;
   status: BuildRunStatus;
   worker_status: string | null;
   error: string | null;

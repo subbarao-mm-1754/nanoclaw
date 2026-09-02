@@ -500,11 +500,25 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 /**
  * Parse the agent's final text for <message to="name">...</message> blocks
  * and dispatch each one to its resolved destination. Text outside of blocks
- * (including <internal>...</internal>) is scratchpad — logged but not sent.
+ * (including <internal>...</internal>) is scratchpad — logged but not sent,
+ * except ```nanoclaw-build fences which Gateway registration depends on.
  *
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
+function extractNanoclawBuildFence(text: string): string | null {
+  const marker = text.match(/```nanoclaw-build\b/i);
+  if (!marker || marker.index === undefined) return null;
+  const from = marker.index;
+  const afterMarker = text.slice(from + marker[0].length);
+  const close = afterMarker.match(/\n```/);
+  if (!close || close.index === undefined) {
+    // Unclosed fence — take the rest (better than dropping registration payload).
+    return text.slice(from).trim();
+  }
+  return text.slice(from, from + marker[0].length + close.index + close[0].length).trim();
+}
+
 function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -512,6 +526,7 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
+  let lastDest: DestinationEntry | null = null;
 
   while ((match = MESSAGE_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
@@ -528,6 +543,7 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       continue;
     }
     sendToDestination(dest, body, routing);
+    lastDest = dest;
     sent++;
   }
   if (lastIndex < text.length) {
@@ -538,6 +554,15 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
 
   if (scratchpad) {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
+  }
+
+  // Models often put the Gateway registration fence outside <message> tags.
+  // Without this salvage, /build never completes even though the model "emitted" it.
+  const buildFence = extractNanoclawBuildFence(scratchpad);
+  if (buildFence && sent > 0 && lastDest) {
+    sendToDestination(lastDest, buildFence, routing);
+    sent++;
+    log('Salvaged nanoclaw-build fence from scratchpad into outbound');
   }
 
   let hasUnwrapped = sent === 0 && !!scratchpad.trim();

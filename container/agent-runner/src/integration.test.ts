@@ -206,6 +206,32 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('salvages nanoclaw-build fence left outside <message> tags', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'build it' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const fence = '```nanoclaw-build\n{"status":"completed","agent_name":"BizOps","files":[{"path":"CLAUDE.local.md","content":"# BizOps"}]}\n```';
+    const provider = new MockProvider(
+      {},
+      () =>
+        `<message to="discord-test">Done — BizOps is defined below.</message>\n\n${fence}`,
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out.length).toBeGreaterThanOrEqual(2);
+    const texts = out.map((m) => JSON.parse(m.content).text as string);
+    expect(texts.some((t) => t.includes('BizOps is defined below'))).toBe(true);
+    expect(texts.some((t) => t.includes('nanoclaw-build') && t.includes('"status":"completed"'))).toBe(
+      true,
+    );
+
+    await loopPromise.catch(() => {});
+  });
+
   it('sends null thread_id when no prior inbound from destination', async () => {
     // Seed a second destination that has NO inbound messages
     getInboundDb()

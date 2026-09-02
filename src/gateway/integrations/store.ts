@@ -304,6 +304,40 @@ export function upsertPendingConnection(
   return getConnection(id)!;
 }
 
+/** Update MCP URL / name on a connected row without resetting status to pending. */
+export function patchConnectionMcpMeta(
+  connectionId: string,
+  input: {
+    mcpUrl?: string | null;
+    mcpServerName?: string | null;
+    registrationId?: string | null;
+    resource?: string | null;
+  },
+): OAuthConnection {
+  const existing = getConnection(connectionId);
+  if (!existing) throw new Error(`OAuth connection not found: ${connectionId}`);
+  const ts = now();
+  getGatewayDb()
+    .prepare(
+      `UPDATE gateway_oauth_connections SET
+         mcp_url = COALESCE(?, mcp_url),
+         mcp_server_name = COALESCE(?, mcp_server_name),
+         registration_id = COALESCE(?, registration_id),
+         resource = COALESCE(?, resource),
+         updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      input.mcpUrl !== undefined ? input.mcpUrl : null,
+      input.mcpServerName !== undefined ? input.mcpServerName : null,
+      input.registrationId !== undefined ? input.registrationId : null,
+      input.resource !== undefined ? input.resource : null,
+      ts,
+      connectionId,
+    );
+  return getConnection(connectionId)!;
+}
+
 export function applyTokenSet(
   connectionId: string,
   tokens: TokenSet,

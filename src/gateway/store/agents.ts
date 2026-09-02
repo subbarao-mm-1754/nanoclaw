@@ -9,6 +9,11 @@ import {
   saveAgentFiles,
 } from './agent-files.js';
 import {
+  deleteConversationsForWorkspace,
+  rebindConversationsToWorkspace,
+} from './conversations.js';
+import {
+  deleteWorkspace,
   getWorkspace,
   listAgentsForUser,
   registerWorkspace,
@@ -16,6 +21,20 @@ import {
 } from './workspaces.js';
 
 export { listAgentsForUser, assertAgentOwner, defaultContainerConfig, mergeAgentFiles };
+
+function isDeletableUserAgent(workspaceId: string): boolean {
+  return !workspaceId.startsWith('ws-builder-') && !workspaceId.startsWith('ws-preview-');
+}
+
+export class AgentDeleteError extends Error {
+  constructor(
+    message: string,
+    readonly status = 400,
+  ) {
+    super(message);
+    this.name = 'AgentDeleteError';
+  }
+}
 
 export function getAgentForUser(workspaceId: string, userId: string): GatewayAgent | null {
   const workspace = getWorkspace(workspaceId);
@@ -78,4 +97,48 @@ export function updateAgentFilesRecord(
 
 export function getAgentFilesForPrepare(workspaceId: string): GatewayAgentFile[] {
   return listAgentFiles(workspaceId);
+}
+
+export type DeleteAgentResult = {
+  agent: GatewayAgent;
+  rebound_workspace_id: string | null;
+  rebound_agent_name: string | null;
+  conversations_rebound: number;
+  conversations_cleared: number;
+};
+
+/** Remove a user-facing agent from the Gateway DB (files + workspace + chat bindings). */
+export function deleteAgentRecord(workspaceId: string, userId: string): DeleteAgentResult {
+  assertAgentOwner(workspaceId, userId);
+  if (!isDeletableUserAgent(workspaceId)) {
+    throw new AgentDeleteError('Internal builder/preview workspaces cannot be deleted this way');
+  }
+
+  const agent = getAgentForUser(workspaceId, userId);
+  if (!agent) throw new AgentDeleteError('Agent not found', 404);
+
+  const fallback = listAgentsForUser(userId)
+    .filter((w) => w.workspace_id !== workspaceId && isDeletableUserAgent(w.workspace_id))
+    .sort((a, b) => {
+      if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
+      return b.updated_at.localeCompare(a.updated_at);
+    })[0];
+
+  let conversationsRebound = 0;
+  let conversationsCleared = 0;
+  if (fallback) {
+    conversationsRebound = rebindConversationsToWorkspace(workspaceId, fallback);
+  } else {
+    conversationsCleared = deleteConversationsForWorkspace(workspaceId);
+  }
+
+  deleteWorkspace(workspaceId);
+
+  return {
+    agent,
+    rebound_workspace_id: fallback?.workspace_id ?? null,
+    rebound_agent_name: fallback?.name ?? null,
+    conversations_rebound: conversationsRebound,
+    conversations_cleared: conversationsCleared,
+  };
 }

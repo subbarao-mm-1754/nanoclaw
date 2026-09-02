@@ -100,6 +100,27 @@ function migrateGatewaySchema(db: Database.Database): void {
     if (!columnExists(db, 'build_jobs', 'pending_mcp_server_name')) {
       db.exec(`ALTER TABLE build_jobs ADD COLUMN pending_mcp_server_name TEXT`);
     }
+    if (!columnExists(db, 'build_jobs', 'job_kind')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN job_kind TEXT NOT NULL DEFAULT 'create'`);
+    }
+    if (!columnExists(db, 'build_jobs', 'target_workspace_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN target_workspace_id TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'preview_workspace_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN preview_workspace_id TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'preview_agent_group_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN preview_agent_group_id TEXT`);
+    }
+    if (!columnExists(db, 'build_jobs', 'preview_session_id')) {
+      db.exec(`ALTER TABLE build_jobs ADD COLUMN preview_session_id TEXT`);
+    }
+  }
+
+  if (tableExists(db, 'build_runs')) {
+    if (!columnExists(db, 'build_runs', 'kind')) {
+      db.exec(`ALTER TABLE build_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'builder'`);
+    }
   }
 
   db.exec(`
@@ -249,10 +270,15 @@ export function initGatewaySchema(db: Database.Database): void {
       status                   TEXT NOT NULL CHECK(status IN (
                                  'in_progress', 'waiting_for_user', 'completed', 'failed'
                                )),
+      job_kind                 TEXT NOT NULL DEFAULT 'create',
       title                    TEXT,
       builder_workspace_id     TEXT NOT NULL,
       builder_agent_group_id   TEXT NOT NULL,
       builder_session_id       TEXT NOT NULL,
+      target_workspace_id      TEXT,
+      preview_workspace_id     TEXT,
+      preview_agent_group_id   TEXT,
+      preview_session_id       TEXT,
       result_workspace_id      TEXT,
       result_agent_group_id    TEXT,
       delivery_channel_type    TEXT,
@@ -286,6 +312,7 @@ export function initGatewaySchema(db: Database.Database): void {
     CREATE TABLE IF NOT EXISTS build_runs (
       id             TEXT PRIMARY KEY,
       job_id         TEXT NOT NULL REFERENCES build_jobs(id) ON DELETE CASCADE,
+      kind           TEXT NOT NULL DEFAULT 'builder',
       status         TEXT NOT NULL CHECK(status IN (
                        'accepted', 'running', 'completed', 'failed'
                      )),
