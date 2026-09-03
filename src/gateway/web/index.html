@@ -43,6 +43,62 @@
       <section id="dashboard-section" class="hidden">
         <div class="card">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
+            <h2 style="margin: 0">Channels</h2>
+          </div>
+          <div id="cliq-channel-panel">
+            <div id="cliq-oauth-app" class="hidden" style="margin-bottom: 1.25rem; padding-bottom: 1.25rem; border-bottom: 1px solid var(--border)">
+              <h3 style="margin: 0 0 0.35rem; font-size: 0.95rem">1. Gateway OAuth app</h3>
+              <p id="cliq-oauth-app-hint" style="color: var(--muted); font-size: 0.9rem; margin: 0 0 0.75rem">
+                Admin only. Shared Client ID and Secret for all users (Multi-DC enabled).
+                Each user's Cliq data center is detected on Connect from Zoho's OAuth redirect.
+                Saved to <code>gateway.db</code> — not per-user, not in git.
+              </p>
+              <label for="cliq-app-client-id">Client ID</label>
+              <input id="cliq-app-client-id" type="text" autocomplete="off" />
+              <label for="cliq-app-client-secret">Client Secret</label>
+              <input id="cliq-app-client-secret" type="password" autocomplete="new-password" placeholder="••••••••" />
+              <label for="cliq-app-api-url">Default Cliq API URL (optional — per-user DC is detected on Connect)</label>
+              <input id="cliq-app-api-url" type="text" placeholder="https://cliq.zoho.com (fallback only)" />
+              <div class="actions" style="margin-top: 0.75rem">
+                <button type="button" id="cliq-save-oauth-app-btn">Save OAuth app</button>
+              </div>
+            </div>
+
+            <h3 id="cliq-account-heading" style="margin: 0 0 0.35rem; font-size: 0.95rem">Your Cliq account</h3>
+            <p style="color: var(--muted); font-size: 0.9rem; margin: 0 0 0.75rem">
+              Per-user: authorize your Zoho account, then set the chats/bot this account should use.
+            </p>
+            <div class="channel-row">
+              <div>
+                <strong>Connection</strong>
+                <div class="agent-meta" id="cliq-status-meta">Checking…</div>
+              </div>
+              <div class="agent-actions" id="cliq-actions"></div>
+            </div>
+            <div id="cliq-config" class="hidden" style="margin-top: 1rem">
+              <label for="cliq-chat-ids">Chat IDs to poll (comma-separated)</label>
+              <input id="cliq-chat-ids" type="text" placeholder="CT_…" />
+              <label for="cliq-bot-name">Bot unique name</label>
+              <input id="cliq-bot-name" type="text" placeholder="my_bot" />
+              <label for="cliq-channel-endpoint">Channel message endpoint</label>
+              <input
+                id="cliq-channel-endpoint"
+                type="text"
+                placeholder="https://cliq.zoho.com/api/v2/channelsbyname/…/message"
+              />
+              <div class="actions" style="margin-top: 0.75rem">
+                <button type="button" id="cliq-save-btn">Save my Cliq settings</button>
+                <button type="button" class="danger secondary" id="cliq-disconnect-btn">Disconnect</button>
+              </div>
+              <p class="empty" id="cliq-config-hint" style="margin-top: 0.75rem"></p>
+            </div>
+            <div id="cliq-error" class="error hidden" style="margin-top: 0.75rem"></div>
+            <div id="cliq-success" class="success hidden" style="margin-top: 0.75rem"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem">
             <h2 style="margin: 0">Your agents</h2>
             <button type="button" id="new-agent-btn">New agent</button>
           </div>

@@ -14,6 +14,7 @@ export {
   markFailed,
   getMessageIn,
   findQuestionResponse,
+  findKnowledgeResponse,
 } from './messages-in.js';
 export type { MessageInRow } from './messages-in.js';
 export { writeMessageOut, getUndeliveredMessages } from './messages-out.js';

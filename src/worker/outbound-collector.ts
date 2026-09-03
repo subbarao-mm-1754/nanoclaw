@@ -8,6 +8,7 @@ import { log } from '../log.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from '../session-manager.js';
 import { isContainerRunning } from '../container-runner.js';
 import type { WorkerCollectedOutbound, WorkerDelivery } from './types.js';
+import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
 
 const POLL_MS = 1000;
 const POST_STOP_GRACE_MS = 2000;
@@ -30,6 +31,7 @@ function encodeFiles(files: Array<{ filename: string; data: Buffer }>): WorkerCo
 }
 
 export interface CollectOutboundOptions {
+  workspaceId: string;
   agentGroupId: string;
   sessionId: string;
   delivery: WorkerDelivery;
@@ -43,14 +45,14 @@ export interface CollectOutboundOptions {
  * messages (any further outbounds are picked up by a subsequent job).
  */
 export async function collectOutboundMessages(opts: CollectOutboundOptions): Promise<WorkerCollectedOutbound[]> {
-  const { agentGroupId, sessionId, delivery, timeoutMs } = opts;
+  const { workspaceId, agentGroupId, sessionId, delivery, timeoutMs } = opts;
   const collected: WorkerCollectedOutbound[] = [];
   const collectedIds = new Set<string>();
   const deadline = Date.now() + timeoutMs;
   let containerStoppedAt: number | null = null;
 
   while (Date.now() < deadline) {
-    const batch = drainOutboundBatch(agentGroupId, sessionId, delivery, collectedIds);
+    const batch = await drainOutboundBatch(workspaceId, agentGroupId, sessionId, delivery, collectedIds);
     for (const msg of batch) {
       collected.push(msg);
       collectedIds.add(msg.id);
@@ -74,7 +76,7 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
   }
 
   if (collected.length === 0) {
-    const tail = drainOutboundBatch(agentGroupId, sessionId, delivery, collectedIds);
+    const tail = await drainOutboundBatch(workspaceId, agentGroupId, sessionId, delivery, collectedIds);
     collected.push(...tail);
   }
 
@@ -87,12 +89,13 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
   return collected;
 }
 
-function drainOutboundBatch(
+async function drainOutboundBatch(
+  workspaceId: string,
   agentGroupId: string,
   sessionId: string,
   delivery: WorkerDelivery,
   skipIds: Set<string>,
-): WorkerCollectedOutbound[] {
+): Promise<WorkerCollectedOutbound[]> {
   const results: WorkerCollectedOutbound[] = [];
   const outDb = openOutboundDb(agentGroupId, sessionId);
   const inDb = openInboundDb(agentGroupId, sessionId);
@@ -104,6 +107,20 @@ function drainOutboundBatch(
 
     for (const msg of due) {
       if (msg.kind === 'system' || msg.channel_type === 'agent') {
+        // Handle knowledge_request before marking delivered so the container
+        // MCP tool can receive a knowledge_response on inbound.db.
+        if (msg.kind === 'system') {
+          try {
+            await handleKnowledgeSystemMessage({
+              workspaceId,
+              agentGroupId,
+              sessionId,
+              rawContent: msg.content,
+            });
+          } catch (err) {
+            log.error('Failed handling system knowledge action', { sessionId, msgId: msg.id, err });
+          }
+        }
         markDelivered(inDb, msg.id, null);
         continue;
       }

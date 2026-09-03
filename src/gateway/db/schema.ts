@@ -15,6 +15,17 @@ function columnExists(db: Database.Database, table: string, column: string): boo
 
 /** Add columns/tables introduced after the initial gateway schema. */
 function migrateGatewaySchema(db: Database.Database): void {
+  if (tableExists(db, 'gateway_users') && !columnExists(db, 'gateway_users', 'is_admin')) {
+    db.exec(`ALTER TABLE gateway_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Bootstrap operator account — shared Cliq OAuth app is admin-only.
+  const bootstrapAdmin =
+    (process.env.GATEWAY_BOOTSTRAP_ADMIN_EMAIL || 'nano@nano.com').trim().toLowerCase();
+  if (bootstrapAdmin && tableExists(db, 'gateway_users')) {
+    db.prepare(`UPDATE gateway_users SET is_admin = 1 WHERE lower(email) = ?`).run(bootstrapAdmin);
+  }
+
   if (tableExists(db, 'gateway_workspaces')) {
     if (!columnExists(db, 'gateway_workspaces', 'owner_user_id')) {
       db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN owner_user_id TEXT REFERENCES gateway_users(id)`);
@@ -147,6 +158,12 @@ function migrateGatewaySchema(db: Database.Database): void {
       created_at                  TEXT NOT NULL,
       updated_at                  TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS gateway_settings (
+      key         TEXT PRIMARY KEY,
+      value       TEXT NOT NULL,
+      updated_at  TEXT NOT NULL
+    );
   `);
 }
 
@@ -158,6 +175,7 @@ export function initGatewaySchema(db: Database.Database): void {
       email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
       password_hash TEXT NOT NULL,
       display_name  TEXT NOT NULL,
+      is_admin      INTEGER NOT NULL DEFAULT 0,
       created_at    TEXT NOT NULL
     );
 

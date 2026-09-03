@@ -12,6 +12,7 @@ import { upsertChannelConnection } from './store/channels.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
 import { enqueueInboundMessage } from './store/messages.js';
 import { findConversation, getOrCreateConversation } from './store/conversations.js';
+import { getUserById } from './store/users.js';
 
 function newMessageId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -42,13 +43,24 @@ function resolveWorkspaceForNewConversation(
 ): string | undefined {
   if (findConversation(channelType, platformId, threadId)) return undefined;
   try {
-    const senderId = extractSenderId(content, platformId);
-    const user = ensureUserForChannelSender({
-      channel_type: channelType,
-      sender_id: senderId,
-      display_name: extractSenderName(content, senderDisplayName),
-    });
-    const agents = listUserAgents(user.id);
+    let userId: string | undefined;
+    if (content && typeof content === 'object') {
+      const gatewayUserId = (content as Record<string, unknown>).gatewayUserId;
+      if (typeof gatewayUserId === 'string' && gatewayUserId.trim()) {
+        const owner = getUserById(gatewayUserId.trim());
+        if (owner) userId = owner.id;
+      }
+    }
+    if (!userId) {
+      const senderId = extractSenderId(content, platformId);
+      const user = ensureUserForChannelSender({
+        channel_type: channelType,
+        sender_id: senderId,
+        display_name: extractSenderName(content, senderDisplayName),
+      });
+      userId = user.id;
+    }
+    const agents = listUserAgents(userId);
     return agents[0]?.workspace_id;
   } catch {
     return undefined;

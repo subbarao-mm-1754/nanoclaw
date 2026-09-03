@@ -350,6 +350,7 @@ describe('collectOutboundMessages', () => {
 
     isContainerRunningMock.mockReturnValue(false);
     const outbound = await collectOutboundMessages({
+      workspaceId: job.workspace_id,
       agentGroupId: job.session.agent_group_id,
       sessionId: job.session.id,
       delivery: job.delivery,

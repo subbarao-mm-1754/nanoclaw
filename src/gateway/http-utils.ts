@@ -3,7 +3,20 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const WEB_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'web');
+/**
+ * Prefer the web/ folder next to this module (tsx → src/gateway/web).
+ * Fall back to src/gateway/web from cwd when running a compiled dist/
+ * build that doesn't copy static assets.
+ */
+function resolveWebRoot(): string {
+  const beside = path.join(path.dirname(fileURLToPath(import.meta.url)), 'web');
+  if (fs.existsSync(path.join(beside, 'index.html'))) return beside;
+  const fromSrc = path.resolve(process.cwd(), 'src', 'gateway', 'web');
+  if (fs.existsSync(path.join(fromSrc, 'index.html'))) return fromSrc;
+  return beside;
+}
+
+const WEB_ROOT = resolveWebRoot();
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

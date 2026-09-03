@@ -34,6 +34,17 @@ import {
   unbindIntegrationFromWorkspace,
 } from './integrations/broker.js';
 import {
+  disconnectCliqAccount,
+  getCliqStatusForUser,
+  notifyCliqAccountsChanged,
+  startCliqConnect,
+  updateCliqAccountConfig,
+} from './channels/zoho-cliq-accounts.js';
+import {
+  getCliqOAuthAppPublic,
+  setCliqOAuthApp,
+} from './integrations/providers/zoho-cliq.js';
+import {
   bearerToken,
   jsonResponse,
   parseAgentFiles,
@@ -44,16 +55,17 @@ import {
 import { log } from '../log.js';
 import { listChannelConnections } from './store/channels.js';
 import { countMessagesByStatus, getMessage } from './store/messages.js';
-import { listWorkspaces, registerWorkspace } from './store/workspaces.js';
+import { listWorkspaces, registerWorkspace, getWorkspace } from './store/workspaces.js';
 import { enqueueInboundMessage } from './store/messages.js';
 import { getOrCreateConversation } from './store/conversations.js';
 import { getHttpResponse, listHttpResponses } from './store/http-responses.js';
 import { AuthError, createSession, createUser, deleteSession, getSession, loginUser } from './store/users.js';
 import { AgentAccessError } from './store/agent-files.js';
-import { AgentDeleteError } from './store/agents.js';
+import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { listUserAgents } from './store/agent-select.js';
 import type { GatewayUser } from './types.js';
 import type { WorkerProcessMessageResponse } from '../worker/types.js';
+import { executeKnowledgeRequest, isKnowledgeEnabled, type KnowledgeOp } from '../knowledge/store.js';
 
 let server: http.Server | null = null;
 
@@ -77,6 +89,26 @@ function requireUserSession(req: http.IncomingMessage): GatewayUser {
   const session = getSession(token);
   if (!session) throw new AuthError('Invalid or expired session', 401);
   return session.user;
+}
+
+function requireAdminSession(req: http.IncomingMessage): GatewayUser {
+  const user = requireUserSession(req);
+  if (!user.is_admin) {
+    throw new AuthError('Admin access required', 403);
+  }
+  return user;
+}
+
+function cliqOAuthAppForViewer(user: GatewayUser) {
+  const app = getCliqOAuthAppPublic();
+  if (user.is_admin) {
+    return { ...app, can_manage: true };
+  }
+  // Non-admins only need to know whether the shared app is ready — no client id.
+  return {
+    configured: app.configured,
+    can_manage: false,
+  };
 }
 
 function parseContainerConfig(raw: unknown): ContainerConfigSnapshot | undefined {
@@ -393,6 +425,90 @@ function handleListIntegrations(req: http.IncomingMessage, res: http.ServerRespo
   jsonResponse(res, 200, { integrations: listUserIntegrations(user.id) });
 }
 
+function handleGetCliqChannel(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, {
+    ...getCliqStatusForUser(user.id),
+    oauth_app: cliqOAuthAppForViewer(user),
+  });
+}
+
+/**
+ * Configure the shared Zoho Cliq OAuth app (client id/secret).
+ * Admins (or Bearer GATEWAY_AUTH_TOKEN) only — not regular users.
+ */
+async function handleSetCliqOAuthApp(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (GATEWAY_AUTH_TOKEN) {
+    const header = req.headers.authorization;
+    const bearer = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
+    if (bearer === GATEWAY_AUTH_TOKEN) {
+      // operator token
+    } else {
+      requireAdminSession(req);
+    }
+  } else {
+    requireAdminSession(req);
+  }
+
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const app = setCliqOAuthApp({
+    client_id: requireString(body, 'client_id'),
+    client_secret: requireString(body, 'client_secret'),
+    api_url: typeof body.api_url === 'string' ? body.api_url : undefined,
+    accounts_url: typeof body.accounts_url === 'string' ? body.accounts_url : undefined,
+    bot_unique_name: typeof body.bot_unique_name === 'string' ? body.bot_unique_name : undefined,
+    channel_endpoint:
+      typeof body.channel_endpoint === 'string' ? body.channel_endpoint : undefined,
+  });
+  notifyCliqAccountsChanged();
+  jsonResponse(res, 200, { oauth_app: { ...app, can_manage: true } });
+}
+
+async function handleConnectCliqChannel(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const result = await startCliqConnect(user.id);
+  jsonResponse(res, 200, result);
+}
+
+async function handleUpdateCliqChannel(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const chatIds = Array.isArray(body.chat_ids)
+    ? body.chat_ids.filter((id): id is string => typeof id === 'string')
+    : undefined;
+  const status = updateCliqAccountConfig(user.id, {
+    chat_ids: chatIds,
+    bot_unique_name:
+      body.bot_unique_name === null
+        ? null
+        : typeof body.bot_unique_name === 'string'
+          ? body.bot_unique_name
+          : undefined,
+    channel_endpoint:
+      body.channel_endpoint === null
+        ? null
+        : typeof body.channel_endpoint === 'string'
+          ? body.channel_endpoint
+          : undefined,
+  });
+  jsonResponse(res, 200, status);
+}
+
+function handleDisconnectCliqChannel(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  disconnectCliqAccount(user.id);
+  jsonResponse(res, 200, { ok: true });
+}
+
 async function handleDiscoverRegister(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -478,6 +594,9 @@ async function handleOAuthCallbackHttp(url: URL, res: http.ServerResponse): Prom
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
   const error = url.searchParams.get('error');
+  // Zoho Multi-DC redirect params — identify the user's Accounts DC for token exchange.
+  const accountsServer = url.searchParams.get('accounts-server');
+  const location = url.searchParams.get('location');
   if (error) {
     res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<html><body><h1>OAuth failed</h1><p>${error}</p></body></html>`);
@@ -487,7 +606,13 @@ async function handleOAuthCallbackHttp(url: URL, res: http.ServerResponse): Prom
     jsonResponse(res, 400, { error: 'code and state are required' });
     return;
   }
-  const result = await handleOAuthCallback({ code, state });
+  const result = await handleOAuthCallback({ code, state, accountsServer, location });
+  if (result.connection.provider === 'zoho-cliq') {
+    const { cliqOAuthSuccessHtml } = await import('./channels/zoho-cliq-accounts.js');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(cliqOAuthSuccessHtml());
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(
     `<html><body><h1>Connected</h1><p>Provider linked. You can close this window and return to Cliq.</p>` +
@@ -532,6 +657,128 @@ function handleUnbindAgentIntegration(
   jsonResponse(res, 200, { ok: true });
 }
 
+async function handleInternalKnowledge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const workspaceId = requireString(body, 'workspace_id');
+  const op = requireString(body, 'op') as KnowledgeOp;
+  const workspace = getWorkspace(workspaceId);
+  if (!workspace) {
+    jsonResponse(res, 404, { ok: false, error: 'Workspace not found' });
+    return;
+  }
+
+  const result = await executeKnowledgeRequest({
+    op,
+    workspace_id: workspaceId,
+    path: typeof body.path === 'string' ? body.path : undefined,
+    title: typeof body.title === 'string' ? body.title : undefined,
+    content: typeof body.content === 'string' ? body.content : undefined,
+    query: typeof body.query === 'string' ? body.query : undefined,
+    prefix: typeof body.prefix === 'string' ? body.prefix : undefined,
+    limit: typeof body.limit === 'number' ? body.limit : undefined,
+    metadata:
+      body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+        ? (body.metadata as Record<string, unknown>)
+        : undefined,
+  });
+
+  jsonResponse(res, result.ok ? 200 : 400, result);
+}
+
+async function handleUserKnowledge(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  url: URL,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const agent = getAgentForUser(workspaceId, user.id);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return;
+  }
+  if (!isKnowledgeEnabled()) {
+    jsonResponse(res, 503, {
+      error: 'Knowledge store disabled. Set KNOWLEDGE_DATABASE_URL on the gateway.',
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname.endsWith('/search')) {
+    const q = url.searchParams.get('q') ?? '';
+    const limit = url.searchParams.get('limit');
+    const result = await executeKnowledgeRequest({
+      op: 'search',
+      workspace_id: workspaceId,
+      query: q,
+      limit: limit ? Number(limit) : undefined,
+    });
+    jsonResponse(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === 'GET') {
+    const prefix = url.searchParams.get('prefix') ?? undefined;
+    const limit = url.searchParams.get('limit');
+    const pathParam = url.searchParams.get('path');
+    if (pathParam) {
+      const result = await executeKnowledgeRequest({
+        op: 'get',
+        workspace_id: workspaceId,
+        path: pathParam,
+      });
+      jsonResponse(res, result.ok ? 200 : result.error?.startsWith('Not found') ? 404 : 400, result);
+      return;
+    }
+    const result = await executeKnowledgeRequest({
+      op: 'list',
+      workspace_id: workspaceId,
+      prefix,
+      limit: limit ? Number(limit) : undefined,
+    });
+    jsonResponse(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === 'POST' || req.method === 'PUT') {
+    const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+    const result = await executeKnowledgeRequest({
+      op: 'save',
+      workspace_id: workspaceId,
+      path: requireString(body, 'path'),
+      content: requireString(body, 'content'),
+      title: typeof body.title === 'string' ? body.title : undefined,
+      metadata:
+        body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+          ? (body.metadata as Record<string, unknown>)
+          : undefined,
+    });
+    jsonResponse(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  if (req.method === 'DELETE') {
+    const pathParam = url.searchParams.get('path');
+    if (!pathParam) {
+      jsonResponse(res, 400, { error: 'path query param required' });
+      return;
+    }
+    const result = await executeKnowledgeRequest({
+      op: 'delete',
+      workspace_id: workspaceId,
+      path: pathParam,
+    });
+    jsonResponse(res, result.ok ? 200 : 400, result);
+    return;
+  }
+
+  jsonResponse(res, 405, { error: 'Method not allowed' });
+}
+
 async function route(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   const { pathname } = url;
@@ -551,7 +798,7 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
   const legacyAuth =
     pathname.startsWith('/v1/workspaces') ||
     pathname.startsWith('/v1/messages') ||
-    pathname.startsWith('/v1/channels');
+    pathname === '/v1/channels';
   if (legacyAuth && !authorizeLegacy(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
     return;
@@ -639,6 +886,17 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/v1/internal/knowledge') {
+      await handleInternalKnowledge(req, res);
+      return;
+    }
+
+    const agentKnowledgeMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/knowledge(?:\/search)?$/);
+    if (agentKnowledgeMatch) {
+      await handleUserKnowledge(req, res, decodeURIComponent(agentKnowledgeMatch[1]!), url);
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/v1/workspaces') {
       jsonResponse(res, 200, { workspaces: listWorkspaces() });
       return;
@@ -651,6 +909,27 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     if (req.method === 'GET' && pathname === '/v1/channels') {
       jsonResponse(res, 200, { channels: listChannelConnections() });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/v1/channels/zoho-cliq') {
+      handleGetCliqChannel(req, res);
+      return;
+    }
+    if (req.method === 'PUT' && pathname === '/v1/channels/zoho-cliq/oauth-app') {
+      await handleSetCliqOAuthApp(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/channels/zoho-cliq/connect') {
+      await handleConnectCliqChannel(req, res);
+      return;
+    }
+    if (req.method === 'PATCH' && pathname === '/v1/channels/zoho-cliq') {
+      await handleUpdateCliqChannel(req, res);
+      return;
+    }
+    if (req.method === 'DELETE' && pathname === '/v1/channels/zoho-cliq') {
+      handleDisconnectCliqChannel(req, res);
       return;
     }
 

@@ -121,6 +121,8 @@ export interface OAuthProviderConfig {
     code: string;
     redirectUri: string;
     codeVerifier: string | null;
+    /** Zoho Multi-DC: accounts host from OAuth redirect (`accounts-server`). */
+    accountsBase?: string | null;
   }): Promise<TokenSet>;
   refresh(refreshToken: string): Promise<TokenSet>;
 }

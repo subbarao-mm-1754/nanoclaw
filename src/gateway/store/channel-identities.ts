@@ -10,6 +10,41 @@ function now(): string {
 }
 
 /**
+ * Bind an existing Gateway user to a messaging-platform identity
+ * (e.g. after Zoho Cliq OAuth). Reassigns the identity if it was linked
+ * to a different auto-created user.
+ */
+export function linkChannelIdentity(input: {
+  user_id: string;
+  channel_type: string;
+  sender_id: string;
+  display_name?: string;
+}): void {
+  const channelType = input.channel_type.trim();
+  const senderId = input.sender_id.trim();
+  const userId = input.user_id.trim();
+  if (!channelType || !senderId || !userId) {
+    throw new Error('user_id, channel_type and sender_id are required');
+  }
+  const user = getUserById(userId);
+  if (!user) throw new Error(`User not found: ${userId}`);
+
+  const displayName = (input.display_name?.trim() || user.display_name || senderId).slice(0, 80);
+  const ts = now();
+  getGatewayDb()
+    .prepare(
+      `INSERT INTO gateway_channel_identities
+         (channel_type, sender_id, user_id, display_name, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(channel_type, sender_id) DO UPDATE SET
+         user_id = excluded.user_id,
+         display_name = excluded.display_name,
+         updated_at = excluded.updated_at`,
+    )
+    .run(channelType, senderId, userId, displayName, ts, ts);
+}
+
+/**
  * Resolve or create a Gateway user for a messaging-platform sender
  * (e.g. zoho-cliq:<zuid>). Same Cliq person always maps to the same user.
  */

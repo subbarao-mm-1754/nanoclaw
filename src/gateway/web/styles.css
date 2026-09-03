@@ -204,6 +204,13 @@ button:disabled {
   flex-shrink: 0;
 }
 
+.channel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
 .badge {
   display: inline-block;
   padding: 0.15rem 0.45rem;

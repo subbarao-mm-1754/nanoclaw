@@ -6,7 +6,16 @@ import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from 
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'ONECLI_URL',
+  'ONECLI_API_KEY',
+  'TZ',
+  'KNOWLEDGE_DATABASE_URL',
+  'DATABASE_URL',
+  'KNOWLEDGE_ENABLED',
+]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -99,3 +108,20 @@ export const GATEWAY_SKIP_CHANNELS: string[] = (() => {
   if (raw.trim() === '') return [];
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 })();
+
+/**
+ * Postgres URL for durable per-agent knowledge (markdown/text searchable store).
+ * Prefer KNOWLEDGE_DATABASE_URL; falls back to DATABASE_URL.
+ * Example: postgresql://nanoclaw:nanoclaw@127.0.0.1:5433/nanoclaw_knowledge
+ */
+export const KNOWLEDGE_DATABASE_URL =
+  process.env.KNOWLEDGE_DATABASE_URL ||
+  envConfig.KNOWLEDGE_DATABASE_URL ||
+  process.env.DATABASE_URL ||
+  envConfig.DATABASE_URL ||
+  '';
+/** When false, knowledge APIs/tools return a clear disabled error. Default: on if URL set. */
+export const KNOWLEDGE_ENABLED =
+  (process.env.KNOWLEDGE_ENABLED ??
+    envConfig.KNOWLEDGE_ENABLED ??
+    (KNOWLEDGE_DATABASE_URL ? 'true' : 'false')) === 'true';

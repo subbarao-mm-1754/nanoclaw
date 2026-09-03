@@ -32,6 +32,7 @@ import { getActiveBuildJobForUser } from './store/builds.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
 import { findConversation, setConversationWorkspace } from './store/conversations.js';
 import type { GatewayAgent, GatewayUser } from './types.js';
+import { getUserById } from './store/users.js';
 
 export const BUILD_HELP_TEXT = [
   'Same Cliq chat is used for building agents, editing them, and talking to them.',
@@ -244,11 +245,22 @@ export async function routeChannelInbound(input: {
     input.sender_display_name,
   );
 
-  const user: GatewayUser = ensureUserForChannelSender({
-    channel_type: input.channel_type,
-    sender_id: senderId,
-    display_name: displayName,
-  });
+  // Multi-account channels (e.g. Zoho Cliq) tag inbound with the Gateway user
+  // who owns the OAuth connection — prefer that over auto-created sender users.
+  let user: GatewayUser | null = null;
+  if (input.content && typeof input.content === 'object') {
+    const gatewayUserId = (input.content as Record<string, unknown>).gatewayUserId;
+    if (typeof gatewayUserId === 'string' && gatewayUserId.trim()) {
+      user = getUserById(gatewayUserId.trim());
+    }
+  }
+  if (!user) {
+    user = ensureUserForChannelSender({
+      channel_type: input.channel_type,
+      sender_id: senderId,
+      display_name: displayName,
+    });
+  }
 
   const delivery = {
     channel_type: input.channel_type,

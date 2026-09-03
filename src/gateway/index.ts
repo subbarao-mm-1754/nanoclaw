@@ -6,6 +6,8 @@
  * then deletes completed messages from the gateway database.
  */
 import '../channels/index.js';
+import { registerZohoCliqMultiAdapter } from './channels/zoho-cliq-multi.js';
+registerZohoCliqMultiAdapter();
 import './http-channel.js';
 
 import {
@@ -15,6 +17,7 @@ import {
   GATEWAY_PROCESS_INTERVAL_MS,
 } from '../config.js';
 import { log } from '../log.js';
+import { closeKnowledgePool, initKnowledgeSchema } from '../knowledge/store.js';
 import { startGatewayChannels, stopGatewayChannels } from './channel-manager.js';
 import { initGatewayDb, closeGatewayDb } from './db/connection.js';
 import { startMessageProcessor, stopMessageProcessor } from './processor.js';
@@ -45,6 +48,7 @@ async function main(): Promise<void> {
   log.info('NanoClaw gateway starting');
 
   initGatewayDb();
+  await initKnowledgeSchema();
   seedDefaultWorkspace();
 
   await startGatewayServer();
@@ -59,6 +63,7 @@ async function shutdown(signal: string): Promise<void> {
   stopMessageProcessor();
   await stopGatewayChannels();
   await stopGatewayServer();
+  await closeKnowledgePool();
   closeGatewayDb();
   process.exit(0);
 }

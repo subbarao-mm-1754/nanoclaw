@@ -196,6 +196,7 @@ export async function runProcessMessageJob(
   const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
   const collectStartedAt = Date.now();
   const outbound = await collectOutboundMessages({
+    workspaceId: job.workspace_id,
     agentGroupId,
     sessionId,
     delivery: job.delivery,

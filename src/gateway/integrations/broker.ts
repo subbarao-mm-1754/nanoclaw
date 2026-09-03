@@ -63,6 +63,14 @@ import {
   type OAuthConnectionPublic,
   type OAuthRegistrationPublic,
 } from './types.js';
+import { ZOHO_CLIQ_PROVIDER_ID } from './providers/zoho-cliq.js';
+
+/** Channel OAuth providers — tokens stay on the gateway, not synced to OneCLI. */
+const CHANNEL_OAUTH_PROVIDERS = new Set([ZOHO_CLIQ_PROVIDER_ID]);
+
+export function isChannelOAuthProvider(provider: string): boolean {
+  return CHANNEL_OAUTH_PROVIDERS.has(provider);
+}
 
 const ACCESS_REFRESH_SKEW_MS = 60_000;
 const PLACEHOLDER_BEARER = 'onecli-managed';
@@ -175,7 +183,9 @@ export function listRegistrationsPublic(): OAuthRegistrationPublic[] {
 }
 
 export function listUserIntegrations(userId: string): OAuthConnectionPublic[] {
-  return listConnectionsForUser(userId).map(toPublicConnection);
+  return listConnectionsForUser(userId)
+    .filter((c) => !isChannelOAuthProvider(c.provider))
+    .map(toPublicConnection);
 }
 
 export function listWorkspaceIntegrations(
@@ -499,6 +509,10 @@ export async function startOAuthConnect(input: {
 export async function handleOAuthCallback(input: {
   code: string;
   state: string;
+  /** Zoho Multi-DC: `accounts-server` from the OAuth redirect. */
+  accountsServer?: string | null;
+  /** Zoho Multi-DC: `location` from the OAuth redirect (e.g. `in`, `eu`). */
+  location?: string | null;
 }): Promise<{
   connection: OAuthConnectionPublic;
   workspace_id: string | null;
@@ -530,10 +544,21 @@ export async function handleOAuthCallback(input: {
       if (!provider) {
         throw new IntegrationError(`Unknown OAuth provider: ${oauthState.provider}`, 404);
       }
+      let accountsBase: string | null | undefined;
+      if (oauthState.provider === ZOHO_CLIQ_PROVIDER_ID) {
+        const { resolveAccountsBaseFromOAuthRedirect } = await import(
+          './providers/zoho-cliq.js'
+        );
+        accountsBase = resolveAccountsBaseFromOAuthRedirect({
+          accountsServer: input.accountsServer,
+          location: input.location,
+        });
+      }
       tokens = await provider.exchangeCode({
         code: input.code,
         redirectUri: oauthRedirectUri(),
         codeVerifier: oauthState.code_verifier,
+        accountsBase,
       });
     }
 
@@ -545,7 +570,12 @@ export async function handleOAuthCallback(input: {
     }
 
     let updated = applyTokenSet(connection.id, tokens);
-    updated = await syncConnectionToOnecli(updated);
+    if (!isChannelOAuthProvider(oauthState.provider)) {
+      updated = await syncConnectionToOnecli(updated);
+    } else if (oauthState.provider === ZOHO_CLIQ_PROVIDER_ID) {
+      const { finalizeCliqChannelConnect } = await import('../channels/zoho-cliq-accounts.js');
+      updated = await finalizeCliqChannelConnect(updated);
+    }
 
     let workspaceId = oauthState.workspace_id;
 
@@ -800,7 +830,7 @@ export async function ensureWorkspaceIntegrations(workspaceId: string): Promise<
   if (!workspace) return;
 
   const connections = listConnectionsForWorkspace(workspaceId).filter(
-    (c) => c.status === 'connected' && c.refresh_token,
+    (c) => c.status === 'connected' && c.refresh_token && !isChannelOAuthProvider(c.provider),
   );
   if (connections.length === 0) return;
 

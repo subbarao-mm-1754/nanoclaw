@@ -356,9 +356,20 @@ export function applyTokenSet(
       : existing.access_token_expires_at;
   const scopes = tokens.scope ?? existing.scopes;
   const accountLabel = tokens.account_label ?? existing.account_label;
-  const metadataJson = tokens.metadata
-    ? JSON.stringify(tokens.metadata)
-    : existing.metadata_json;
+  // Merge token metadata into existing JSON so channel fields (chat_ids, …)
+  // survive access-token refreshes that only carry api_domain.
+  let metadataJson = existing.metadata_json;
+  if (tokens.metadata) {
+    let existingMeta: Record<string, unknown> = {};
+    if (existing.metadata_json) {
+      try {
+        existingMeta = JSON.parse(existing.metadata_json) as Record<string, unknown>;
+      } catch {
+        existingMeta = {};
+      }
+    }
+    metadataJson = JSON.stringify({ ...existingMeta, ...tokens.metadata });
+  }
 
   getGatewayDb()
     .prepare(
@@ -388,6 +399,44 @@ export function applyTokenSet(
     );
 
   return getConnection(connectionId)!;
+}
+
+/** Deep-merge keys into connection.metadata_json (preserves other fields). */
+export function mergeConnectionMetadata(
+  connectionId: string,
+  patch: Record<string, unknown>,
+): OAuthConnection {
+  const existing = getConnection(connectionId);
+  if (!existing) throw new Error(`OAuth connection not found: ${connectionId}`);
+  let meta: Record<string, unknown> = {};
+  if (existing.metadata_json) {
+    try {
+      meta = JSON.parse(existing.metadata_json) as Record<string, unknown>;
+    } catch {
+      meta = {};
+    }
+  }
+  const ts = now();
+  const metadataJson = JSON.stringify({ ...meta, ...patch });
+  getGatewayDb()
+    .prepare(
+      `UPDATE gateway_oauth_connections
+       SET metadata_json = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(metadataJson, ts, connectionId);
+  return getConnection(connectionId)!;
+}
+
+export function listConnectionsByProvider(provider: string): OAuthConnection[] {
+  const rows = getGatewayDb()
+    .prepare(
+      `SELECT * FROM gateway_oauth_connections
+       WHERE provider = ? AND status = 'connected'
+       ORDER BY updated_at DESC`,
+    )
+    .all(provider) as Array<Record<string, unknown>>;
+  return rows.map(mapConnection);
 }
 
 export function setOnecliSecretId(connectionId: string, secretId: string | null): void {

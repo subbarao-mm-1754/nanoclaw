@@ -2,6 +2,13 @@ import { generateId, generateSessionToken, hashPassword, sessionExpiresAt, verif
 import { getGatewayDb } from '../db/connection.js';
 import type { GatewaySession, GatewayUser } from '../types.js';
 
+/** Email promoted to admin on gateway DB init (override via GATEWAY_BOOTSTRAP_ADMIN_EMAIL). */
+export const GATEWAY_BOOTSTRAP_ADMIN_EMAIL = (
+  process.env.GATEWAY_BOOTSTRAP_ADMIN_EMAIL || 'nano@nano.com'
+)
+  .trim()
+  .toLowerCase();
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -11,6 +18,7 @@ function rowToUser(row: Record<string, unknown>): GatewayUser {
     id: row.id as string,
     email: row.email as string,
     display_name: row.display_name as string,
+    is_admin: Boolean(row.is_admin),
     created_at: row.created_at as string,
   };
 }
@@ -25,10 +33,15 @@ export class AuthError extends Error {
   }
 }
 
+export function isBootstrapAdminEmail(email: string): boolean {
+  return email.trim().toLowerCase() === GATEWAY_BOOTSTRAP_ADMIN_EMAIL;
+}
+
 export function createUser(input: {
   email: string;
   password: string;
   display_name: string;
+  is_admin?: boolean;
 }): GatewayUser {
   const email = input.email.trim().toLowerCase();
   if (!email.includes('@')) throw new AuthError('Invalid email address');
@@ -40,24 +53,47 @@ export function createUser(input: {
 
   const id = generateId('user');
   const ts = now();
+  const isAdmin = (input.is_admin ?? isBootstrapAdminEmail(email)) ? 1 : 0;
   db.prepare(
-    `INSERT INTO gateway_users (id, email, password_hash, display_name, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(id, email, hashPassword(input.password), input.display_name.trim(), ts);
+    `INSERT INTO gateway_users (id, email, password_hash, display_name, is_admin, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, email, hashPassword(input.password), input.display_name.trim(), isAdmin, ts);
 
   return getUserById(id)!;
 }
 
 export function getUserById(id: string): GatewayUser | null {
   const row = getGatewayDb()
-    .prepare('SELECT id, email, display_name, created_at FROM gateway_users WHERE id = ?')
+    .prepare(
+      'SELECT id, email, display_name, is_admin, created_at FROM gateway_users WHERE id = ?',
+    )
     .get(id) as Record<string, unknown> | undefined;
   return row ? rowToUser(row) : null;
 }
 
+export function getUserByEmail(email: string): GatewayUser | null {
+  const row = getGatewayDb()
+    .prepare(
+      'SELECT id, email, display_name, is_admin, created_at FROM gateway_users WHERE email = ?',
+    )
+    .get(email.trim().toLowerCase()) as Record<string, unknown> | undefined;
+  return row ? rowToUser(row) : null;
+}
+
+export function setUserAdmin(userId: string, isAdmin: boolean): GatewayUser {
+  getGatewayDb()
+    .prepare('UPDATE gateway_users SET is_admin = ? WHERE id = ?')
+    .run(isAdmin ? 1 : 0, userId);
+  const user = getUserById(userId);
+  if (!user) throw new AuthError('User not found', 404);
+  return user;
+}
+
 export function loginUser(email: string, password: string): { user: GatewayUser; session: GatewaySession } {
   const row = getGatewayDb()
-    .prepare('SELECT id, email, display_name, password_hash, created_at FROM gateway_users WHERE email = ?')
+    .prepare(
+      'SELECT id, email, display_name, is_admin, password_hash, created_at FROM gateway_users WHERE email = ?',
+    )
     .get(email.trim().toLowerCase()) as Record<string, unknown> | undefined;
   if (!row || !verifyPassword(password, row.password_hash as string)) {
     throw new AuthError('Invalid email or password', 401);
@@ -83,7 +119,7 @@ export function getSession(token: string): (GatewaySession & { user: GatewayUser
   const row = getGatewayDb()
     .prepare(
       `SELECT s.token, s.user_id, s.expires_at, s.created_at,
-              u.email, u.display_name, u.created_at AS user_created_at
+              u.email, u.display_name, u.is_admin, u.created_at AS user_created_at
        FROM gateway_sessions s
        JOIN gateway_users u ON u.id = s.user_id
        WHERE s.token = ?`,
@@ -106,6 +142,7 @@ export function getSession(token: string): (GatewaySession & { user: GatewayUser
       id: row.user_id as string,
       email: row.email as string,
       display_name: row.display_name as string,
+      is_admin: Boolean(row.is_admin),
       created_at: row.user_created_at as string,
     },
   };

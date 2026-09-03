@@ -411,6 +411,178 @@ async function loadAgents() {
   }
 }
 
+function showCliqError(msg) {
+  const el = $('cliq-error');
+  el.textContent = msg;
+  show(el);
+  hide($('cliq-success'));
+}
+
+function showCliqSuccess(msg) {
+  const el = $('cliq-success');
+  el.textContent = msg;
+  show(el);
+  hide($('cliq-error'));
+}
+
+function clearCliqMessages() {
+  hide($('cliq-error'));
+  hide($('cliq-success'));
+  $('cliq-error').textContent = '';
+  $('cliq-success').textContent = '';
+}
+
+function renderCliqStatus(status) {
+  const meta = $('cliq-status-meta');
+  const actions = $('cliq-actions');
+  actions.innerHTML = '';
+  const oauthApp = status.oauth_app || {};
+  const appConfigured = Boolean(status.oauth_app_configured || oauthApp.configured);
+  const canManageOAuth = Boolean(currentUser?.is_admin && oauthApp.can_manage !== false);
+
+  if (canManageOAuth) {
+    show($('cliq-oauth-app'));
+    $('cliq-account-heading').textContent = '2. Your Cliq account';
+    const hint = $('cliq-oauth-app-hint');
+    if (oauthApp.source === 'gateway_db') {
+      hint.innerHTML =
+        'Admin only. Gateway OAuth app is in <code>gateway.db</code> (shared). Bot name, channel endpoint, and chat IDs are set per user after Connect.';
+    } else if (oauthApp.source === 'env') {
+      hint.innerHTML =
+        'Admin only. Client ID/Secret are currently from <code>.env</code>. Save them below into <code>gateway.db</code> (recommended). Bot/chat settings stay per-user.';
+    } else {
+      hint.innerHTML =
+        'Admin only. Shared Client ID and Secret for all users. Saved to <code>gateway.db</code> — not per-user, not in git.';
+    }
+
+    if (oauthApp.client_id && !$('cliq-app-client-id').value.trim()) {
+      $('cliq-app-client-id').value = oauthApp.client_id;
+    }
+    if (oauthApp.api_url && !$('cliq-app-api-url').value.trim()) {
+      $('cliq-app-api-url').value = oauthApp.api_url;
+    }
+  } else {
+    hide($('cliq-oauth-app'));
+    $('cliq-account-heading').textContent = 'Your Cliq account';
+  }
+
+  if (!appConfigured) {
+    meta.textContent = canManageOAuth
+      ? 'Save the gateway OAuth app first (step 1)'
+      : 'Waiting for an admin to configure the Zoho Cliq OAuth app';
+    hide($('cliq-config'));
+    return;
+  }
+
+  if (!status.connected) {
+    meta.textContent = 'Not connected — authorize your Zoho account';
+    hide($('cliq-config'));
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Connect Zoho Cliq';
+    btn.addEventListener('click', () => void connectCliq());
+    actions.appendChild(btn);
+    return;
+  }
+
+  const label = status.cliq_display_name || status.cliq_user_id || 'Connected';
+  const chatCount = status.chat_ids?.length ?? 0;
+  meta.innerHTML = `<span class="badge default">connected</span> ${escapeHtml(label)} · ${chatCount} chat${chatCount === 1 ? '' : 's'}`;
+
+  $('cliq-chat-ids').value = (status.chat_ids || []).join(', ');
+  $('cliq-bot-name').value =
+    status.bot_unique_name || status.defaults?.bot_unique_name || '';
+  $('cliq-channel-endpoint').value =
+    status.channel_endpoint || status.defaults?.channel_endpoint || '';
+  $('cliq-config-hint').textContent = chatCount
+    ? 'These settings are only for your account. Gateway polls these chats with your token.'
+    : 'Add at least one Chat ID, then Save — otherwise nothing is polled for your account.';
+  show($('cliq-config'));
+}
+
+async function saveCliqOAuthApp() {
+  clearCliqMessages();
+  try {
+    await api('/v1/channels/zoho-cliq/oauth-app', {
+      method: 'PUT',
+      body: JSON.stringify({
+        client_id: $('cliq-app-client-id').value.trim(),
+        client_secret: $('cliq-app-client-secret').value.trim(),
+        api_url: $('cliq-app-api-url').value.trim() || undefined,
+      }),
+    });
+    $('cliq-app-client-secret').value = '';
+    showCliqSuccess('Gateway OAuth app saved. Next: Connect your Cliq account.');
+    await loadCliqChannel();
+  } catch (err) {
+    showCliqError(err.message || 'Failed to save OAuth app');
+  }
+}
+
+async function loadCliqChannel() {
+  clearCliqMessages();
+  try {
+    const status = await api('/v1/channels/zoho-cliq');
+    renderCliqStatus(status);
+  } catch (err) {
+    $('cliq-status-meta').textContent = err.message || 'Failed to load Cliq status';
+    hide($('cliq-config'));
+  }
+}
+
+async function connectCliq() {
+  clearCliqMessages();
+  try {
+    const result = await api('/v1/channels/zoho-cliq/connect', { method: 'POST' });
+    if (result.reused) {
+      showCliqSuccess('Already connected.');
+      await loadCliqChannel();
+      return;
+    }
+    if (result.authorize_url) {
+      window.location.href = result.authorize_url;
+      return;
+    }
+    showCliqError('No authorize URL returned');
+  } catch (err) {
+    showCliqError(err.message || 'Connect failed');
+  }
+}
+
+async function saveCliqConfig() {
+  clearCliqMessages();
+  const chat_ids = $('cliq-chat-ids')
+    .value.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  try {
+    const status = await api('/v1/channels/zoho-cliq', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        chat_ids,
+        bot_unique_name: $('cliq-bot-name').value.trim() || null,
+        channel_endpoint: $('cliq-channel-endpoint').value.trim() || null,
+      }),
+    });
+    renderCliqStatus(status);
+    showCliqSuccess('Cliq settings saved. Polling will use the updated chats.');
+  } catch (err) {
+    showCliqError(err.message || 'Save failed');
+  }
+}
+
+async function disconnectCliq() {
+  if (!confirm('Disconnect Zoho Cliq for your account?')) return;
+  clearCliqMessages();
+  try {
+    await api('/v1/channels/zoho-cliq', { method: 'DELETE' });
+    await loadCliqChannel();
+    showCliqSuccess('Disconnected.');
+  } catch (err) {
+    showCliqError(err.message || 'Disconnect failed');
+  }
+}
+
 async function deleteAgent(workspaceId, name) {
   if (!confirm(`Delete agent "${name}" permanently?`)) return;
   try {
@@ -500,6 +672,7 @@ async function bootstrap() {
     const data = await api('/v1/auth/me');
     currentUser = data.user;
     renderUserBar();
+    await loadCliqChannel();
     await loadAgents();
     setView('dashboard');
   } catch {
@@ -534,6 +707,7 @@ $('login-form').addEventListener('submit', async (e) => {
     setToken(data.token);
     currentUser = data.user;
     renderUserBar();
+    await loadCliqChannel();
     await loadAgents();
     setView('dashboard');
   } catch (err) {
@@ -557,6 +731,7 @@ $('register-form').addEventListener('submit', async (e) => {
     currentUser = data.user;
     renderUserBar();
     setView('dashboard');
+    await loadCliqChannel();
     await loadAgents();
   } catch (err) {
     showAuthError(err.message);
@@ -610,6 +785,10 @@ $('delete-agent-btn').addEventListener('click', () => {
 });
 
 $('save-agent-btn').addEventListener('click', () => void saveAgent());
+
+$('cliq-save-btn').addEventListener('click', () => void saveCliqConfig());
+$('cliq-disconnect-btn').addEventListener('click', () => void disconnectCliq());
+$('cliq-save-oauth-app-btn').addEventListener('click', () => void saveCliqOAuthApp());
 
 $('agent-name').addEventListener('input', () => {
   if (!editingWorkspaceId && !$('agent-folder').value.trim()) {
