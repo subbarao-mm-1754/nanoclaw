@@ -1,6 +1,7 @@
 import os from 'os';
 import path from 'path';
 
+import { GLOBAL_AGENT_MODEL } from './agent-defaults.js';
 import { readEnvFile } from './env.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
@@ -15,6 +16,7 @@ const envConfig = readEnvFile([
   'KNOWLEDGE_DATABASE_URL',
   'DATABASE_URL',
   'KNOWLEDGE_ENABLED',
+  'AGENT_MODEL',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -125,3 +127,11 @@ export const KNOWLEDGE_ENABLED =
   (process.env.KNOWLEDGE_ENABLED ??
     envConfig.KNOWLEDGE_ENABLED ??
     (KNOWLEDGE_DATABASE_URL ? 'true' : 'false')) === 'true';
+
+/**
+ * Model for every Claude-provider agent container.
+ * Prefer AGENT_MODEL in `.env`; otherwise `GLOBAL_AGENT_MODEL` in agent-defaults.ts.
+ * Per-agent `container_config.model` is ignored at spawn time.
+ */
+export const AGENT_MODEL =
+  process.env.AGENT_MODEL || envConfig.AGENT_MODEL || GLOBAL_AGENT_MODEL;

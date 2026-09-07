@@ -15,7 +15,7 @@ import { GATEWAY_PUBLIC_URL } from '../../config.js';
 import { log } from '../../log.js';
 import { getWorkspace, updateWorkspaceMetadata } from '../store/workspaces.js';
 import { assertAgentOwner } from '../store/agent-files.js';
-import { defaultContainerConfig } from '../store/agent-files.js';
+import { applyGlobalContainerDefaults, defaultContainerConfig } from '../store/agent-files.js';
 import type { ContainerConfigSnapshot, McpServerConfig } from '../../container-config.js';
 import { assignSecretToAgent, upsertAccessTokenSecret } from './onecli-sync.js';
 import { discoverFromIssuer, discoverFromMcpUrl } from './discovery.js';
@@ -774,7 +774,10 @@ export async function attachRemoteMcpToWorkspace(
     connection.provider.replace(/^mcp:/, '').replace(/[^a-zA-Z0-9_-]/g, '_') ||
     'remote';
 
-  const existing = workspace.container_config ?? defaultContainerConfig(workspace.name);
+  const existing = applyGlobalContainerDefaults(
+    workspace.container_config ?? defaultContainerConfig(workspace.name),
+    workspace.name,
+  );
   const mcpServers: Record<string, McpServerConfig> = { ...(existing.mcpServers ?? {}) };
   const prev = mcpServers[name];
 

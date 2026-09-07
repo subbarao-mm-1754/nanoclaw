@@ -11,7 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from './config.js';
+import { AGENT_MODEL, GROUPS_DIR } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
@@ -73,7 +73,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     assistantName: row.assistant_name ?? group.name,
     agentGroupId: group.id,
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
-    model: row.model ?? undefined,
+    // Global model (AGENT_MODEL / agent-defaults) — not per-group DB value.
+    model: AGENT_MODEL,
     effort: row.effort ?? undefined,
   };
 }
@@ -89,7 +90,8 @@ export function containerConfigFromSnapshot(
     additionalMounts: snapshot.additionalMounts ?? [],
     skills: snapshot.skills ?? 'all',
     provider: snapshot.provider,
-    model: snapshot.model,
+    // Global model — ignore per-agent snapshot.model.
+    model: AGENT_MODEL,
     effort: snapshot.effort,
     imageTag: snapshot.imageTag,
     assistantName: snapshot.assistantName ?? group.name,

@@ -3,6 +3,7 @@ import type { ContainerConfigSnapshot } from '../../container-config.js';
 import type { GatewayAgent, GatewayAgentFile } from '../types.js';
 import {
   assertAgentOwner,
+  applyGlobalContainerDefaults,
   defaultContainerConfig,
   listAgentFiles,
   mergeAgentFiles,
@@ -56,7 +57,10 @@ export function createAgentRecord(input: {
   const workspaceId = input.workspace_id ?? generateId('ws');
   const agentGroupId = input.agent_group_id ?? generateId('ag');
   const folder = input.folder ?? slugifyName(input.name);
-  const containerConfig = input.container_config ?? defaultContainerConfig(input.name);
+  const containerConfig = applyGlobalContainerDefaults(
+    input.container_config ?? defaultContainerConfig(input.name),
+    input.name,
+  );
 
   const workspace = registerWorkspace({
     workspace_id: workspaceId,

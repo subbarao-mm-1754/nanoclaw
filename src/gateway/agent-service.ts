@@ -14,7 +14,11 @@ import {
   updateAgentMetadata,
   type DeleteAgentResult,
 } from './store/agents.js';
-import { defaultContainerConfig, listAgentFiles } from './store/agent-files.js';
+import {
+  applyGlobalContainerDefaults,
+  defaultContainerConfig,
+  listAgentFiles,
+} from './store/agent-files.js';
 import { mergeFilesWithBrowserSessions } from './store/browser-sessions.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import { getUserById } from './store/users.js';
@@ -41,7 +45,7 @@ function buildPreparePayload(
       agent_group_id: workspace.agent_group_id,
       name: workspace.name,
       folder: workspace.folder ?? undefined,
-      container_config: workspace.container_config ?? defaultContainerConfig(workspace.name),
+      container_config: applyGlobalContainerDefaults(workspace.container_config, workspace.name),
       cli_scope: workspace.cli_scope,
       files: filesWithSessions,
     },
@@ -107,7 +111,10 @@ export async function createAgent(input: {
   const workspaceId = generateId('ws');
   const agentGroupId = generateId('ag');
   const folder = input.folder ?? slugifyName(input.name);
-  const containerConfig = input.container_config ?? defaultContainerConfig(input.name);
+  const containerConfig = applyGlobalContainerDefaults(
+    input.container_config ?? defaultContainerConfig(input.name),
+    input.name,
+  );
   const cliScope = input.cli_scope ?? 'group';
 
   const draft = {
@@ -182,7 +189,9 @@ export async function updateAgent(
   if (hasMeta) {
     agent = updateAgentMetadata(workspaceId, userId, {
       name: input.name,
-      container_config: input.container_config,
+      container_config: input.container_config
+        ? applyGlobalContainerDefaults(input.container_config, input.name ?? agent.name)
+        : undefined,
       cli_scope: input.cli_scope,
       is_default: input.is_default,
     });

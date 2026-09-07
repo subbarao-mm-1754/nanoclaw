@@ -1,6 +1,10 @@
+import { GLOBAL_AGENT_MODEL } from '../../agent-defaults.js';
+import { AGENT_MODEL } from '../../config.js';
 import type { ContainerConfigSnapshot } from '../../container-config.js';
 import { getGatewayDb } from '../db/connection.js';
 import type { GatewayAgentFile } from '../types.js';
+
+export { GLOBAL_AGENT_MODEL };
 
 function now(): string {
   return new Date().toISOString();
@@ -46,11 +50,25 @@ export function mergeAgentFiles(existing: GatewayAgentFile[], updates: GatewayAg
 export function defaultContainerConfig(name: string): ContainerConfigSnapshot {
   return {
     provider: 'claude',
+    model: AGENT_MODEL,
     skills: 'all',
     assistantName: name,
     mcpServers: {},
     packages: { apt: [], npm: [] },
     additionalMounts: [],
+  };
+}
+
+/** Force global model/provider fields onto any stored snapshot. */
+export function applyGlobalContainerDefaults(
+  snapshot: ContainerConfigSnapshot | null | undefined,
+  name: string,
+): ContainerConfigSnapshot {
+  const base = snapshot ?? defaultContainerConfig(name);
+  return {
+    ...base,
+    provider: base.provider ?? 'claude',
+    model: AGENT_MODEL,
   };
 }
 

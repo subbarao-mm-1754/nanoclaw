@@ -4,6 +4,7 @@ import { createAgent, updateAgent } from '../agent-service.js';
 import { ensureOnecliAgent } from '../integrations/onecli-sync.js';
 import { log } from '../../log.js';
 import {
+  applyGlobalContainerDefaults,
   defaultContainerConfig,
   listAgentFiles,
   mergeAgentFiles,
@@ -564,7 +565,10 @@ async function preparePreviewWorkspace(job: BuildJob, agent: GatewayAgent): Prom
   if (!workspaceId || !agentGroupId) return;
 
   const files = listAgentFiles(workspaceId);
-  const containerConfig = agent.container_config ?? defaultContainerConfig(agent.name);
+  const containerConfig = applyGlobalContainerDefaults(
+    agent.container_config ?? defaultContainerConfig(agent.name),
+    agent.name,
+  );
   const draftName = `${agent.name} (draft)`;
 
   registerWorkspace({
@@ -613,7 +617,10 @@ async function syncEditPreview(
   // Preview workspace must exist in gateway_workspaces before saving files (FK).
   const target = job.target_workspace_id ? getWorkspace(job.target_workspace_id) : null;
   const displayName = agentName?.trim() || target?.name || job.title || 'Draft agent';
-  const containerConfig = target?.container_config ?? defaultContainerConfig(displayName);
+  const containerConfig = applyGlobalContainerDefaults(
+    target?.container_config ?? defaultContainerConfig(displayName),
+    displayName,
+  );
   const draftName = `${displayName} (draft)`;
 
   registerWorkspace({
@@ -670,7 +677,10 @@ async function refreshPreviewForTest(job: BuildJob): Promise<BuildJob> {
 
   const target = fresh.target_workspace_id ? getWorkspace(fresh.target_workspace_id) : null;
   const displayName = fromMessages.agentName?.trim() || target?.name || fresh.title || 'Draft agent';
-  const containerConfig = target?.container_config ?? defaultContainerConfig(displayName);
+  const containerConfig = applyGlobalContainerDefaults(
+    target?.container_config ?? defaultContainerConfig(displayName),
+    displayName,
+  );
   const draftName = `${displayName} (draft)`;
   const sessionNonce = generateId('s').slice(2, 10);
   const nextSessionId = previewSessionId(fresh.id, sessionNonce);
