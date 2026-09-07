@@ -30,6 +30,12 @@ export interface WorkerPrepareWorkspaceRequest {
   options?: {
     /** When true, replace an existing workspace with the same workspace_id. Default false. */
     replace?: boolean;
+    /**
+     * When true and the workspace already exists, rewrite files/config in place
+     * without deleting the workspace root. Safe while a container still mounts
+     * `/workspace/agent`. Prefer this over `replace` for routine refreshes.
+     */
+    refresh?: boolean;
   };
 }
 

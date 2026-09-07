@@ -9,6 +9,7 @@ import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from '../
 import { isContainerRunning } from '../container-runner.js';
 import type { WorkerCollectedOutbound, WorkerDelivery } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
+import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
 
 const POLL_MS = 1000;
 const POST_STOP_GRACE_MS = 2000;
@@ -111,14 +112,23 @@ async function drainOutboundBatch(
         // MCP tool can receive a knowledge_response on inbound.db.
         if (msg.kind === 'system') {
           try {
-            await handleKnowledgeSystemMessage({
+            const handledBrowser = await handleBrowserSessionSystemMessage({
               workspaceId,
               agentGroupId,
               sessionId,
+              delivery,
               rawContent: msg.content,
             });
+            if (!handledBrowser) {
+              await handleKnowledgeSystemMessage({
+                workspaceId,
+                agentGroupId,
+                sessionId,
+                rawContent: msg.content,
+              });
+            }
           } catch (err) {
-            log.error('Failed handling system knowledge action', { sessionId, msgId: msg.id, err });
+            log.error('Failed handling system action', { sessionId, msgId: msg.id, err });
           }
         }
         markDelivered(inDb, msg.id, null);

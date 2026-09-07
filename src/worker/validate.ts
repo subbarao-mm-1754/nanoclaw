@@ -136,6 +136,12 @@ export function parsePrepareWorkspaceRequest(
       }
       options.replace = opts.replace;
     }
+    if (opts.refresh !== undefined) {
+      if (typeof opts.refresh !== 'boolean') {
+        throw new WorkerValidationError('body.options.refresh must be a boolean');
+      }
+      options.refresh = opts.refresh;
+    }
   }
 
   return {

@@ -103,20 +103,18 @@ agent-browser find placeholder "Search" type "query"
 
 ### Authentication with saved state
 
-```bash
-# Login once
-agent-browser open https://app.example.com/login
-agent-browser snapshot -i
-agent-browser fill @e1 "username"
-agent-browser fill @e2 "password"
-agent-browser click @e3
-agent-browser wait --url "**/dashboard"
-agent-browser state save auth.json
+**Do not ask the user for passwords in chat.** Prefer `request_browser_session` (MCP) so the gateway opens a headed browser on the host and notifies the user (Cliq). Gateway-injected sessions live under `browser-sessions/` (see `browser-sessions/index.json`).
 
-# Later: load saved state
-agent-browser state load auth.json
+```bash
+# After the user confirms login (or when index.json already lists the site)
+agent-browser state load browser-sessions/<id>.json
 agent-browser open https://app.example.com/dashboard
+
+# After browsing, persist refreshed cookies for the gateway
+agent-browser state save browser-sessions/<id>.json
 ```
+
+Public sites need no `state load` — just `open` the URL.
 
 ### Cookies & Storage
 

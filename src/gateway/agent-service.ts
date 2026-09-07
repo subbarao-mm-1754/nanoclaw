@@ -15,6 +15,7 @@ import {
   type DeleteAgentResult,
 } from './store/agents.js';
 import { defaultContainerConfig, listAgentFiles } from './store/agent-files.js';
+import { mergeFilesWithBrowserSessions } from './store/browser-sessions.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import { getUserById } from './store/users.js';
 import { getWorkspace } from './store/workspaces.js';
@@ -30,8 +31,10 @@ function buildPreparePayload(
     container_config: ContainerConfigSnapshot | null;
   },
   files: GatewayAgentFile[],
-  replace: boolean,
+  options: { replace?: boolean; refresh?: boolean } = {},
 ) {
+  // Inject bound browser session storageState files (not stored in agent_files).
+  const filesWithSessions = mergeFilesWithBrowserSessions(workspace.workspace_id, files);
   return {
     workspace_id: workspace.workspace_id,
     agent: {
@@ -40,9 +43,9 @@ function buildPreparePayload(
       folder: workspace.folder ?? undefined,
       container_config: workspace.container_config ?? defaultContainerConfig(workspace.name),
       cli_scope: workspace.cli_scope,
-      files,
+      files: filesWithSessions,
     },
-    options: { replace },
+    options,
   };
 }
 
@@ -54,7 +57,8 @@ function isAlreadyExistsError(err: unknown): boolean {
 /**
  * Ensure the Worker has an on-disk workspace for this agent.
  * Creates from Gateway DB files when missing (e.g. after deleting worker-workspaces/).
- * No-op if the workspace already exists on the Worker.
+ * When the workspace already exists, refreshes files **in place** (never deletes the
+ * mount root — that breaks running containers still bound to `/workspace/agent`).
  */
 export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void> {
   const workspace = getWorkspace(workspaceId);
@@ -76,12 +80,11 @@ export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void
   }
 
   try {
-    await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, false));
+    await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, {}));
     log.info('Worker workspace prepared (was missing)', { workspaceId });
   } catch (err) {
     if (isAlreadyExistsError(err)) {
-      // Refresh disk materialization so OneCLI-synced remote MCP config is current.
-      await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, true));
+      await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, { refresh: true }));
       return;
     }
     throw err;
@@ -120,7 +123,7 @@ export async function createAgent(input: {
     updated_at: '',
   };
 
-  await prepareWorkspaceOnWorker(buildPreparePayload(draft, input.files, false));
+  await prepareWorkspaceOnWorker(buildPreparePayload(draft, input.files, {}));
 
   const agent = createAgentRecord({
     ...input,
@@ -152,7 +155,7 @@ export async function updateAgentFiles(
 
   const agent = updateAgentFilesRecord(workspaceId, userId, files);
   await ensureWorkspaceIntegrations(workspaceId);
-  await prepareWorkspaceOnWorker(buildPreparePayload(agent, agent.files, true));
+  await prepareWorkspaceOnWorker(buildPreparePayload(agent, agent.files, { refresh: true }));
   return getAgentForUser(workspaceId, userId)!;
 }
 
@@ -192,7 +195,7 @@ export async function updateAgent(
   if (hasMeta) {
     const files = getAgentFilesForPrepare(workspaceId);
     await ensureWorkspaceIntegrations(workspaceId);
-    await prepareWorkspaceOnWorker(buildPreparePayload(agent, files, true));
+    await prepareWorkspaceOnWorker(buildPreparePayload(agent, files, { refresh: true }));
     return getAgentForUser(workspaceId, userId)!;
   }
 

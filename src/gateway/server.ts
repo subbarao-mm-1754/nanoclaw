@@ -8,7 +8,13 @@ import {
   WORKER_MAX_BODY_BYTES,
 } from '../config.js';
 import type { ContainerConfigSnapshot } from '../container-config.js';
-import { createAgent, deleteAgent, getAgent, updateAgent } from './agent-service.js';
+import {
+  createAgent,
+  deleteAgent,
+  ensureWorkspaceOnWorker,
+  getAgent,
+  updateAgent,
+} from './agent-service.js';
 import {
   BuildError,
   continueBuild,
@@ -60,9 +66,29 @@ import { enqueueInboundMessage } from './store/messages.js';
 import { getOrCreateConversation } from './store/conversations.js';
 import { getHttpResponse, listHttpResponses } from './store/http-responses.js';
 import { AuthError, createSession, createUser, deleteSession, getSession, loginUser } from './store/users.js';
+import {
+  BrowserConnectError,
+  confirmBrowserConnect,
+  connectPageHtml,
+  getBrowserSessionForConnectPage,
+  handleBrowserSessionRequest,
+  startBrowserConnect,
+} from './browser-connect.js';
 import { AgentAccessError } from './store/agent-files.js';
 import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { listUserAgents } from './store/agent-select.js';
+import {
+  bindBrowserSessionToWorkspace,
+  createBrowserSession,
+  getBrowserSession,
+  listBrowserSessionsForUser,
+  listBrowserSessionsForWorkspace,
+  revokeBrowserSession,
+  toPublicBrowserSession,
+  unbindBrowserSessionFromWorkspace,
+  updateBrowserSessionAuth,
+  updateBrowserSessionMeta,
+} from './store/browser-sessions.js';
 import type { GatewayUser } from './types.js';
 import type { WorkerProcessMessageResponse } from '../worker/types.js';
 import { executeKnowledgeRequest, isKnowledgeEnabled, type KnowledgeOp } from '../knowledge/store.js';
@@ -657,6 +683,229 @@ function handleUnbindAgentIntegration(
   jsonResponse(res, 200, { ok: true });
 }
 
+async function handleCreateBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const session = createBrowserSession({
+    user_id: user.id,
+    label: requireString(body, 'label'),
+    origin: typeof body.origin === 'string' ? body.origin : null,
+    auth_json: body.auth_json ?? body.authJson,
+    metadata_json:
+      typeof body.metadata_json === 'string'
+        ? body.metadata_json
+        : body.metadata != null
+          ? JSON.stringify(body.metadata)
+          : null,
+  });
+  jsonResponse(res, 201, { session: toPublicBrowserSession(session) });
+}
+
+function handleListBrowserSessions(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, {
+    sessions: listBrowserSessionsForUser(user.id).map(toPublicBrowserSession),
+  });
+}
+
+function handleGetBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  sessionId: string,
+  url: URL,
+): void {
+  const user = requireUserSession(req);
+  const session = getBrowserSession(sessionId);
+  if (!session || session.user_id !== user.id || session.status === 'revoked') {
+    jsonResponse(res, 404, { error: 'Browser session not found' });
+    return;
+  }
+  const includeAuth = url.searchParams.get('include_auth') === '1';
+  jsonResponse(res, 200, {
+    session: includeAuth
+      ? { ...toPublicBrowserSession(session), auth_json: session.auth_json }
+      : toPublicBrowserSession(session),
+  });
+}
+
+async function handleUpdateBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  sessionId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+
+  let session =
+    body.auth_json != null || body.authJson != null
+      ? updateBrowserSessionAuth(sessionId, user.id, body.auth_json ?? body.authJson)
+      : getBrowserSession(sessionId);
+
+  if (!session || session.user_id !== user.id) {
+    jsonResponse(res, 404, { error: 'Browser session not found' });
+    return;
+  }
+
+  if (body.label != null || body.origin !== undefined || body.status != null) {
+    session = updateBrowserSessionMeta(sessionId, user.id, {
+      label: typeof body.label === 'string' ? body.label : undefined,
+      origin: typeof body.origin === 'string' || body.origin === null ? (body.origin as string | null) : undefined,
+      status:
+        body.status === 'active' || body.status === 'expired' || body.status === 'revoked'
+          ? body.status
+          : undefined,
+    });
+  }
+
+  jsonResponse(res, 200, { session: toPublicBrowserSession(session) });
+}
+
+function handleDeleteBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  sessionId: string,
+): void {
+  const user = requireUserSession(req);
+  revokeBrowserSession(sessionId, user.id);
+  jsonResponse(res, 200, { ok: true });
+}
+
+function handleListAgentBrowserSessions(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): void {
+  const user = requireUserSession(req);
+  jsonResponse(res, 200, {
+    sessions: listBrowserSessionsForWorkspace(workspaceId, user.id).map(toPublicBrowserSession),
+  });
+}
+
+async function handleBindAgentBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const session = bindBrowserSessionToWorkspace(
+    workspaceId,
+    requireString(body, 'session_id'),
+    user.id,
+  );
+  try {
+    await ensureWorkspaceOnWorker(workspaceId);
+  } catch (err) {
+    log.warn('Failed to refresh worker workspace after binding browser session', {
+      workspaceId,
+      err,
+    });
+  }
+  jsonResponse(res, 200, { session: toPublicBrowserSession(session) });
+}
+
+async function handleUnbindAgentBrowserSession(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  const user = requireUserSession(req);
+  unbindBrowserSessionFromWorkspace(workspaceId, sessionId, user.id);
+  try {
+    await ensureWorkspaceOnWorker(workspaceId);
+  } catch (err) {
+    log.warn('Failed to refresh worker workspace after unbinding browser session', {
+      workspaceId,
+      err,
+    });
+  }
+  jsonResponse(res, 200, { ok: true });
+}
+
+async function handleStartBrowserConnectHttp(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const user = requireUserSession(req);
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const result = await startBrowserConnect({
+    userId: user.id,
+    origin: requireString(body, 'origin'),
+    label: typeof body.label === 'string' ? body.label : undefined,
+    loginUrl: typeof body.login_url === 'string' ? body.login_url : undefined,
+    workspaceId: typeof body.workspace_id === 'string' ? body.workspace_id : null,
+    notify:
+      body.notify && typeof body.notify === 'object' && !Array.isArray(body.notify)
+        ? {
+            channel_type: requireString(body.notify as Record<string, unknown>, 'channel_type'),
+            platform_id: requireString(body.notify as Record<string, unknown>, 'platform_id'),
+            thread_id:
+              typeof (body.notify as Record<string, unknown>).thread_id === 'string'
+                ? ((body.notify as Record<string, unknown>).thread_id as string)
+                : null,
+          }
+        : null,
+  });
+  jsonResponse(res, result.reused ? 200 : 201, result);
+}
+
+function handleBrowserConnectPage(
+  res: http.ServerResponse,
+  token: string,
+): void {
+  const session = getBrowserSessionForConnectPage(token);
+  const html = connectPageHtml(token, session);
+  const buf = Buffer.from(html, 'utf8');
+  res.writeHead(session ? 200 : 404, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Content-Length': buf.length,
+    'Cache-Control': 'no-store',
+  });
+  res.end(buf);
+}
+
+async function handleBrowserConnectConfirm(
+  res: http.ServerResponse,
+  token: string,
+): Promise<void> {
+  const result = await confirmBrowserConnect(token);
+  jsonResponse(res, 200, result);
+}
+
+async function handleInternalBrowserSessionRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const notifyRaw = body.notify;
+  const result = await handleBrowserSessionRequest({
+    workspace_id: requireString(body, 'workspace_id'),
+    origin: requireString(body, 'origin'),
+    label: typeof body.label === 'string' ? body.label : undefined,
+    login_url: typeof body.login_url === 'string' ? body.login_url : undefined,
+    notify:
+      notifyRaw && typeof notifyRaw === 'object' && !Array.isArray(notifyRaw)
+        ? {
+            channel_type: String((notifyRaw as Record<string, unknown>).channel_type ?? ''),
+            platform_id: String((notifyRaw as Record<string, unknown>).platform_id ?? ''),
+            thread_id:
+              typeof (notifyRaw as Record<string, unknown>).thread_id === 'string'
+                ? ((notifyRaw as Record<string, unknown>).thread_id as string)
+                : null,
+          }
+        : null,
+  });
+  jsonResponse(res, result.ok ? 200 : 400, result);
+}
+
 async function handleInternalKnowledge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorizeWorkerCallback(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -1017,6 +1266,82 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/v1/browser-sessions') {
+      handleListBrowserSessions(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/browser-sessions') {
+      await handleCreateBrowserSession(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/browser-sessions/connect') {
+      await handleStartBrowserConnectHttp(req, res);
+      return;
+    }
+    const browserConnectConfirmMatch = pathname.match(
+      /^\/v1\/browser-sessions\/connect\/([^/]+)\/confirm$/,
+    );
+    if (browserConnectConfirmMatch && req.method === 'POST') {
+      await handleBrowserConnectConfirm(res, decodeURIComponent(browserConnectConfirmMatch[1]!));
+      return;
+    }
+    const browserConnectPageMatch = pathname.match(/^\/v1\/browser-sessions\/connect\/([^/]+)$/);
+    if (browserConnectPageMatch && req.method === 'GET') {
+      handleBrowserConnectPage(res, decodeURIComponent(browserConnectPageMatch[1]!));
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/internal/browser-sessions/request') {
+      await handleInternalBrowserSessionRequest(req, res);
+      return;
+    }
+    const browserSessionMatch = pathname.match(/^\/v1\/browser-sessions\/([^/]+)$/);
+    if (browserSessionMatch) {
+      const sessionId = decodeURIComponent(browserSessionMatch[1]!);
+      if (sessionId === 'connect') {
+        jsonResponse(res, 404, { error: 'Not found' });
+        return;
+      }
+      if (req.method === 'GET') {
+        handleGetBrowserSession(req, res, sessionId, url);
+        return;
+      }
+      if (req.method === 'PATCH' || req.method === 'PUT') {
+        await handleUpdateBrowserSession(req, res, sessionId);
+        return;
+      }
+      if (req.method === 'DELETE') {
+        handleDeleteBrowserSession(req, res, sessionId);
+        return;
+      }
+    }
+
+    const agentBrowserSessionsMatch = pathname.match(
+      /^\/v1\/agents\/([^/]+)\/browser-sessions$/,
+    );
+    if (agentBrowserSessionsMatch) {
+      const workspaceId = decodeURIComponent(agentBrowserSessionsMatch[1]!);
+      if (req.method === 'GET') {
+        handleListAgentBrowserSessions(req, res, workspaceId);
+        return;
+      }
+      if (req.method === 'POST') {
+        await handleBindAgentBrowserSession(req, res, workspaceId);
+        return;
+      }
+    }
+    const agentBrowserSessionItemMatch = pathname.match(
+      /^\/v1\/agents\/([^/]+)\/browser-sessions\/([^/]+)$/,
+    );
+    if (agentBrowserSessionItemMatch && req.method === 'DELETE') {
+      await handleUnbindAgentBrowserSession(
+        req,
+        res,
+        decodeURIComponent(agentBrowserSessionItemMatch[1]!),
+        decodeURIComponent(agentBrowserSessionItemMatch[2]!),
+      );
+      return;
+    }
+
     jsonResponse(res, 404, { error: 'Not found' });
   } catch (err) {
     if (err instanceof AuthError) {
@@ -1036,6 +1361,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
     if (err instanceof IntegrationError) {
+      jsonResponse(res, err.status, { error: err.message });
+      return;
+    }
+    if (err instanceof BrowserConnectError) {
       jsonResponse(res, err.status, { error: err.message });
       return;
     }

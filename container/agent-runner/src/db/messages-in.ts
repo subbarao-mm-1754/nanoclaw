@@ -197,3 +197,33 @@ export function findKnowledgeResponse(requestId: string): MessageInRow | undefin
   }
 }
 
+/** Find a pending browser_session_response for a requestId. */
+export function findBrowserSessionResponse(requestId: string): MessageInRow | undefined {
+  const inbound = openInboundDb();
+  const outbound = getOutboundDb();
+
+  try {
+    const candidates = inbound
+      .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
+      .all(`%"requestId":"${requestId}"%`) as MessageInRow[];
+
+    for (const response of candidates) {
+      let type: string | undefined;
+      try {
+        type = (JSON.parse(response.content) as { type?: string }).type;
+      } catch {
+        continue;
+      }
+      if (type !== 'browser_session_response') continue;
+
+      const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
+      if (acked) continue;
+      return response;
+    }
+
+    return undefined;
+  } finally {
+    inbound.close();
+  }
+}
+

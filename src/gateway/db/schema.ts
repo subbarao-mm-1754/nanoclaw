@@ -164,7 +164,78 @@ function migrateGatewaySchema(db: Database.Database): void {
       value       TEXT NOT NULL,
       updated_at  TEXT NOT NULL
     );
+
+    -- Browser storageState (agent-browser / Playwright). Plaintext for now;
+    -- move auth_json to a vault later (same pattern as OAuth refresh tokens).
+    CREATE TABLE IF NOT EXISTS gateway_browser_sessions (
+      id              TEXT PRIMARY KEY,
+      user_id         TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      label           TEXT NOT NULL,
+      origin          TEXT,
+      status          TEXT NOT NULL CHECK(status IN (
+                        'active', 'expired', 'revoked'
+                      )),
+      auth_json       TEXT NOT NULL,
+      metadata_json   TEXT,
+      last_used_at    TEXT,
+      created_at      TEXT NOT NULL,
+      updated_at      TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_browser_sessions_user
+      ON gateway_browser_sessions(user_id);
+
+    CREATE TABLE IF NOT EXISTS gateway_workspace_browser_sessions (
+      workspace_id  TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      session_id    TEXT NOT NULL REFERENCES gateway_browser_sessions(id) ON DELETE CASCADE,
+      created_at    TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, session_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_workspace_browser_sessions_session
+      ON gateway_workspace_browser_sessions(session_id);
   `);
+
+  // Allow pending connect flow (SQLite cannot ALTER CHECK constraints).
+  if (tableExists(db, 'gateway_browser_sessions')) {
+    const cols = db.prepare(`PRAGMA table_info(gateway_browser_sessions)`).all() as Array<{ name: string }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('connect_token')) {
+      db.exec(`
+        CREATE TABLE gateway_browser_sessions_v2 (
+          id                   TEXT PRIMARY KEY,
+          user_id              TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+          label                TEXT NOT NULL,
+          origin               TEXT,
+          status               TEXT NOT NULL CHECK(status IN (
+                                 'pending', 'active', 'expired', 'revoked'
+                               )),
+          auth_json            TEXT NOT NULL,
+          metadata_json        TEXT,
+          connect_token        TEXT UNIQUE,
+          connect_expires_at   TEXT,
+          login_url            TEXT,
+          last_used_at         TEXT,
+          created_at           TEXT NOT NULL,
+          updated_at           TEXT NOT NULL
+        );
+        INSERT INTO gateway_browser_sessions_v2 (
+          id, user_id, label, origin, status, auth_json, metadata_json,
+          connect_token, connect_expires_at, login_url, last_used_at, created_at, updated_at
+        )
+        SELECT
+          id, user_id, label, origin, status, auth_json, metadata_json,
+          NULL, NULL, NULL, last_used_at, created_at, updated_at
+        FROM gateway_browser_sessions;
+        DROP TABLE gateway_browser_sessions;
+        ALTER TABLE gateway_browser_sessions_v2 RENAME TO gateway_browser_sessions;
+        CREATE INDEX IF NOT EXISTS idx_gateway_browser_sessions_user
+          ON gateway_browser_sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_gateway_browser_sessions_token
+          ON gateway_browser_sessions(connect_token);
+      `);
+    }
+  }
 }
 
 /** Create the full gateway database schema (idempotent — safe on existing gateway.db). */
@@ -390,6 +461,41 @@ export function initGatewaySchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_gateway_workspace_integrations_connection
       ON gateway_workspace_integrations(connection_id);
+
+    -- Browser storageState for agent-browser (plaintext; vault later).
+    CREATE TABLE IF NOT EXISTS gateway_browser_sessions (
+      id                   TEXT PRIMARY KEY,
+      user_id              TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      label                TEXT NOT NULL,
+      origin               TEXT,
+      status               TEXT NOT NULL CHECK(status IN (
+                             'pending', 'active', 'expired', 'revoked'
+                           )),
+      auth_json            TEXT NOT NULL,
+      metadata_json        TEXT,
+      connect_token        TEXT UNIQUE,
+      connect_expires_at   TEXT,
+      login_url            TEXT,
+      last_used_at         TEXT,
+      created_at           TEXT NOT NULL,
+      updated_at           TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_browser_sessions_user
+      ON gateway_browser_sessions(user_id);
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_browser_sessions_token
+      ON gateway_browser_sessions(connect_token);
+
+    CREATE TABLE IF NOT EXISTS gateway_workspace_browser_sessions (
+      workspace_id  TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      session_id    TEXT NOT NULL REFERENCES gateway_browser_sessions(id) ON DELETE CASCADE,
+      created_at    TEXT NOT NULL,
+      PRIMARY KEY (workspace_id, session_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_workspace_browser_sessions_session
+      ON gateway_workspace_browser_sessions(session_id);
 
     -- OAuth client registrations (DCR or pre-registered), keyed by AS issuer.
     CREATE TABLE IF NOT EXISTS gateway_oauth_registrations (

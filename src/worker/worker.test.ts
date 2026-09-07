@@ -311,6 +311,27 @@ describe('runPrepareWorkspace', () => {
       'Replaced content.',
     );
   });
+
+  it('refreshes workspace in place without deleting the root', () => {
+    const first = prepareTestWorkspace();
+    const marker = path.join(first.workspace.root, 'keep-me.txt');
+    fs.writeFileSync(marker, 'alive');
+    const result = runPrepareWorkspace(
+      parsePrepareWorkspaceRequest(
+        samplePrepareBody({
+          agent: {
+            ...samplePrepareBody().agent,
+            files: [{ path: 'CLAUDE.local.md', content: 'Refreshed content.' }],
+          },
+          options: { refresh: true },
+        }),
+      ),
+    );
+    expect(fs.existsSync(marker)).toBe(true);
+    expect(fs.readFileSync(path.join(result.workspace.group_dir, 'CLAUDE.local.md'), 'utf8')).toBe(
+      'Refreshed content.',
+    );
+  });
 });
 
 describe('materializeWorkspace', () => {

@@ -3,6 +3,7 @@ import { sessionInboundMessageId } from '../session-message-id.js';
 import { workerWorkspacePaths } from '../worker/workspace-store.js';
 import { ensureWorkspaceOnWorker } from './agent-service.js';
 import { applyMemoryPatch, deliverOutboundMessage } from './delivery.js';
+import { captureBrowserSessionsFromMemoryPatch } from './store/browser-sessions.js';
 import { getConversation } from './store/conversations.js';
 import {
   claimNextInbound,
@@ -113,6 +114,16 @@ async function processOneInbound(): Promise<boolean> {
     if (result.memory_patch) {
       const paths = workerWorkspacePaths(conversation.workspace_id);
       applyMemoryPatch(paths.group_dir, result.memory_patch);
+      const captured = captureBrowserSessionsFromMemoryPatch(
+        conversation.workspace_id,
+        result.memory_patch,
+      );
+      if (captured > 0) {
+        log.info('Gateway captured browser session updates from memory patch', {
+          workspaceId: conversation.workspace_id,
+          count: captured,
+        });
+      }
     }
 
     deleteMessages([inbound.id, ...outboundIds]);
