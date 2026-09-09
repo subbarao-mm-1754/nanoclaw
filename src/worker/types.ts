@@ -36,6 +36,12 @@ export interface WorkerPrepareWorkspaceRequest {
      * `/workspace/agent`. Prefer this over `replace` for routine refreshes.
      */
     refresh?: boolean;
+    /**
+     * Create if missing; refresh in place if content hash changed; no-op if unchanged.
+     * Prefer this for the hot path (inbound messages) — one round-trip, no
+     * create→already-exists→refresh dance.
+     */
+    ensure?: boolean;
   };
 }
 
@@ -44,6 +50,8 @@ export interface WorkerProcessMessageRequest {
   /** Gateway build job id (full agent build). Echoed in async callbacks. */
   build_job_id?: string;
   workspace_id: string;
+  /** Gateway conversation id — used when pushing outbound via continuous collector. */
+  conversation_id?: string;
   session: {
     id: string;
     agent_group_id: string;
@@ -67,7 +75,23 @@ export interface WorkerProcessMessageRequest {
     /** When true, respond 202 and POST result to callback_url. */
     async?: boolean;
     callback_url?: string;
+    /**
+     * When true (default for async/builder), block until outbound or timeout.
+     * When false, start a continuous session collector and return after wake.
+     */
+    wait_for_outbound?: boolean;
   };
+}
+
+/** Worker → Gateway push when the continuous collector drains chat outbound. */
+export interface WorkerOutboundCallbackPayload {
+  workspace_id: string;
+  session_id: string;
+  agent_group_id: string;
+  conversation_id?: string;
+  job_id?: string;
+  outbound: WorkerCollectedOutbound[];
+  memory_patch?: WorkerMemoryPatch;
 }
 
 /** Persisted alongside the materialized workspace on prepare. */
@@ -78,6 +102,8 @@ export interface WorkerWorkspaceManifest {
   folder: string;
   container_config: ContainerConfigSnapshot;
   cli_scope: string;
+  /** SHA-256 of prepare payload (agent meta + files). Used to skip no-op refreshes. */
+  content_hash?: string;
   created_at: string;
   updated_at: string;
 }
@@ -106,9 +132,11 @@ export interface WorkerWorkspacePaths {
 
 export interface WorkerPrepareWorkspaceResponse {
   workspace_id: string;
-  status: 'prepared';
+  /** `unchanged` when ensure/refresh found matching content_hash — no disk rewrite. */
+  status: 'prepared' | 'unchanged';
   workspace: WorkerWorkspacePaths;
   files_written: string[];
+  content_hash: string;
 }
 
 export interface WorkerProcessMessageResponse {

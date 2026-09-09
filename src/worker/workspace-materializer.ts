@@ -9,7 +9,6 @@ import {
 } from '../container-config.js';
 import { syncSkillSymlinks } from '../skill-symlinks.js';
 import { ensureClaudeSharedFilesystem } from '../group-init.js';
-import { log } from '../log.js';
 import type { WorkerAgentFile, WorkerWorkspaceManifest, WorkerWorkspacePaths } from './types.js';
 import { workerWorkspacePaths } from './workspace-store.js';
 
@@ -66,13 +65,6 @@ export function materializeWorkspace(
     groupDir,
     mcpServers: containerConfig.mcpServers,
     cliScope: manifest.cli_scope,
-  });
-
-  log.info('Worker workspace materialized', {
-    workspaceId: manifest.workspace_id,
-    workspaceRoot,
-    groupDir,
-    filesWritten: filesWritten.length,
   });
 
   return {

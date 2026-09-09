@@ -89,6 +89,20 @@ function notifyContainerStopped(sessionId: string): void {
   }
 }
 
+export function onContainerExit(sessionId: string, listener: () => void): () => void {
+  if (!activeContainers.has(sessionId)) {
+    queueMicrotask(listener);
+    return () => {};
+  }
+  let waiters = containerStopWaiters.get(sessionId);
+  if (!waiters) {
+    waiters = [];
+    containerStopWaiters.set(sessionId, waiters);
+  }
+  waiters.push(listener);
+  return () => removeWaiter(sessionId, listener);
+}
+
 /** Wait until the container for a session exits, or until timeoutMs elapses. */
 export function waitForContainerStop(sessionId: string, timeoutMs: number): Promise<boolean> {
   if (!activeContainers.has(sessionId)) return Promise.resolve(true);

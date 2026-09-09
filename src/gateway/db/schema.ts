@@ -39,6 +39,9 @@ function migrateGatewaySchema(db: Database.Database): void {
     if (!columnExists(db, 'gateway_workspaces', 'container_config_json')) {
       db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN container_config_json TEXT`);
     }
+    if (!columnExists(db, 'gateway_workspaces', 'worker_content_hash')) {
+      db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN worker_content_hash TEXT`);
+    }
   }
 
   if (tableExists(db, 'build_jobs')) {
@@ -278,6 +281,7 @@ export function initGatewaySchema(db: Database.Database): void {
       folder                 TEXT,
       cli_scope              TEXT NOT NULL DEFAULT 'group',
       container_config_json  TEXT,
+      worker_content_hash    TEXT,
       created_at             TEXT NOT NULL,
       updated_at             TEXT NOT NULL
     );

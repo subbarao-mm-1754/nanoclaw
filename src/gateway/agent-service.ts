@@ -1,5 +1,6 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
 import { log } from '../log.js';
+import { computeWorkspaceContentHash } from '../workspace-content-hash.js';
 import { generateId, slugifyName } from './auth.js';
 import { ensureWorkspaceIntegrations } from './integrations/broker.js';
 import { ensureOnecliAgent } from './integrations/onecli-sync.js';
@@ -8,7 +9,6 @@ import {
   AgentDeleteError,
   createAgentRecord,
   deleteAgentRecord,
-  getAgentFilesForPrepare,
   getAgentForUser,
   updateAgentFilesRecord,
   updateAgentMetadata,
@@ -22,7 +22,11 @@ import {
 import { mergeFilesWithBrowserSessions } from './store/browser-sessions.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import { getUserById } from './store/users.js';
-import { getWorkspace } from './store/workspaces.js';
+import {
+  clearWorkerContentHash,
+  getWorkspace,
+  setWorkerContentHash,
+} from './store/workspaces.js';
 import { destroyWorkspaceOnWorker, prepareWorkspaceOnWorker } from './worker-client.js';
 
 function buildPreparePayload(
@@ -35,7 +39,7 @@ function buildPreparePayload(
     container_config: ContainerConfigSnapshot | null;
   },
   files: GatewayAgentFile[],
-  options: { replace?: boolean; refresh?: boolean } = {},
+  options: { replace?: boolean; refresh?: boolean; ensure?: boolean } = {},
 ) {
   // Inject bound browser session storageState files (not stored in agent_files).
   const filesWithSessions = mergeFilesWithBrowserSessions(workspace.workspace_id, files);
@@ -53,18 +57,32 @@ function buildPreparePayload(
   };
 }
 
-function isAlreadyExistsError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
-  return /already exists/i.test(message);
+function payloadContentHash(
+  payload: ReturnType<typeof buildPreparePayload>,
+): string {
+  return computeWorkspaceContentHash({
+    agent_group_id: payload.agent.agent_group_id,
+    name: payload.agent.name,
+    folder: payload.agent.folder,
+    cli_scope: payload.agent.cli_scope,
+    container_config: payload.agent.container_config,
+    files: payload.agent.files,
+  });
 }
 
 /**
  * Ensure the Worker has an on-disk workspace for this agent.
- * Creates from Gateway DB files when missing (e.g. after deleting worker-workspaces/).
- * When the workspace already exists, refreshes files **in place** (never deletes the
- * mount root — that breaks running containers still bound to `/workspace/agent`).
+ * Creates from Gateway DB files when missing; refreshes in place when content
+ * changed; skips the Worker HTTP call when Gateway's cached content hash still
+ * matches (steady-state inbound messages).
+ *
+ * Pass `force: true` after a Worker "workspace missing" failure so disk is
+ * rematerialized even if the Gateway hash cache is stale.
  */
-export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void> {
+export async function ensureWorkspaceOnWorker(
+  workspaceId: string,
+  options: { force?: boolean } = {},
+): Promise<void> {
   const workspace = getWorkspace(workspaceId);
   if (!workspace) {
     throw new Error(`Gateway workspace not found: ${workspaceId}`);
@@ -83,16 +101,39 @@ export async function ensureWorkspaceOnWorker(workspaceId: string): Promise<void
     files = [{ path: 'CLAUDE.local.md', content: `# ${refreshed.name}\n` }];
   }
 
-  try {
-    await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, {}));
-    log.info('Worker workspace prepared (was missing)', { workspaceId });
-  } catch (err) {
-    if (isAlreadyExistsError(err)) {
-      await prepareWorkspaceOnWorker(buildPreparePayload(refreshed, files, { refresh: true }));
-      return;
-    }
-    throw err;
+  const payload = buildPreparePayload(refreshed, files, { ensure: true });
+  const contentHash = payloadContentHash(payload);
+
+  if (!options.force && refreshed.worker_content_hash === contentHash) {
+    // Hot path: nothing changed — no Worker call, no log noise.
+    return;
   }
+
+  const result = await prepareWorkspaceOnWorker(payload);
+  setWorkerContentHash(workspaceId, result.content_hash);
+
+  // Worker already logs create/refresh/replace; only note Gateway-side force rematerialize.
+  if (options.force && result.status === 'prepared') {
+    log.info('Worker workspace rematerialized after missing-on-disk', {
+      workspaceId,
+      filesWritten: result.files_written.length,
+      contentHash: result.content_hash,
+    });
+  }
+}
+
+/** Clear cached hash so the next ensure rematerializes on the Worker. */
+export function invalidateWorkerWorkspaceCache(workspaceId: string): void {
+  try {
+    clearWorkerContentHash(workspaceId);
+  } catch {
+    // Workspace may already be deleted.
+  }
+}
+
+export function isWorkerWorkspaceMissingError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /workspace (not found|agent directory missing)/i.test(message);
 }
 
 export async function createAgent(input: {
@@ -130,7 +171,7 @@ export async function createAgent(input: {
     updated_at: '',
   };
 
-  await prepareWorkspaceOnWorker(buildPreparePayload(draft, input.files, {}));
+  const prepared = await prepareWorkspaceOnWorker(buildPreparePayload(draft, input.files, {}));
 
   const agent = createAgentRecord({
     ...input,
@@ -141,14 +182,17 @@ export async function createAgent(input: {
     cli_scope: cliScope,
   });
 
+  setWorkerContentHash(workspaceId, prepared.content_hash);
+
   try {
     await ensureOnecliAgent({ name: input.name, identifier: agentGroupId });
   } catch (err) {
     log.warn('OneCLI ensureAgent failed during gateway createAgent', { agentGroupId, err });
   }
 
-  // Refresh/sync any integrations bound after create (usually none yet).
+  // Sync integrations; re-ensure only if MCP/config changed the content hash.
   await ensureWorkspaceIntegrations(workspaceId);
+  await ensureWorkspaceOnWorker(workspaceId);
 
   return getAgentForUser(agent.workspace_id, input.owner_user_id)!;
 }
@@ -160,9 +204,8 @@ export async function updateAgentFiles(
 ): Promise<GatewayAgent> {
   if (files.length === 0) throw new Error('At least one file update is required');
 
-  const agent = updateAgentFilesRecord(workspaceId, userId, files);
-  await ensureWorkspaceIntegrations(workspaceId);
-  await prepareWorkspaceOnWorker(buildPreparePayload(agent, agent.files, { refresh: true }));
+  updateAgentFilesRecord(workspaceId, userId, files);
+  await ensureWorkspaceOnWorker(workspaceId);
   return getAgentForUser(workspaceId, userId)!;
 }
 
@@ -202,9 +245,7 @@ export async function updateAgent(
   }
 
   if (hasMeta) {
-    const files = getAgentFilesForPrepare(workspaceId);
-    await ensureWorkspaceIntegrations(workspaceId);
-    await prepareWorkspaceOnWorker(buildPreparePayload(agent, files, { refresh: true }));
+    await ensureWorkspaceOnWorker(workspaceId);
     return getAgentForUser(workspaceId, userId)!;
   }
 

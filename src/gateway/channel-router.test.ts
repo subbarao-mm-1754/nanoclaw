@@ -58,6 +58,7 @@ beforeEach(() => {
     status: 'prepared',
     workspace: { root: '/tmp', group_dir: '/tmp/a', claude_shared_dir: '/tmp/c' },
     files_written: ['CLAUDE.local.md'],
+    content_hash: 'test-hash',
   });
   enqueueProcessMessageOnWorkerMock.mockResolvedValue({ run_id: 'run-1', status: 'accepted' });
   destroyWorkspaceOnWorkerMock.mockResolvedValue(undefined);

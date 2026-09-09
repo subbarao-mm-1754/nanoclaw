@@ -2,6 +2,7 @@ import fs from 'fs';
 
 import { killContainer } from '../container-runner.js';
 import { log } from '../log.js';
+import { stopCollectorsForWorkspace, stopSessionCollector } from './outbound-collector.js';
 import { workerWorkspaceRoot, workspaceExists } from './workspace-store.js';
 import type { WorkerDestroyWorkspaceResponse } from './types.js';
 import { WorkerValidationError } from './validate.js';
@@ -17,12 +18,15 @@ export function runDestroyWorkspace(input: {
   let containerKilled = false;
 
   if (input.session_id) {
+    stopSessionCollector(input.session_id, 'workspace-destroy');
     killContainer(input.session_id, 'workspace destroy');
     containerKilled = true;
     log.info('Worker destroy requested container kill', {
       workspaceId: input.workspace_id,
       sessionId: input.session_id,
     });
+  } else {
+    stopCollectorsForWorkspace(input.workspace_id, 'workspace-destroy');
   }
 
   if (!workspaceExists(input.workspace_id)) {

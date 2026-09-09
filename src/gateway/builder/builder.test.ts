@@ -53,6 +53,7 @@ beforeEach(() => {
     status: 'prepared',
     workspace: { root: '/tmp', group_dir: '/tmp/agent', claude_shared_dir: '/tmp/.claude' },
     files_written: ['CLAUDE.local.md'],
+    content_hash: 'test-hash',
   });
   enqueueProcessMessageOnWorkerMock.mockResolvedValue({ run_id: 'run-1', status: 'accepted' });
   destroyWorkspaceOnWorkerMock.mockResolvedValue(undefined);
@@ -65,6 +66,7 @@ beforeEach(() => {
     folder: 'result',
     cli_scope: 'group',
     container_config: null,
+    worker_content_hash: null,
     files: [{ path: 'CLAUDE.local.md', content: '# hi' }],
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),

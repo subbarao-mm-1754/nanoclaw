@@ -1,19 +1,18 @@
 import { log } from '../log.js';
 import { sessionInboundMessageId } from '../session-message-id.js';
-import { workerWorkspacePaths } from '../worker/workspace-store.js';
-import { ensureWorkspaceOnWorker } from './agent-service.js';
-import { applyMemoryPatch, deliverOutboundMessage } from './delivery.js';
-import { captureBrowserSessionsFromMemoryPatch } from './store/browser-sessions.js';
+import {
+  ensureWorkspaceOnWorker,
+  invalidateWorkerWorkspaceCache,
+  isWorkerWorkspaceMissingError,
+} from './agent-service.js';
 import { getConversation } from './store/conversations.js';
 import {
   claimNextInbound,
   deleteMessages,
-  insertOutboundMessage,
   updateMessageStatus,
 } from './store/messages.js';
 import { processMessageOnWorker } from './worker-client.js';
 import type { WorkerProcessMessageRequest } from '../worker/types.js';
-import { beginHttpDelivery, endHttpDelivery } from './http-channel.js';
 
 let processing = false;
 let interval: ReturnType<typeof setInterval> | null = null;
@@ -39,6 +38,7 @@ async function processOneInbound(): Promise<boolean> {
   const payload: WorkerProcessMessageRequest = {
     job_id: jobId,
     workspace_id: conversation.workspace_id,
+    conversation_id: conversation.id,
     session: {
       id: conversation.session_id,
       agent_group_id: conversation.agent_group_id,
@@ -61,10 +61,22 @@ async function processOneInbound(): Promise<boolean> {
   };
 
   try {
-    // Recreate on-disk workspace from Gateway DB if it was deleted.
     await ensureWorkspaceOnWorker(conversation.workspace_id);
 
-    const result = await processMessageOnWorker(payload);
+    let result;
+    try {
+      result = await processMessageOnWorker(payload);
+    } catch (err) {
+      if (!isWorkerWorkspaceMissingError(err)) throw err;
+      log.warn('Worker workspace missing on disk; forcing rematerialize', {
+        workspaceId: conversation.workspace_id,
+        err,
+      });
+      invalidateWorkerWorkspaceCache(conversation.workspace_id);
+      await ensureWorkspaceOnWorker(conversation.workspace_id, { force: true });
+      result = await processMessageOnWorker(payload);
+    }
+
     updateMessageStatus(inbound.id, 'processing', {
       worker_job_id: jobId,
       worker_status: result.status,
@@ -79,59 +91,24 @@ async function processOneInbound(): Promise<boolean> {
       return true;
     }
 
-    const outboundIds: string[] = [];
-    if (inbound.channel_type === 'http') {
-      beginHttpDelivery({
-        inboundId: inbound.id,
-        conversationId: conversation.id,
-        workerJobId: jobId,
-      });
-    }
-    try {
-      for (const out of result.outbound ?? []) {
-        const outbound = insertOutboundMessage({
-          id: out.id,
-          channel_type: out.channel_type ?? inbound.channel_type,
-          platform_id: out.platform_id ?? inbound.platform_id,
-          thread_id: out.thread_id ?? inbound.thread_id,
-          conversation_id: conversation.id,
-          kind: out.kind,
-          content: out.content,
-          files: out.files,
-          worker_job_id: jobId,
-        });
-        outboundIds.push(outbound.id);
-
-        await deliverOutboundMessage(outbound);
-        updateMessageStatus(outbound.id, 'delivered');
-      }
-    } finally {
-      if (inbound.channel_type === 'http') {
-        endHttpDelivery();
-      }
-    }
-
-    if (result.memory_patch) {
-      const paths = workerWorkspacePaths(conversation.workspace_id);
-      applyMemoryPatch(paths.group_dir, result.memory_patch);
-      const captured = captureBrowserSessionsFromMemoryPatch(
-        conversation.workspace_id,
-        result.memory_patch,
-      );
-      if (captured > 0) {
-        log.info('Gateway captured browser session updates from memory patch', {
-          workspaceId: conversation.workspace_id,
-          count: captured,
-        });
-      }
-    }
-
-    deleteMessages([inbound.id, ...outboundIds]);
-    log.info('Gateway processed inbound message', {
+    // Channel traffic: Worker returns after wake; continuous collector pushes
+    // outbound to Gateway when ready. Keep inbound in `processing` until then
+    // (callback marks delivered + deletes). If Worker still returned outbound
+    // inline (builder/async path shouldn't hit here), ignore — collector owns delivery.
+    //
+    // If the agent never replies, inbound stays processing until a later cleanup;
+    // that matches waiting for a long Ollama turn.
+    log.info('Gateway woken worker for inbound message', {
       inboundId: inbound.id,
       jobId,
-      outboundCount: outboundIds.length,
+      sessionId: conversation.session_id,
+      detail: result.detail,
     });
+
+    // Duplicate / no-op wakes can complete with no collector activity — clear inbound.
+    if (result.detail?.includes('Duplicate platform message')) {
+      deleteMessages([inbound.id]);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     updateMessageStatus(inbound.id, 'failed', { worker_job_id: jobId, error: message });

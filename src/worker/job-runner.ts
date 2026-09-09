@@ -14,7 +14,7 @@ import {
 import { log } from '../log.js';
 import { containerConfigFromSnapshot } from '../container-config.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
-import { collectOutboundMessages } from './outbound-collector.js';
+import { collectOutboundMessages, startSessionCollector, stopSessionCollector } from './outbound-collector.js';
 import { loadWorkspaceManifest, workerWorkspacePaths } from './workspace-store.js';
 import type { WorkerProcessMessageRequest, WorkerProcessMessageResponse } from './types.js';
 import type { Session } from '../types.js';
@@ -80,9 +80,18 @@ function buildSpawnContext(
   };
 }
 
+function shouldWaitForOutbound(job: WorkerProcessMessageRequest): boolean {
+  if (job.options?.wait_for_outbound === true) return true;
+  if (job.options?.wait_for_outbound === false) return false;
+  // Builder / async jobs still need outbound in the HTTP/callback result.
+  return Boolean(job.options?.async || job.build_job_id);
+}
+
 /**
  * Process a message against a previously prepared workspace: write inbound,
- * spawn container, collect outbound, return file memory patch for the gateway.
+ * spawn container. For normal channel traffic, starts a continuous outbound
+ * collector and returns after wake (delivery happens when the agent writes).
+ * Async/builder jobs still block until outbound or timeout.
  */
 export async function runProcessMessageJob(
   job: WorkerProcessMessageRequest,
@@ -102,6 +111,7 @@ export async function runProcessMessageJob(
   const { agent_group_id: agentGroupId } = job.session;
   const sessionId = job.session.id;
   const runContainer = job.options?.run_container !== false;
+  const waitForOutbound = shouldWaitForOutbound(job);
 
   log.info('Worker process-message starting', {
     jobId: job.job_id,
@@ -109,6 +119,7 @@ export async function runProcessMessageJob(
     sessionId,
     agentGroupId,
     runContainer,
+    waitForOutbound,
   });
 
   const memoryBaseline = captureMemoryBaseline(paths.group_dir);
@@ -176,10 +187,27 @@ export async function runProcessMessageJob(
   const session = buildSession(job, provider);
   const spawnContext = buildSpawnContext(manifest, paths);
 
+  // Continuous collector for channel traffic — delivers when the agent writes,
+  // independent of this request's lifetime.
+  if (!waitForOutbound) {
+    startSessionCollector({
+      workspaceId: job.workspace_id,
+      agentGroupId,
+      sessionId,
+      delivery: job.delivery,
+      conversationId: job.conversation_id,
+      jobId: job.job_id,
+      groupDir: paths.group_dir,
+    });
+  }
+
   const spawnStartedAt = Date.now();
   const spawned = await wakeContainer(session, spawnContext);
   const spawnMs = Date.now() - spawnStartedAt;
   if (!spawned) {
+    if (!waitForOutbound) {
+      stopSessionCollector(sessionId, 'spawn-failed');
+    }
     log.warn('Worker process-message spawn failed', {
       jobId: job.job_id,
       sessionId,
@@ -192,6 +220,16 @@ export async function runProcessMessageJob(
     };
   }
   log.info('Worker container ready', { jobId: job.job_id, sessionId, spawnMs });
+
+  if (!waitForOutbound) {
+    // Delivery is owned by the session collector.
+    return {
+      ...baseResponse,
+      status: 'completed',
+      outbound: [],
+      detail: 'Container woken; outbound will be delivered by session collector',
+    };
+  }
 
   const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
   const collectStartedAt = Date.now();

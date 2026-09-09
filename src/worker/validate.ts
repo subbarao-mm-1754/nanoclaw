@@ -101,6 +101,12 @@ function parseProcessOptions(root: Record<string, unknown>): WorkerProcessMessag
     }
     options.callback_url = opts.callback_url.trim();
   }
+  if (opts.wait_for_outbound !== undefined) {
+    if (typeof opts.wait_for_outbound !== 'boolean') {
+      throw new WorkerValidationError('body.options.wait_for_outbound must be a boolean');
+    }
+    options.wait_for_outbound = opts.wait_for_outbound;
+  }
   if (options.async && !options.callback_url) {
     throw new WorkerValidationError('body.options.callback_url is required when options.async is true');
   }
@@ -141,6 +147,12 @@ export function parsePrepareWorkspaceRequest(
         throw new WorkerValidationError('body.options.refresh must be a boolean');
       }
       options.refresh = opts.refresh;
+    }
+    if (opts.ensure !== undefined) {
+      if (typeof opts.ensure !== 'boolean') {
+        throw new WorkerValidationError('body.options.ensure must be a boolean');
+      }
+      options.ensure = opts.ensure;
     }
   }
 
@@ -218,6 +230,10 @@ export function parseProcessMessageRequest(body: unknown): WorkerProcessMessageR
         ? root.build_job_id.trim()
         : undefined,
     workspace_id: workspaceId,
+    conversation_id:
+      typeof root.conversation_id === 'string' && root.conversation_id.trim() !== ''
+        ? root.conversation_id.trim()
+        : undefined,
     session: { id: sessionId, agent_group_id: agentGroupId },
     delivery: {
       channel_type: channelType,

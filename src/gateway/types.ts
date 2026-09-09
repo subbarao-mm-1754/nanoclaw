@@ -42,6 +42,8 @@ export interface GatewayWorkspace {
   folder: string | null;
   cli_scope: string;
   container_config: ContainerConfigSnapshot | null;
+  /** Last content hash acknowledged by the Worker (skip prepare when still matching). */
+  worker_content_hash: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -115,6 +115,13 @@ export function getConversation(id: string): Conversation | null {
   return row ? rowToConversation(row) : null;
 }
 
+export function findConversationBySessionId(sessionId: string): Conversation | null {
+  const row = getGatewayDb()
+    .prepare('SELECT * FROM conversations WHERE session_id = ? LIMIT 1')
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? rowToConversation(row) : null;
+}
+
 export function listConversationsForWorkspace(workspaceId: string): Conversation[] {
   const rows = getGatewayDb()
     .prepare('SELECT * FROM conversations WHERE workspace_id = ?')

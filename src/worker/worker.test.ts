@@ -19,6 +19,7 @@ import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
 import { loadWorkspaceManifest, saveWorkspaceManifest } from './workspace-store.js';
 import { WORKER_PORT } from '../config.js';
 import type { WorkerWorkspaceManifest } from './types.js';
+import { stopAllCollectorsForTests } from './outbound-collector.js';
 
 vi.mock('../skill-symlinks.js', () => ({
   syncSkillSymlinks: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock('../container-runner.js', () => ({
   wakeContainer: (...args: unknown[]) => wakeContainerMock(...args),
   isContainerRunning: (...args: unknown[]) => isContainerRunningMock(...args),
   waitForContainerStop: vi.fn().mockResolvedValue(true),
+  onContainerExit: vi.fn(() => () => {}),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
 }));
@@ -123,12 +125,14 @@ beforeEach(() => {
   isContainerRunningMock.mockReset();
   isContainerRunningMock.mockReturnValue(false);
   wakeContainerMock.mockResolvedValue(true);
+  stopAllCollectorsForTests();
 
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 });
 
 afterEach(async () => {
+  stopAllCollectorsForTests();
   await stopWorkerServer();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
@@ -328,8 +332,53 @@ describe('runPrepareWorkspace', () => {
       ),
     );
     expect(fs.existsSync(marker)).toBe(true);
+    expect(result.status).toBe('prepared');
+    expect(result.content_hash).toBeTruthy();
     expect(fs.readFileSync(path.join(result.workspace.group_dir, 'CLAUDE.local.md'), 'utf8')).toBe(
       'Refreshed content.',
+    );
+  });
+
+  it('ensure skips materialize when content hash matches', () => {
+    const first = prepareTestWorkspace();
+    expect(first.status).toBe('prepared');
+    expect(first.content_hash).toBeTruthy();
+
+    const marker = path.join(first.workspace.root, 'keep-me.txt');
+    fs.writeFileSync(marker, 'alive');
+    const mtimeBefore = fs.statSync(path.join(first.workspace.group_dir, 'CLAUDE.local.md')).mtimeMs;
+
+    const second = runPrepareWorkspace(
+      parsePrepareWorkspaceRequest(samplePrepareBody({ options: { ensure: true } })),
+    );
+    expect(second.status).toBe('unchanged');
+    expect(second.content_hash).toBe(first.content_hash);
+    expect(second.files_written).toEqual([]);
+    expect(fs.existsSync(marker)).toBe(true);
+    expect(fs.statSync(path.join(first.workspace.group_dir, 'CLAUDE.local.md')).mtimeMs).toBe(
+      mtimeBefore,
+    );
+  });
+
+  it('ensure refreshes when content changes', () => {
+    prepareTestWorkspace();
+    const result = runPrepareWorkspace(
+      parsePrepareWorkspaceRequest(
+        samplePrepareBody({
+          agent: {
+            ...samplePrepareBody().agent,
+            files: [
+              { path: 'CLAUDE.local.md', content: 'Changed for ensure.' },
+              { path: 'notes/readme.md', content: '# Notes' },
+            ],
+          },
+          options: { ensure: true },
+        }),
+      ),
+    );
+    expect(result.status).toBe('prepared');
+    expect(fs.readFileSync(path.join(result.workspace.group_dir, 'CLAUDE.local.md'), 'utf8')).toBe(
+      'Changed for ensure.',
     );
   });
 });
@@ -465,7 +514,7 @@ describe('runProcessMessageJob', () => {
     prepareTestWorkspace();
     const job = parseProcessMessageRequest(
       sampleProcessBody({
-        options: { run_container: true, timeout_ms: 3000 },
+        options: { run_container: true, timeout_ms: 3000, wait_for_outbound: true },
       }),
     );
 
@@ -490,6 +539,22 @@ describe('runProcessMessageJob', () => {
     expect(result.status).toBe('completed');
     expect(result.outbound).toHaveLength(1);
     expect(result.memory_patch?.files?.some((f) => f.path === 'CLAUDE.local.md')).toBe(true);
+  });
+
+  it('starts session collector and returns after wake without waiting', async () => {
+    prepareTestWorkspace();
+    const job = parseProcessMessageRequest(
+      sampleProcessBody({
+        conversation_id: 'conv-1',
+        options: { run_container: true, wait_for_outbound: false },
+      }),
+    );
+    wakeContainerMock.mockResolvedValue(true);
+
+    const result = await runProcessMessageJob(job);
+    expect(result.status).toBe('completed');
+    expect(result.outbound).toEqual([]);
+    expect(result.detail).toMatch(/session collector/i);
   });
 
   it('fails when workspace does not exist', async () => {

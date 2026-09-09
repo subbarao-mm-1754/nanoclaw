@@ -26,6 +26,8 @@ import {
   startBuild,
   startEdit,
 } from './builder/service.js';
+import { handleWorkerOutboundCallback } from './outbound-callback.js';
+import type { WorkerOutboundCallbackPayload, WorkerProcessMessageResponse } from '../worker/types.js';
 import {
   bindIntegrationToWorkspace,
   discoverAndRegister,
@@ -90,7 +92,6 @@ import {
   updateBrowserSessionMeta,
 } from './store/browser-sessions.js';
 import type { GatewayUser } from './types.js';
-import type { WorkerProcessMessageResponse } from '../worker/types.js';
 import { executeKnowledgeRequest, isKnowledgeEnabled, type KnowledgeOp } from '../knowledge/store.js';
 
 let server: http.Server | null = null;
@@ -334,6 +335,29 @@ async function handleWorkerRunCallback(req: http.IncomingMessage, res: http.Serv
 
   await handleBuilderRunCallback(body);
   jsonResponse(res, 200, { ok: true });
+}
+
+async function handleWorkerOutboundCallbackHttp(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as WorkerOutboundCallbackPayload;
+  if (!body || typeof body !== 'object' || typeof body.session_id !== 'string') {
+    jsonResponse(res, 400, { error: 'session_id is required' });
+    return;
+  }
+  if (typeof body.workspace_id !== 'string' || typeof body.agent_group_id !== 'string') {
+    jsonResponse(res, 400, { error: 'workspace_id and agent_group_id are required' });
+    return;
+  }
+
+  const result = await handleWorkerOutboundCallback(body);
+  jsonResponse(res, 200, { ok: true, ...result });
 }
 
 async function handleRegisterWorkspace(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -1132,6 +1156,11 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     if (req.method === 'POST' && pathname === '/v1/worker/callbacks/run-result') {
       await handleWorkerRunCallback(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/worker/callbacks/outbound') {
+      await handleWorkerOutboundCallbackHttp(req, res);
       return;
     }
 

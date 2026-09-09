@@ -166,6 +166,19 @@ export function getMessage(id: string): CustomerMessage | null {
   return row ? rowToMessage(row) : null;
 }
 
+/** Most recent inbound still in processing for a conversation (HTTP response correlation). */
+export function findLatestProcessingInbound(conversationId: string): CustomerMessage | null {
+  const row = getGatewayDb()
+    .prepare(
+      `SELECT * FROM customer_messages
+       WHERE conversation_id = ? AND direction = 'inbound' AND status = 'processing'
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+    )
+    .get(conversationId) as Record<string, unknown> | undefined;
+  return row ? rowToMessage(row) : null;
+}
+
 export function listPendingMessages(direction: 'inbound' | 'outbound'): CustomerMessage[] {
   const rows = getGatewayDb()
     .prepare(

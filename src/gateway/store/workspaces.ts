@@ -25,6 +25,7 @@ function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
     folder: (row.folder as string | null) ?? null,
     cli_scope: (row.cli_scope as string) || 'group',
     container_config: parseContainerConfig(row.container_config_json as string | null),
+    worker_content_hash: (row.worker_content_hash as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -151,4 +152,23 @@ export function updateWorkspaceMetadata(
     );
     return getWorkspace(workspaceId)!;
   })();
+}
+
+/** Cache the Worker-acknowledged content hash so steady-state inbound can skip prepare HTTP. */
+export function setWorkerContentHash(workspaceId: string, contentHash: string | null): void {
+  const db = getGatewayDb();
+  const result = db
+    .prepare(
+      `UPDATE gateway_workspaces
+       SET worker_content_hash = ?, updated_at = ?
+       WHERE workspace_id = ?`,
+    )
+    .run(contentHash, now(), workspaceId);
+  if (result.changes === 0) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+}
+
+export function clearWorkerContentHash(workspaceId: string): void {
+  setWorkerContentHash(workspaceId, null);
 }
