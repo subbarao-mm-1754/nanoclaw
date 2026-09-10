@@ -1,6 +1,5 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
 import { log } from '../log.js';
-import { computeWorkspaceContentHash } from '../workspace-content-hash.js';
 import { generateId, slugifyName } from './auth.js';
 import { ensureWorkspaceIntegrations } from './integrations/broker.js';
 import { ensureOnecliAgent } from './integrations/onecli-sync.js';
@@ -57,27 +56,10 @@ function buildPreparePayload(
   };
 }
 
-function payloadContentHash(
-  payload: ReturnType<typeof buildPreparePayload>,
-): string {
-  return computeWorkspaceContentHash({
-    agent_group_id: payload.agent.agent_group_id,
-    name: payload.agent.name,
-    folder: payload.agent.folder,
-    cli_scope: payload.agent.cli_scope,
-    container_config: payload.agent.container_config,
-    files: payload.agent.files,
-  });
-}
-
 /**
  * Ensure the Worker has an on-disk workspace for this agent.
- * Creates from Gateway DB files when missing; refreshes in place when content
- * changed; skips the Worker HTTP call when Gateway's cached content hash still
- * matches (steady-state inbound messages).
- *
- * Pass `force: true` after a Worker "workspace missing" failure so disk is
- * rematerialized even if the Gateway hash cache is stale.
+ * Always calls Worker prepare with ensure=true (create / refresh / unchanged).
+ * Pass `force: true` only for the rare fallback after a process-message miss.
  */
 export async function ensureWorkspaceOnWorker(
   workspaceId: string,
@@ -102,17 +84,14 @@ export async function ensureWorkspaceOnWorker(
   }
 
   const payload = buildPreparePayload(refreshed, files, { ensure: true });
-  const contentHash = payloadContentHash(payload);
 
-  if (!options.force && refreshed.worker_content_hash === contentHash) {
-    // Hot path: nothing changed — no Worker call, no log noise.
-    return;
-  }
-
+  // Always call Worker prepare with ensure=true. Skipping on a Gateway-side hash
+  // match left a stale cache when Worker disk was wiped/restarted, which then
+  // failed process-message with "Workspace not found" and forced a rematerialize
+  // warn. Worker's ensure path is cheap when content_hash already matches.
   const result = await prepareWorkspaceOnWorker(payload);
   setWorkerContentHash(workspaceId, result.content_hash);
 
-  // Worker already logs create/refresh/replace; only note Gateway-side force rematerialize.
   if (options.force && result.status === 'prepared') {
     log.info('Worker workspace rematerialized after missing-on-disk', {
       workspaceId,

@@ -6,6 +6,29 @@ let currentUser = null;
 let editingWorkspaceId = null;
 /** Preserves container_config fields not edited in the form (packages, mounts, etc.). */
 let editingContainerConfig = null;
+/** From GET /v1/live-browser/enabled — hides Live browser UI when false. */
+let liveBrowserEnabled = false;
+let liveBrowserWs = null;
+let liveBrowserWorkspaceId = null;
+let liveBrowserInputEnabled = false;
+/** Last pointer position in canvas CSS coords while controlling (for overlay). */
+let liveBrowserPointer = null;
+/** Last page URL from the stream (for blank-page hint). */
+let liveBrowserPageUrl = '';
+let liveBrowserFrameCount = 0;
+/** CSS viewport size from the latest screencast frame (CDP coordinate space). */
+let liveBrowserViewport = { width: 1280, height: 720 };
+/** Bitmask of buttons currently held (CDP: left=1, middle=4, right=2). */
+let liveBrowserButtonsDown = 0;
+let liveBrowserLastMoveSentAt = 0;
+let liveBrowserMoveTimer = null;
+let liveBrowserPendingMove = null;
+let liveBrowserLastFrameAt = 0;
+let liveBrowserStallTimer = null;
+let liveBrowserStallReconnects = 0;
+/** Poll worker status while the modal is open so we pick up navigations / session switches. */
+let liveBrowserStatusTimer = null;
+let liveBrowserLastFrameBytes = 0;
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -399,10 +422,19 @@ async function loadAgents() {
         <div class="agent-meta">${escapeHtml(agent.workspace_id)} · ${agent.files?.length ?? 0} files</div>
       </div>
       <div class="agent-actions">
+        ${
+          liveBrowserEnabled
+            ? `<button type="button" class="secondary live-browser-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Live browser</button>`
+            : ''
+        }
         <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">Edit</button>
         <button type="button" class="danger secondary delete-agent-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Delete</button>
       </div>
     `;
+    const liveBtn = li.querySelector('.live-browser-btn');
+    if (liveBtn) {
+      liveBtn.addEventListener('click', () => openLiveBrowser(agent.workspace_id, agent.name));
+    }
     li.querySelector('.edit-agent-btn').addEventListener('click', () => openAgent(agent.workspace_id));
     li.querySelector('.delete-agent-btn').addEventListener('click', () =>
       deleteAgent(agent.workspace_id, agent.name),
@@ -662,6 +694,7 @@ async function saveAgent() {
 }
 
 async function bootstrap() {
+  await refreshLiveBrowserFlag();
   const token = getToken();
   if (!token) {
     setView('auth');
@@ -794,6 +827,639 @@ $('agent-name').addEventListener('input', () => {
   if (!editingWorkspaceId && !$('agent-folder').value.trim()) {
     $('agent-folder').placeholder = slugify($('agent-name').value);
   }
+});
+
+async function refreshLiveBrowserFlag() {
+  try {
+    const data = await fetch('/v1/live-browser/enabled').then((r) => r.json());
+    liveBrowserEnabled = Boolean(data.enabled);
+  } catch {
+    liveBrowserEnabled = false;
+  }
+}
+
+function setLiveBrowserStatus(text) {
+  $('live-browser-status').textContent = text;
+}
+
+function setLiveBrowserControlUi(controlling) {
+  liveBrowserInputEnabled = controlling;
+  liveBrowserButtonsDown = 0;
+  liveBrowserPendingMove = null;
+  if (liveBrowserMoveTimer) {
+    clearTimeout(liveBrowserMoveTimer);
+    liveBrowserMoveTimer = null;
+  }
+  const banner = $('live-browser-control-banner');
+  const canvas = $('live-browser-canvas');
+  const takeBtn = $('live-browser-take');
+  const releaseBtn = $('live-browser-release');
+  const cursor = $('live-browser-cursor');
+
+  if (controlling) {
+    banner.textContent = 'You have control — click and type on the viewport';
+    banner.classList.add('is-controlling');
+    show(banner);
+    canvas.classList.add('live-browser-controlling');
+    takeBtn.disabled = true;
+    takeBtn.textContent = 'Controlling…';
+    releaseBtn.disabled = false;
+    canvas.focus();
+  } else {
+    banner.textContent = 'View only — click Take control to interact';
+    banner.classList.remove('is-controlling');
+    show(banner);
+    canvas.classList.remove('live-browser-controlling');
+    takeBtn.disabled = false;
+    takeBtn.textContent = 'Take control';
+    releaseBtn.disabled = true;
+    hide(cursor);
+  }
+}
+
+function stopLiveBrowserStatusPoll() {
+  if (liveBrowserStatusTimer) {
+    clearInterval(liveBrowserStatusTimer);
+    liveBrowserStatusTimer = null;
+  }
+}
+
+function closeLiveBrowser() {
+  if (liveBrowserWs) {
+    liveBrowserWs.close();
+    liveBrowserWs = null;
+  }
+  if (liveBrowserStallTimer) {
+    clearInterval(liveBrowserStallTimer);
+    liveBrowserStallTimer = null;
+  }
+  stopLiveBrowserStatusPoll();
+  liveBrowserWorkspaceId = null;
+  setLiveBrowserControlUi(false);
+  liveBrowserPointer = null;
+  hide($('live-browser-modal'));
+  $('live-browser-modal').setAttribute('aria-hidden', 'true');
+}
+
+function canvasCoords(ev) {
+  const canvas = $('live-browser-canvas');
+  const rect = canvas.getBoundingClientRect();
+  // Map from the *displayed* canvas box into CDP CSS pixels. Prefer the
+  // screencast deviceWidth/Height (viewport) over the bitmap size in case the
+  // JPEG was downscaled for streaming.
+  const vw = liveBrowserViewport.width || canvas.width || 1;
+  const vh = liveBrowserViewport.height || canvas.height || 1;
+  if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+  const x = ((ev.clientX - rect.left) / rect.width) * vw;
+  const y = ((ev.clientY - rect.top) / rect.height) * vh;
+  return {
+    x: Math.max(0, Math.min(vw - 1, Math.round(x))),
+    y: Math.max(0, Math.min(vh - 1, Math.round(y))),
+  };
+}
+
+function liveBrowserMouseButton(ev) {
+  if (ev.button === 2) return 'right';
+  if (ev.button === 1) return 'middle';
+  return 'left';
+}
+
+function liveBrowserButtonMask(button) {
+  if (button === 'right') return 2;
+  if (button === 'middle') return 4;
+  return 1; // left
+}
+
+/** CDP text payload for keyDown — required for printable keys / Enter / Tab. */
+function liveBrowserKeyText(key, modifiers) {
+  // Ctrl/Meta chords must not insert text (e.g. Ctrl+A).
+  if (modifiers & (2 | 4)) return undefined;
+  if (key === 'Enter') return '\r';
+  if (key === 'Tab') return '\t';
+  if (key === ' ') return ' ';
+  if (key.length === 1) return key;
+  return undefined;
+}
+
+function liveBrowserKeyModifiers(ev) {
+  let modifiers = 0;
+  if (ev.altKey) modifiers |= 1;
+  if (ev.ctrlKey) modifiers |= 2;
+  if (ev.metaKey) modifiers |= 4;
+  if (ev.shiftKey) modifiers |= 8;
+  return modifiers;
+}
+
+function moveLiveCursor(clientX, clientY) {
+  const stage = document.querySelector('.live-browser-stage');
+  const canvas = $('live-browser-canvas');
+  const cursor = $('live-browser-cursor');
+  if (!stage || !canvas || !liveBrowserInputEnabled) {
+    hide(cursor);
+    return;
+  }
+  // Position relative to the stage, but clamp to the canvas box so the
+  // overlay matches the coordinates we send to CDP.
+  const stageRect = stage.getBoundingClientRect();
+  const canvasRect = canvas.getBoundingClientRect();
+  cursor.style.left = `${clientX - stageRect.left}px`;
+  cursor.style.top = `${clientY - stageRect.top}px`;
+  const overCanvas =
+    clientX >= canvasRect.left &&
+    clientX <= canvasRect.right &&
+    clientY >= canvasRect.top &&
+    clientY <= canvasRect.bottom;
+  if (overCanvas) show(cursor);
+  else hide(cursor);
+}
+
+function sendLiveInput(msg) {
+  if (!liveBrowserInputEnabled || !liveBrowserWs || liveBrowserWs.readyState !== WebSocket.OPEN) return false;
+  liveBrowserWs.send(JSON.stringify(msg));
+  return true;
+}
+
+/** Always move first — CDP often ignores press/release that never hovered the point. */
+function sendLiveMouseMove(x, y, force = false) {
+  const now = Date.now();
+  liveBrowserPendingMove = { x, y };
+  if (!force && now - liveBrowserLastMoveSentAt < 32) {
+    if (!liveBrowserMoveTimer) {
+      liveBrowserMoveTimer = setTimeout(() => {
+        liveBrowserMoveTimer = null;
+        if (liveBrowserPendingMove) {
+          sendLiveMouseMove(liveBrowserPendingMove.x, liveBrowserPendingMove.y, true);
+        }
+      }, 32);
+    }
+    return;
+  }
+  liveBrowserLastMoveSentAt = now;
+  liveBrowserPendingMove = null;
+  sendLiveInput({
+    type: 'input_mouse',
+    eventType: 'mouseMoved',
+    x,
+    y,
+  });
+}
+
+function isBlankBrowserUrl(url) {
+  if (!url) return false;
+  return (
+    url === 'about:blank' ||
+    url === 'chrome://newtab/' ||
+    url.startsWith('chrome://') ||
+    url.startsWith('chrome-error://')
+  );
+}
+
+/**
+ * Blank overlay must only show when we *know* the page is blank AND we have not
+ * received a substantial JPEG yet. Large frames mean the stream is showing real
+ * content even if the URL event is stale/missing.
+ */
+function updateBlankPageOverlay(url, opts = {}) {
+  if (opts.reset) {
+    liveBrowserPageUrl = '';
+    liveBrowserLastFrameBytes = 0;
+  } else if (typeof url === 'string' && url) {
+    liveBrowserPageUrl = url;
+  }
+
+  const blank = $('live-browser-blank');
+  const title = blank?.querySelector('strong');
+  const detail = blank?.querySelector('span');
+  const knownBlank = isBlankBrowserUrl(liveBrowserPageUrl);
+  const hasSubstantialFrame = liveBrowserLastFrameBytes >= 5000 || liveBrowserFrameCount > 1;
+  // Cover black canvas while waiting — empty #000 looks like a "broken" stream.
+  const cover =
+    (knownBlank && !hasSubstantialFrame) ||
+    (liveBrowserFrameCount === 0 && !hasSubstantialFrame);
+
+  if (title) {
+    title.innerHTML = knownBlank
+      ? `Page is blank (<code>${escapeHtml(liveBrowserPageUrl || 'about:blank')}</code>)`
+      : 'Waiting for page URL…';
+  }
+  if (detail) {
+    detail.textContent = knownBlank
+      ? 'Live stream is connected, but Chromium has no real page open. In chat, ask the agent to open the site you want (e.g. “Open https://… and keep it open”), then click Reconnect.'
+      : 'Stream connected. URL updates arrive on navigation; the viewport above is live.';
+  }
+
+  if (cover) show(blank);
+  else hide(blank);
+}
+
+function paintLiveFrame(msg, ws) {
+  // Ack when present (harmless under push pacing; required if server is in ack mode).
+  if (ws.readyState === WebSocket.OPEN && msg.seq != null) {
+    ws.send(JSON.stringify({ type: 'ack', seq: msg.seq }));
+  }
+
+  const raw = typeof msg.data === 'string' ? msg.data : '';
+  if (!raw) return;
+  liveBrowserLastFrameBytes = raw.length;
+  const src = raw.startsWith('data:') ? raw : `data:image/jpeg;base64,${raw}`;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = $('live-browser-canvas');
+    const ctx = canvas.getContext('2d');
+    const w = msg.metadata?.deviceWidth || img.naturalWidth || canvas.width;
+    const h = msg.metadata?.deviceHeight || img.naturalHeight || canvas.height;
+    if (w > 0 && h > 0) {
+      liveBrowserViewport = { width: w, height: h };
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    }
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    liveBrowserFrameCount += 1;
+    liveBrowserLastFrameAt = Date.now();
+    if (liveBrowserFrameCount === 1 || liveBrowserFrameCount % 15 === 0) {
+      const urlPart = liveBrowserPageUrl ? ` · ${liveBrowserPageUrl}` : '';
+      if (!liveBrowserInputEnabled) {
+        const blankHint =
+          isBlankBrowserUrl(liveBrowserPageUrl) && liveBrowserLastFrameBytes < 5000
+            ? ' · page is blank — ask the agent to open a URL'
+            : '';
+        setLiveBrowserStatus(
+          `Streaming · ${canvas.width}×${canvas.height} · frames=${liveBrowserFrameCount}${urlPart}${blankHint}`,
+        );
+      }
+    }
+    // Hide the connect-time blank cover as soon as real frames arrive.
+    updateBlankPageOverlay();
+  };
+  img.onerror = () => {
+    setLiveBrowserStatus('Received a frame but failed to decode JPEG');
+  };
+  img.src = src;
+}
+
+async function connectLiveBrowserStream(workspaceId) {
+  const prevWs = liveBrowserWs;
+  liveBrowserWs = null;
+  if (prevWs) {
+    try {
+      prevWs.onclose = null;
+      prevWs.onerror = null;
+      prevWs.onmessage = null;
+      prevWs.close();
+    } catch {
+      // ignore
+    }
+  }
+
+  const wasControlling = liveBrowserInputEnabled;
+  liveBrowserFrameCount = 0;
+  liveBrowserLastFrameBytes = 0;
+  updateBlankPageOverlay('', { reset: true });
+  setLiveBrowserStatus('Requesting ticket…');
+  stopLiveBrowserStatusPoll();
+  const ticketRes = await api(`/v1/agents/${encodeURIComponent(workspaceId)}/live-browser/ticket`, {
+    method: 'POST',
+    body: '{}',
+  });
+
+  const status = await api(`/v1/agents/${encodeURIComponent(workspaceId)}/live-browser/status`);
+  if (!status.available) {
+    setLiveBrowserStatus(status.reason || 'Container not running with live browser');
+    updateBlankPageOverlay('about:blank');
+    return;
+  }
+  if (status.page_url) {
+    updateBlankPageOverlay(status.page_url);
+  }
+  if (!status.stream_ready) {
+    setLiveBrowserStatus(
+      status.hint ||
+        'Waiting for agent-browser stream. When the agent has a page open, click Reconnect.',
+    );
+    updateBlankPageOverlay(status.page_url || 'about:blank');
+    // Poll and auto-connect once the stream port is up — do not navigate for the agent.
+    liveBrowserStatusTimer = setInterval(() => {
+      if (!liveBrowserWorkspaceId) return;
+      void api(`/v1/agents/${encodeURIComponent(liveBrowserWorkspaceId)}/live-browser/status`)
+        .then((st) => {
+          if (!liveBrowserWorkspaceId) return;
+          if (st.page_url) updateBlankPageOverlay(st.page_url);
+          if (st.stream_ready) {
+            setLiveBrowserStatus(
+              st.page_url
+                ? `Stream ready · ${st.page_url} · connecting…`
+                : 'Stream ready · connecting…',
+            );
+            void connectLiveBrowserStream(liveBrowserWorkspaceId);
+          }
+        })
+        .catch(() => {});
+    }, 2500);
+    return;
+  }
+  setLiveBrowserStatus(
+    isBlankBrowserUrl(status.page_url)
+      ? `Stream connected · page is ${status.page_url || 'about:blank'} (showing current Chromium view)`
+      : `Stream ready · ${status.page_url} · control=${status.control || 'agent'} · connecting…`,
+  );
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}${ticketRes.stream_path}?ticket=${encodeURIComponent(ticketRes.ticket)}`;
+  const ws = new WebSocket(wsUrl);
+  liveBrowserWs = ws;
+  let opened = false;
+
+  // Keep URL/port in sync with the worker while the modal is open. If the agent
+  // navigates (or we were on a blank session), reconnect once content is ready.
+  liveBrowserStatusTimer = setInterval(() => {
+    if (!liveBrowserWorkspaceId || liveBrowserWs !== ws) return;
+    void api(`/v1/agents/${encodeURIComponent(liveBrowserWorkspaceId)}/live-browser/status`)
+      .then((st) => {
+        if (!liveBrowserWorkspaceId || liveBrowserWs !== ws) return;
+        if (st.page_url) updateBlankPageOverlay(st.page_url);
+        const stuckBlank =
+          liveBrowserFrameCount <= 1 &&
+          liveBrowserLastFrameBytes < 5000 &&
+          isBlankBrowserUrl(liveBrowserPageUrl);
+        const statusHasPage = st.page_url && !isBlankBrowserUrl(st.page_url);
+        if (
+          stuckBlank &&
+          statusHasPage &&
+          st.stream_ready &&
+          liveBrowserStallReconnects < 3
+        ) {
+          liveBrowserStallReconnects += 1;
+          setLiveBrowserStatus(
+            `Agent page is ${st.page_url} — reconnecting live view to the right session…`,
+          );
+          void connectLiveBrowserStream(liveBrowserWorkspaceId);
+        }
+      })
+      .catch(() => {});
+  }, 3000);
+
+  ws.onopen = () => {
+    opened = true;
+    liveBrowserLastFrameAt = Date.now();
+    liveBrowserStallReconnects = 0;
+    // Keep in sync with worker upstream `/?pacing=push&maxFps=8`.
+    ws.send(JSON.stringify({ type: 'config', maxFps: 8, pacing: 'push' }));
+    setLiveBrowserStatus(
+      wasControlling
+        ? 'Streaming — you have control'
+        : `Streaming · view only · control=${status.control || 'agent'}`,
+    );
+    if (wasControlling) setLiveBrowserControlUi(true);
+    if (liveBrowserStallTimer) clearInterval(liveBrowserStallTimer);
+    // agent-browser can freeze after the first blank frame; reconnect when stalled.
+    liveBrowserStallTimer = setInterval(() => {
+      if (liveBrowserWs !== ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!liveBrowserLastFrameAt) return;
+      const stalled = Date.now() - liveBrowserLastFrameAt > 6000;
+      const stuckOnFirstBlank =
+        liveBrowserFrameCount <= 1 &&
+        liveBrowserLastFrameBytes < 5000 &&
+        isBlankBrowserUrl(liveBrowserPageUrl);
+      if (stalled && stuckOnFirstBlank && liveBrowserStallReconnects < 3 && liveBrowserWorkspaceId) {
+        liveBrowserStallReconnects += 1;
+        setLiveBrowserStatus('Stream stalled on blank frame — reconnecting…');
+        void connectLiveBrowserStream(liveBrowserWorkspaceId);
+      }
+    }, 3000);
+  };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') {
+      // Ignore unexpected binary frames.
+      return;
+    }
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (msg.type === 'frame' && msg.data) {
+      paintLiveFrame(msg, ws);
+    } else if (msg.type === 'status') {
+      if (!liveBrowserInputEnabled) {
+        setLiveBrowserStatus(
+          `Streaming · viewport ${msg.viewportWidth || '?'}×${msg.viewportHeight || '?'} · screencast=${msg.screencasting}`,
+        );
+      }
+    } else if (msg.type === 'url') {
+      updateBlankPageOverlay(msg.url || '');
+      if (!liveBrowserInputEnabled) {
+        setLiveBrowserStatus(`Page: ${msg.url || '(none)'}`);
+      }
+    } else if (msg.type === 'tabs' && Array.isArray(msg.tabs)) {
+      // On connect, agent-browser may send tabs (with urls) before any navigation `url` event.
+      const active =
+        msg.tabs.find((t) => t && (t.active || t.selected || t.current)) || msg.tabs[0];
+      const tabUrl = active && (active.url || active.URL);
+      if (typeof tabUrl === 'string' && tabUrl) {
+        updateBlankPageOverlay(tabUrl);
+        if (!liveBrowserInputEnabled) {
+          setLiveBrowserStatus(`Page: ${tabUrl}`);
+        }
+      }
+    }
+  };
+
+  ws.onerror = () => {
+    if (liveBrowserWs === ws) {
+      setLiveBrowserStatus('WebSocket error — click Reconnect');
+    }
+  };
+  ws.onclose = (ev) => {
+    if (liveBrowserWs !== ws) return;
+    liveBrowserWs = null;
+    if (liveBrowserStallTimer) {
+      clearInterval(liveBrowserStallTimer);
+      liveBrowserStallTimer = null;
+    }
+    stopLiveBrowserStatusPoll();
+    const why = ev.reason || (opened ? 'connection closed' : 'upgrade failed');
+    setLiveBrowserStatus(
+      `Disconnected (${ev.code}${why ? `: ${why}` : ''}). If the agent has a page open, click Reconnect.`,
+    );
+  };
+}
+
+async function openLiveBrowser(workspaceId, name) {
+  liveBrowserWorkspaceId = workspaceId;
+  setLiveBrowserControlUi(false);
+  liveBrowserPointer = null;
+  $('live-browser-title').textContent = `Live browser — ${name}`;
+  show($('live-browser-modal'));
+  $('live-browser-modal').setAttribute('aria-hidden', 'false');
+  try {
+    await connectLiveBrowserStream(workspaceId);
+  } catch (err) {
+    setLiveBrowserStatus(err.message || 'Failed to open live browser');
+  }
+}
+
+async function liveBrowserTakeControl() {
+  if (!liveBrowserWorkspaceId) return;
+  const takeBtn = $('live-browser-take');
+  takeBtn.disabled = true;
+  takeBtn.textContent = 'Taking control…';
+  try {
+    await api(`/v1/agents/${encodeURIComponent(liveBrowserWorkspaceId)}/live-browser/take-control`, {
+      method: 'POST',
+      body: '{}',
+    });
+    setLiveBrowserControlUi(true);
+    setLiveBrowserStatus('You have control — click/type on the viewport');
+  } catch (err) {
+    setLiveBrowserControlUi(false);
+    setLiveBrowserStatus(err.message || 'Take control failed');
+  }
+}
+
+async function liveBrowserReleaseControl() {
+  if (!liveBrowserWorkspaceId) return;
+  const releaseBtn = $('live-browser-release');
+  releaseBtn.disabled = true;
+  releaseBtn.textContent = 'Releasing…';
+  try {
+    await api(
+      `/v1/agents/${encodeURIComponent(liveBrowserWorkspaceId)}/live-browser/release-control`,
+      { method: 'POST', body: '{}' },
+    );
+    setLiveBrowserControlUi(false);
+    $('live-browser-release').textContent = 'Release & continue';
+    setLiveBrowserStatus('Released — agent will continue from the current page');
+  } catch (err) {
+    setLiveBrowserControlUi(true);
+    $('live-browser-release').textContent = 'Release & continue';
+    setLiveBrowserStatus(err.message || 'Release failed');
+  }
+}
+
+$('live-browser-close').addEventListener('click', () => closeLiveBrowser());
+$('live-browser-backdrop').addEventListener('click', () => closeLiveBrowser());
+$('live-browser-take').addEventListener('click', () => void liveBrowserTakeControl());
+$('live-browser-release').addEventListener('click', () => void liveBrowserReleaseControl());
+$('live-browser-reconnect').addEventListener('click', () => {
+  if (liveBrowserWorkspaceId) void connectLiveBrowserStream(liveBrowserWorkspaceId);
+});
+
+$('live-browser-canvas').addEventListener('pointerdown', (ev) => {
+  if (!liveBrowserInputEnabled) return;
+  ev.preventDefault();
+  const canvas = $('live-browser-canvas');
+  canvas.focus();
+  try {
+    canvas.setPointerCapture(ev.pointerId);
+  } catch {
+    // ignore
+  }
+  const { x, y } = canvasCoords(ev);
+  liveBrowserPointer = { x, y };
+  moveLiveCursor(ev.clientX, ev.clientY);
+  const button = liveBrowserMouseButton(ev);
+  const mask = liveBrowserButtonMask(button);
+  // Move to point, then press (release on pointerup — supports drag).
+  sendLiveMouseMove(x, y, true);
+  liveBrowserButtonsDown |= mask;
+  const ok = sendLiveInput({
+    type: 'input_mouse',
+    eventType: 'mousePressed',
+    x,
+    y,
+    button,
+    clickCount: ev.detail || 1,
+  });
+  if (ok) {
+    setLiveBrowserStatus(`Controlling · click (${x}, ${y})`);
+  } else {
+    setLiveBrowserStatus('Input not sent — stream disconnected. Click Reconnect.');
+  }
+});
+$('live-browser-canvas').addEventListener('pointerup', (ev) => {
+  if (!liveBrowserInputEnabled) return;
+  const { x, y } = canvasCoords(ev);
+  liveBrowserPointer = { x, y };
+  moveLiveCursor(ev.clientX, ev.clientY);
+  const button = liveBrowserMouseButton(ev);
+  const mask = liveBrowserButtonMask(button);
+  liveBrowserButtonsDown &= ~mask;
+  sendLiveInput({
+    type: 'input_mouse',
+    eventType: 'mouseReleased',
+    x,
+    y,
+    button,
+    clickCount: ev.detail || 1,
+  });
+  try {
+    $('live-browser-canvas').releasePointerCapture(ev.pointerId);
+  } catch {
+    // ignore
+  }
+});
+$('live-browser-canvas').addEventListener('pointermove', (ev) => {
+  if (!liveBrowserInputEnabled) return;
+  const { x, y } = canvasCoords(ev);
+  liveBrowserPointer = { x, y };
+  moveLiveCursor(ev.clientX, ev.clientY);
+  // Throttle remote moves — docker-exec relay drops/delays input when flooded.
+  sendLiveMouseMove(x, y, false);
+});
+$('live-browser-canvas').addEventListener('wheel', (ev) => {
+  if (!liveBrowserInputEnabled) return;
+  ev.preventDefault();
+  const { x, y } = canvasCoords(ev);
+  sendLiveMouseMove(x, y, true);
+  sendLiveInput({
+    type: 'input_mouse',
+    eventType: 'mouseWheel',
+    x,
+    y,
+    deltaX: ev.deltaX,
+    deltaY: ev.deltaY,
+  });
+}, { passive: false });
+$('live-browser-canvas').addEventListener('contextmenu', (ev) => {
+  if (liveBrowserInputEnabled) ev.preventDefault();
+});
+window.addEventListener('keydown', (ev) => {
+  if (!liveBrowserInputEnabled || $('live-browser-modal').classList.contains('hidden')) return;
+  if (ev.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target.tagName)) return;
+  // Keep focus on the canvas so subsequent keys keep routing here.
+  $('live-browser-canvas').focus();
+  ev.preventDefault();
+  const modifiers = liveBrowserKeyModifiers(ev);
+  const text = liveBrowserKeyText(ev.key, modifiers);
+  const keyDown = {
+    type: 'input_keyboard',
+    eventType: 'keyDown',
+    key: ev.key,
+    code: ev.code,
+    modifiers,
+  };
+  // CDP inserts from keyDown when `text` is set (Enter needs "\r", letters need themselves).
+  if (text !== undefined) keyDown.text = text;
+  const ok = sendLiveInput(keyDown);
+  if (ok && text !== undefined) {
+    setLiveBrowserStatus(`Controlling · typed ${JSON.stringify(text)}`);
+  }
+});
+window.addEventListener('keyup', (ev) => {
+  if (!liveBrowserInputEnabled || $('live-browser-modal').classList.contains('hidden')) return;
+  if (ev.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(ev.target.tagName)) return;
+  const modifiers = liveBrowserKeyModifiers(ev);
+  sendLiveInput({
+    type: 'input_keyboard',
+    eventType: 'keyUp',
+    key: ev.key,
+    code: ev.code,
+    modifiers,
+  });
 });
 
 bootstrap();

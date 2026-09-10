@@ -70,6 +70,8 @@ export interface WorkerSpawnContext {
   groupDir: string;
   claudeSharedDir: string;
   containerConfig: ContainerConfig;
+  /** Gateway workspace id — used by live-browser module for stream routing. */
+  workspaceId?: string;
 }
 
 export interface BuildMountOptions {
@@ -207,7 +209,7 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution, mountOptions);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(
+  const { args, liveBrowser } = await buildContainerArgs(
     mounts,
     containerName,
     agentGroup,
@@ -232,7 +234,23 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  if (liveBrowser) {
+    const { registerLiveBrowserEndpoint, unregisterLiveBrowserEndpoint } =
+      await import('./modules/live-browser/container-hooks.js');
+    registerLiveBrowserEndpoint({
+      sessionId: session.id,
+      workspaceId: spawnContext?.workspaceId ?? null,
+      agentGroupId: agentGroup.id,
+      containerName,
+      containerPort: liveBrowser.containerPort,
+    });
+    container.once('close', () => {
+      void unregisterLiveBrowserEndpoint(session.id);
+    });
+  }
+
   let stderrBuf = '';
 
   activeContainers.set(session.id, { process: container, containerName });
@@ -444,7 +462,7 @@ async function buildContainerArgs(
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
   workerSpawn?: boolean,
-): Promise<string[]> {
+): Promise<{ args: string[]; liveBrowser: import('./modules/live-browser/container-hooks.js').LiveBrowserSpawnMeta | null }> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Environment — only vars read by code we don't own.
@@ -477,6 +495,14 @@ async function buildContainerArgs(
     }
   }
 
+  // Live browser stream publish (no-op when LIVE_BROWSER_ENABLED=false).
+  let liveBrowser: import('./modules/live-browser/container-hooks.js').LiveBrowserSpawnMeta | null =
+    null;
+  {
+    const { applyLiveBrowserContainerArgs } = await import('./modules/live-browser/container-hooks.js');
+    liveBrowser = applyLiveBrowserContainerArgs(args);
+  }
+
   // Host gateway
   args.push(...hostGatewayArgs());
 
@@ -506,7 +532,7 @@ async function buildContainerArgs(
 
   args.push('-c', 'exec bun run /app/src/index.ts');
 
-  return args;
+  return { args, liveBrowser };
 }
 
 /** Build a per-agent-group Docker image with custom packages. */

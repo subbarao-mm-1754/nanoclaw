@@ -68,7 +68,7 @@ async function processOneInbound(): Promise<boolean> {
       result = await processMessageOnWorker(payload);
     } catch (err) {
       if (!isWorkerWorkspaceMissingError(err)) throw err;
-      log.warn('Worker workspace missing on disk; forcing rematerialize', {
+      log.debug('Worker workspace missing on disk; forcing rematerialize', {
         workspaceId: conversation.workspace_id,
         err,
       });

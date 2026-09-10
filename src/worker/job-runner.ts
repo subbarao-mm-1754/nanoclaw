@@ -77,6 +77,7 @@ function buildSpawnContext(
     groupDir: paths.group_dir,
     claudeSharedDir: paths.claude_shared_dir,
     containerConfig,
+    workspaceId: manifest.workspace_id,
   };
 }
 

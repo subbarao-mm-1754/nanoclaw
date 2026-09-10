@@ -198,6 +198,34 @@
       </section>
     </main>
 
+    <div id="live-browser-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" id="live-browser-backdrop"></div>
+      <div class="modal-panel" role="dialog" aria-labelledby="live-browser-title">
+        <div class="modal-header">
+          <h2 id="live-browser-title">Live browser</h2>
+          <button type="button" class="secondary" id="live-browser-close">Close</button>
+        </div>
+        <p id="live-browser-status" class="agent-meta">Checking…</p>
+        <p id="live-browser-control-banner" class="live-browser-banner hidden">View only — click Take control to interact</p>
+        <div class="live-browser-stage">
+          <canvas id="live-browser-canvas" width="1280" height="720" tabindex="0"></canvas>
+          <div id="live-browser-cursor" class="live-browser-cursor hidden" aria-hidden="true"></div>
+          <div id="live-browser-blank" class="live-browser-blank hidden">
+            <strong>Page is blank</strong>
+            <span>The live stream is connected, but Chromium has no real page open yet.</span>
+          </div>
+        </div>
+        <div class="actions" style="margin-top: 0.75rem">
+          <button type="button" id="live-browser-take">Take control</button>
+          <button type="button" class="secondary" id="live-browser-release" disabled>Release &amp; continue</button>
+          <button type="button" class="secondary" id="live-browser-reconnect">Reconnect</button>
+        </div>
+        <p class="empty" id="live-browser-hint" style="margin-top: 0.5rem">
+          Screencast does not show the agent’s OS mouse cursor. After Take control, your pointer is drawn on the viewport and clicks/keys go to the page.
+        </p>
+      </div>
+    </div>
+
     <script src="/assets/app.js" type="module"></script>
   </body>
 </html>

@@ -61,6 +61,27 @@ function matchesDelivery(
   return true;
 }
 
+/** Notify target for system actions when the collector drains with delivery=null. */
+function resolveSystemNotifyDelivery(
+  delivery: WorkerDelivery | null,
+  inDb: ReturnType<typeof openInboundDb>,
+): WorkerDelivery | null {
+  if (delivery?.channel_type && delivery.platform_id) return delivery;
+  const row = inDb
+    .prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1')
+    .get() as
+    | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
+    | undefined;
+  if (row?.channel_type && row.platform_id) {
+    return {
+      channel_type: row.channel_type,
+      platform_id: row.platform_id,
+      thread_id: row.thread_id,
+    };
+  }
+  return null;
+}
+
 function encodeFiles(files: Array<{ filename: string; data: Buffer }>): WorkerCollectedOutbound['files'] {
   return files.map((f) => ({
     filename: f.filename,
@@ -98,13 +119,17 @@ export async function drainOutboundBatch(
 
     for (const msg of due) {
       if (msg.kind === 'system' || msg.channel_type === 'agent') {
-        if (msg.kind === 'system' && delivery) {
+        if (msg.kind === 'system') {
           try {
+            // Session collector drains with delivery=null so all chat destinations
+            // are pushed; browser-session notify still needs a channel target —
+            // fall back to session_routing written at job start.
+            const notifyDelivery = resolveSystemNotifyDelivery(delivery, inDb);
             const handledBrowser = await handleBrowserSessionSystemMessage({
               workspaceId,
               agentGroupId,
               sessionId,
-              delivery,
+              delivery: notifyDelivery,
               rawContent: msg.content,
             });
             if (!handledBrowser) {
@@ -115,17 +140,6 @@ export async function drainOutboundBatch(
                 rawContent: msg.content,
               });
             }
-          } catch (err) {
-            log.error('Failed handling system action', { sessionId, msgId: msg.id, err });
-          }
-        } else if (msg.kind === 'system') {
-          try {
-            await handleKnowledgeSystemMessage({
-              workspaceId,
-              agentGroupId,
-              sessionId,
-              rawContent: msg.content,
-            });
           } catch (err) {
             log.error('Failed handling system action', { sessionId, msgId: msg.id, err });
           }

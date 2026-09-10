@@ -12,6 +12,9 @@
  *
  * Registry-based modules (installed via /add-<name> skills, pulled from the
  * `modules` branch): append imports below.
+ *
+ * Optional feature modules (env-gated):
+ *   - src/modules/live-browser/  → LIVE_BROWSER_ENABLED=true
  */
 // Approvals (default tier) must load before self-mod (optional) so the
 // registerApprovalHandler / requestApproval symbols are bound when self-mod
@@ -22,3 +25,4 @@ import './scheduling/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
+import './live-browser/index.js';

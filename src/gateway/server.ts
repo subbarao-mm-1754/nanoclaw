@@ -915,6 +915,7 @@ async function handleInternalBrowserSessionRequest(
     origin: requireString(body, 'origin'),
     label: typeof body.label === 'string' ? body.label : undefined,
     login_url: typeof body.login_url === 'string' ? body.login_url : undefined,
+    force: body.force !== false,
     notify:
       notifyRaw && typeof notifyRaw === 'object' && !Array.isArray(notifyRaw)
         ? {
@@ -1078,6 +1079,15 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
   }
 
   try {
+    {
+      const { handleGatewayLiveBrowserHttp } = await import('../modules/live-browser/gateway-routes.js');
+      if (
+        await handleGatewayLiveBrowserHttp(req, res, pathname, () => requireUserSession(req))
+      ) {
+        return;
+      }
+    }
+
     if (req.method === 'POST' && pathname === '/v1/auth/register') {
       await handleRegister(req, res);
       return;
@@ -1409,6 +1419,22 @@ export async function startGatewayServer(): Promise<void> {
     void route(req, res).catch((err) => {
       log.error('Gateway HTTP handler error', { err });
       jsonResponse(res, 500, { error: 'Internal server error' });
+    });
+  });
+
+  server.on('upgrade', (req, socket, head) => {
+    void (async () => {
+      const { handleGatewayLiveBrowserUpgrade } = await import(
+        '../modules/live-browser/gateway-routes.js'
+      );
+      const handled = await handleGatewayLiveBrowserUpgrade(req, socket, head);
+      if (!handled) {
+        socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+      }
+    })().catch((err) => {
+      log.error('Gateway upgrade handler error', { err });
+      socket.destroy();
     });
   });
 

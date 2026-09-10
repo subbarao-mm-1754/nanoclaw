@@ -24,6 +24,7 @@ import {
   findActiveBrowserSessionForOrigin,
   getBrowserSession,
   getBrowserSessionByConnectToken,
+  revokeBrowserSession,
   toPublicBrowserSession,
   type BrowserSession,
 } from './store/browser-sessions.js';
@@ -94,6 +95,12 @@ export async function startBrowserConnect(input: {
   label?: string;
   loginUrl?: string;
   workspaceId?: string | null;
+  /**
+   * When true, skip reusing an existing active session and open a headed login
+   * even if cookies are already stored. Agent MCP requests use this when the
+   * site shows logged-out / session expired (stale cookies still look "active").
+   */
+  force?: boolean;
   notify?: {
     channel_type: string;
     platform_id: string;
@@ -111,7 +118,7 @@ export async function startBrowserConnect(input: {
   }
 
   const existing = findActiveBrowserSessionForOrigin(input.userId, origin);
-  if (existing) {
+  if (existing && !input.force) {
     if (input.workspaceId) {
       bindBrowserSessionToWorkspace(input.workspaceId, existing.id, input.userId);
       try {
@@ -140,6 +147,26 @@ export async function startBrowserConnect(input: {
       connect_url: null,
       message: 'Existing browser session reused.',
     };
+  }
+
+  if (existing && input.force) {
+    // Stale cookies still sit in status=active; revoke so the agent gets a real login.
+    log.info('Forcing new browser login; revoking existing session for origin', {
+      userId: input.userId,
+      origin,
+      sessionId: existing.id,
+    });
+    revokeBrowserSession(existing.id, input.userId);
+    if (input.workspaceId) {
+      try {
+        await ensureWorkspaceOnWorker(input.workspaceId);
+      } catch (err) {
+        log.warn('Failed refreshing workspace after revoking stale browser session', {
+          workspaceId: input.workspaceId,
+          err,
+        });
+      }
+    }
   }
 
   const token = newConnectToken();
@@ -403,6 +430,8 @@ export async function handleBrowserSessionRequest(input: {
   origin: string;
   label?: string;
   login_url?: string;
+  /** Default true — agent only asks when login is needed. */
+  force?: boolean;
   notify?: {
     channel_type: string;
     platform_id: string;
@@ -427,6 +456,8 @@ export async function handleBrowserSessionRequest(input: {
       label: input.label,
       loginUrl: input.login_url,
       workspaceId: input.workspace_id,
+      // Agent MCP path: always open headed login unless explicitly told to reuse.
+      force: input.force !== false,
       notify: input.notify ?? null,
     });
     return {

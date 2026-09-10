@@ -17,6 +17,11 @@ const envConfig = readEnvFile([
   'DATABASE_URL',
   'KNOWLEDGE_ENABLED',
   'AGENT_MODEL',
+  'LIVE_BROWSER_ENABLED',
+  'LIVE_BROWSER_STREAM_PORT',
+  'LIVE_BROWSER_HOST_PORT_START',
+  'LIVE_BROWSER_HOST_PORT_END',
+  'LIVE_BROWSER_TICKET_TTL_MS',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -137,6 +142,33 @@ export const KNOWLEDGE_ENABLED =
   (process.env.KNOWLEDGE_ENABLED ??
     envConfig.KNOWLEDGE_ENABLED ??
     (KNOWLEDGE_DATABASE_URL ? 'true' : 'false')) === 'true';
+
+/**
+ * Live browser (Option A): proxy agent-browser WebSocket stream via Gateway.
+ * Off by default — set LIVE_BROWSER_ENABLED=true to publish stream ports and
+ * expose /v1/.../live-browser routes. See src/modules/live-browser/project.md.
+ */
+export const LIVE_BROWSER_ENABLED =
+  (process.env.LIVE_BROWSER_ENABLED ?? envConfig.LIVE_BROWSER_ENABLED ?? 'false') === 'true';
+/** Fixed stream port inside the agent container (agent-browser). */
+export const LIVE_BROWSER_STREAM_PORT = parseInt(
+  process.env.LIVE_BROWSER_STREAM_PORT || envConfig.LIVE_BROWSER_STREAM_PORT || '9223',
+  10,
+);
+/** Host loopback port range for per-session stream publishes. */
+export const LIVE_BROWSER_HOST_PORT_START = parseInt(
+  process.env.LIVE_BROWSER_HOST_PORT_START || envConfig.LIVE_BROWSER_HOST_PORT_START || '19000',
+  10,
+);
+export const LIVE_BROWSER_HOST_PORT_END = parseInt(
+  process.env.LIVE_BROWSER_HOST_PORT_END || envConfig.LIVE_BROWSER_HOST_PORT_END || '19999',
+  10,
+);
+/** Short-lived Gateway ticket TTL for WS upgrades (ms). */
+export const LIVE_BROWSER_TICKET_TTL_MS = parseInt(
+  process.env.LIVE_BROWSER_TICKET_TTL_MS || envConfig.LIVE_BROWSER_TICKET_TTL_MS || '300000',
+  10,
+);
 
 /**
  * Model for every Claude-provider agent container.

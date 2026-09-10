@@ -16,6 +16,8 @@ export type BrowserSessionSystemContent = {
   origin: string;
   label?: string;
   login_url?: string;
+  /** When not false, gateway opens headed login even if a stale session exists. */
+  force?: boolean;
 };
 
 function isBrowserSessionRequest(
@@ -32,7 +34,8 @@ export async function handleBrowserSessionSystemMessage(opts: {
   workspaceId: string;
   agentGroupId: string;
   sessionId: string;
-  delivery: WorkerDelivery;
+  /** When null, gateway still opens headed login; Cliq/confirm notify is skipped. */
+  delivery: WorkerDelivery | null;
   rawContent: string;
 }): Promise<boolean> {
   let parsed: Record<string, unknown>;
@@ -44,16 +47,29 @@ export async function handleBrowserSessionSystemMessage(opts: {
   if (!isBrowserSessionRequest(parsed)) return false;
 
   const requestId = parsed.requestId;
+  const notify =
+    opts.delivery?.channel_type && opts.delivery.platform_id
+      ? {
+          channel_type: opts.delivery.channel_type,
+          platform_id: opts.delivery.platform_id,
+          thread_id: opts.delivery.thread_id,
+        }
+      : undefined;
+  if (!notify) {
+    log.warn('browser_session_request missing notify delivery; opening login without channel ping', {
+      requestId,
+      workspaceId: opts.workspaceId,
+      sessionId: opts.sessionId,
+    });
+  }
   const result = await callGatewayBrowserSessionRequest({
     workspace_id: opts.workspaceId,
     origin: parsed.origin,
     label: parsed.label,
     login_url: parsed.login_url,
-    notify: {
-      channel_type: opts.delivery.channel_type,
-      platform_id: opts.delivery.platform_id,
-      thread_id: opts.delivery.thread_id,
-    },
+    // Agent only requests when login is needed — never silently reuse expired cookies.
+    force: parsed.force !== false,
+    ...(notify ? { notify } : {}),
   });
 
   const inDb = openInboundDb(opts.agentGroupId, opts.sessionId);

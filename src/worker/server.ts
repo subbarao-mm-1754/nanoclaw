@@ -271,6 +271,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return;
   }
 
+  {
+    const { handleWorkerLiveBrowserHttp } = await import('../modules/live-browser/worker-routes.js');
+    if (await handleWorkerLiveBrowserHttp(req, res, url.pathname)) return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/v1/workspaces/prepare') {
     await handlePrepareWorkspace(req, res);
     return;
@@ -297,6 +302,22 @@ export function startWorkerServer(): Promise<void> {
         if (!res.headersSent) {
           jsonResponse(res, 500, { error: 'Internal error' });
         }
+      });
+    });
+
+    s.on('upgrade', (req, socket, head) => {
+      void (async () => {
+        const { handleWorkerLiveBrowserUpgrade } = await import(
+          '../modules/live-browser/worker-routes.js'
+        );
+        const handled = await handleWorkerLiveBrowserUpgrade(req, socket, head);
+        if (!handled) {
+          socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+        }
+      })().catch((err) => {
+        log.error('Worker upgrade handler error', { err });
+        socket.destroy();
       });
     });
 
