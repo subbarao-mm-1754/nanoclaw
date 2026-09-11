@@ -6,152 +6,78 @@ allowed-tools: Bash(agent-browser:*)
 
 # Browser Automation with agent-browser
 
+Run every `agent-browser` command via **Bash** (not Skill `args`). After `state load`, always `open <url>` (load alone leaves a blank page). Prefer `open`/`reload` over `close --all` — closing blanks Live browser until the next `open`. Stream pin after `open` is automatic when live browser is enabled. Saved sessions: absolute `/workspace/agent/browser-sessions/<id>.json`.
+
 ## Quick start
 
 ```bash
-agent-browser open <url>        # Navigate to page
-agent-browser snapshot -i       # Get interactive elements with refs
-agent-browser click @e1         # Click element by ref
-agent-browser fill @e2 "text"   # Fill input by ref
-agent-browser close             # Close browser
+agent-browser open <url>
+agent-browser snapshot -i
+agent-browser click @e1
+agent-browser fill @e2 "text"
+agent-browser close
 ```
 
 ## Core workflow
 
-1. Navigate: `agent-browser open <url>`
-2. Snapshot: `agent-browser snapshot -i` (returns elements with refs like `@e1`, `@e2`)
-3. Interact using refs from the snapshot
-4. Re-snapshot after navigation or significant DOM changes
+1. `agent-browser open <url>`
+2. `agent-browser snapshot -i` (refs like `@e1`)
+3. Interact with refs; re-snapshot after navigation
 
 ## Commands
 
 ### Navigation
 
 ```bash
-agent-browser open <url>      # Navigate to URL
-agent-browser back            # Go back
-agent-browser forward         # Go forward
-agent-browser reload          # Reload page
-agent-browser close           # Close browser
+agent-browser open <url>
+agent-browser back | forward | reload | close
 ```
 
-### Snapshot (page analysis)
+### Snapshot
 
 ```bash
-agent-browser snapshot            # Full accessibility tree
-agent-browser snapshot -i         # Interactive elements only (recommended)
-agent-browser snapshot -c         # Compact output
-agent-browser snapshot -d 3       # Limit depth to 3
-agent-browser snapshot -s "#main" # Scope to CSS selector
+agent-browser snapshot            # full tree
+agent-browser snapshot -i         # interactive (recommended)
+agent-browser snapshot -c         # compact
+agent-browser snapshot -d 3       # depth limit
+agent-browser snapshot -s "#main" # CSS scope
 ```
 
-### Interactions (use @refs from snapshot)
+### Interactions
 
 ```bash
-agent-browser click @e1           # Click
-agent-browser dblclick @e1        # Double-click
-agent-browser fill @e2 "text"     # Clear and type
-agent-browser type @e2 "text"     # Type without clearing
-agent-browser press Enter         # Press key
-agent-browser hover @e1           # Hover
-agent-browser check @e1           # Check checkbox
-agent-browser uncheck @e1         # Uncheck checkbox
-agent-browser select @e1 "value"  # Select dropdown option
-agent-browser scroll down 500     # Scroll page
-agent-browser upload @e1 file.pdf # Upload files
+agent-browser click @e1
+agent-browser dblclick @e1
+agent-browser fill @e2 "text"
+agent-browser type @e2 "text"
+agent-browser press Enter
+agent-browser hover @e1
+agent-browser check @e1 | uncheck @e1
+agent-browser select @e1 "value"
+agent-browser scroll down 500
+agent-browser upload @e1 file.pdf
 ```
 
-### Get information
+### Get / capture / wait
 
 ```bash
-agent-browser get text @e1        # Get element text
-agent-browser get html @e1        # Get innerHTML
-agent-browser get value @e1       # Get input value
-agent-browser get attr @e1 href   # Get attribute
-agent-browser get title           # Get page title
-agent-browser get url             # Get current URL
-agent-browser get count ".item"   # Count matching elements
+agent-browser get text|html|value @e1
+agent-browser get attr @e1 href
+agent-browser get title | get url | get count ".item"
+agent-browser screenshot [path.png] [--full]
+agent-browser pdf output.pdf
+agent-browser wait @e1 | 2000 | --text "…" | --url "**/…" | --load networkidle
 ```
 
-### Screenshots & PDF
-
-```bash
-agent-browser screenshot          # Save to temp directory
-agent-browser screenshot path.png # Save to specific path
-agent-browser screenshot --full   # Full page
-agent-browser pdf output.pdf      # Save as PDF
-```
-
-### Wait
-
-```bash
-agent-browser wait @e1                     # Wait for element
-agent-browser wait 2000                    # Wait milliseconds
-agent-browser wait --text "Success"        # Wait for text
-agent-browser wait --url "**/dashboard"    # Wait for URL pattern
-agent-browser wait --load networkidle      # Wait for network idle
-```
-
-### Semantic locators (alternative to refs)
+### Find / auth / misc
 
 ```bash
 agent-browser find role button click --name "Submit"
-agent-browser find text "Sign In" click
-agent-browser find label "Email" fill "user@test.com"
-agent-browser find placeholder "Search" type "query"
+agent-browser state load /workspace/agent/browser-sessions/<id>.json
+agent-browser state save /workspace/agent/browser-sessions/<id>.json
+agent-browser cookies | cookies set name value | cookies clear
+agent-browser storage local | storage local set k v
+agent-browser eval "document.title"
 ```
 
-### Authentication with saved state
-
-**Do not ask the user for passwords in chat.** Prefer `request_browser_session` (MCP) so the gateway opens a headed browser on the host and notifies the user (Cliq). Gateway-injected sessions live under `browser-sessions/` (see `browser-sessions/index.json`).
-
-```bash
-# After the user confirms login (or when index.json already lists the site)
-agent-browser state load browser-sessions/<id>.json
-agent-browser open https://app.example.com/dashboard
-
-# After browsing, persist refreshed cookies for the gateway
-agent-browser state save browser-sessions/<id>.json
-```
-
-Public sites need no `state load` — just `open` the URL.
-
-### Cookies & Storage
-
-```bash
-agent-browser cookies                     # Get all cookies
-agent-browser cookies set name value      # Set cookie
-agent-browser cookies clear               # Clear cookies
-agent-browser storage local               # Get localStorage
-agent-browser storage local set k v       # Set value
-```
-
-### JavaScript
-
-```bash
-agent-browser eval "document.title"   # Run JavaScript
-```
-
-## Example: Form submission
-
-```bash
-agent-browser open https://example.com/form
-agent-browser snapshot -i
-# Output shows: textbox "Email" [ref=e1], textbox "Password" [ref=e2], button "Submit" [ref=e3]
-
-agent-browser fill @e1 "user@example.com"
-agent-browser fill @e2 "password123"
-agent-browser click @e3
-agent-browser wait --load networkidle
-agent-browser snapshot -i  # Check result
-```
-
-## Example: Data extraction
-
-```bash
-agent-browser open https://example.com/products
-agent-browser snapshot -i
-agent-browser get text @e1  # Get product title
-agent-browser get attr @e2 href  # Get link URL
-agent-browser screenshot products.png
-```
+Do not ask for passwords; use `request_browser_session` when login is needed or the session expired — even if `browser-sessions/index.json` already has an entry. Do not print `browser-sessions/*.json` into chat.

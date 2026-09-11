@@ -5,4 +5,5 @@
  */
 //export const GLOBAL_AGENT_MODEL = 'gemma4:12b-mxfp8';
 //export const GLOBAL_AGENT_MODEL = '';
-export const GLOBAL_AGENT_MODEL = 'qwen3.6:35b-a3b-mlx-bf16';
+//export const GLOBAL_AGENT_MODEL = 'qwen3.6:35b-a3b-mlx-bf16';
+export const GLOBAL_AGENT_MODEL = 'qwen3.8:27b-mlx-bf16';

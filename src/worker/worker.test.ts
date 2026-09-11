@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { openInboundDb, writeOutboundDirect } from '../session-manager.js';
+import { openInboundDb, openOutboundDbRw, writeOutboundDirect } from '../session-manager.js';
 import { runProcessMessageJob } from './job-runner.js';
 import { runPrepareWorkspace } from './prepare-workspace.js';
 import { parseMultipartBody } from './multipart.js';
@@ -46,6 +46,9 @@ vi.mock('../config.js', async () => {
     WORKER_PORT: 18080,
     WORKER_AUTH_TOKEN: '',
     WORKER_JOB_TIMEOUT_MS: 5000,
+    WORKER_BUILD_TURN_TIMEOUT_MS: 5000,
+    WORKER_OUTBOUND_POST_STOP_GRACE_MS: 50,
+    WORKER_OUTBOUND_COLLECT_POLL_MS: 50,
     WORKER_CLEANUP_WORKSPACE: false,
   };
 });
@@ -555,6 +558,64 @@ describe('runProcessMessageJob', () => {
     expect(result.status).toBe('completed');
     expect(result.outbound).toEqual([]);
     expect(result.detail).toMatch(/session collector/i);
+  });
+
+  it('waits for processing_ack turn end on builder jobs while streaming outbound', async () => {
+    prepareTestWorkspace();
+    const job = parseProcessMessageRequest(
+      sampleProcessBody({
+        job_id: 'run-build-1',
+        build_job_id: 'job-build-1',
+        options: { run_container: true, timeout_ms: 3000, wait_for_turn: true },
+      }),
+    );
+
+    isContainerRunningMock.mockReturnValue(true);
+    wakeContainerMock.mockImplementation(async (session) => {
+      writeOutboundDirect(session.agent_group_id, session.id, {
+        id: 'out-build-1',
+        kind: 'chat',
+        platformId: job.delivery.platform_id,
+        channelType: job.delivery.channel_type,
+        threadId: job.delivery.thread_id,
+        content: JSON.stringify({
+          text: 'Draft ready.\n\n```nanoclaw-build\n{"status":"completed","agent_name":"Food","files":[]}\n```',
+        }),
+      });
+      const outDb = openOutboundDbRw(session.agent_group_id, session.id);
+      try {
+        outDb
+          .prepare(
+            `INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed)
+             VALUES (?, 'completed', datetime('now'))`,
+          )
+          .run(job.inbound.id);
+      } finally {
+        outDb.close();
+      }
+      return true;
+    });
+
+    const result = await runProcessMessageJob(job);
+    expect(result.status).toBe('completed');
+    // Continuous collector may have drained the chat row; leftovers are optional.
+    expect(result.error).toBeUndefined();
+  });
+
+  it('times out builder turn when processing_ack never completes', async () => {
+    prepareTestWorkspace();
+    const job = parseProcessMessageRequest(
+      sampleProcessBody({
+        build_job_id: 'job-build-timeout',
+        options: { run_container: true, timeout_ms: 200, wait_for_turn: true },
+      }),
+    );
+    isContainerRunningMock.mockReturnValue(true);
+    wakeContainerMock.mockResolvedValue(true);
+
+    const result = await runProcessMessageJob(job);
+    expect(result.status).toBe('timeout');
+    expect(result.detail).toMatch(/turn did not finish/i);
   });
 
   it('fails when workspace does not exist', async () => {

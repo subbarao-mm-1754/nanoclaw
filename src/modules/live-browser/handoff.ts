@@ -20,9 +20,23 @@ function assertSafeContainerName(name: string): void {
 /** Agent containers run as USER node — CLI must use the same user or it talks to a different daemon. */
 const AGENT_BROWSER_USER = 'node';
 
-/** PATH inside agent image — `/pnpm/agent-browser` is the real binary entry. */
+/** Prefer live-browser wrapper so proxy is stripped; fall back to real bin. */
 const AGENT_BROWSER_PATH =
-  "/pnpm:/pnpm/global/5/bin:/usr/local/bin:/usr/bin:/bin";
+  '/app/skills/agent-browser/bin:/pnpm:/pnpm/global/5/bin:/usr/local/bin:/usr/bin:/bin';
+
+/** Inline env for node -e scripts: never let OneCLI proxy touch agent-browser CDP. */
+const AGENT_BROWSER_NODE_ENV = `{
+  ...process.env,
+  PATH: '${AGENT_BROWSER_PATH}:' + (process.env.PATH || ''),
+  HOME: '/home/node',
+  HTTP_PROXY: '',
+  HTTPS_PROXY: '',
+  http_proxy: '',
+  https_proxy: '',
+  ALL_PROXY: '',
+  all_proxy: '',
+  NODE_USE_ENV_PROXY: '0',
+}`;
 
 function isBlankBrowserUrl(url: string | null | undefined): boolean {
   if (!url) return true;
@@ -123,7 +137,7 @@ export async function discoverAgentBrowserTargets(
 ): Promise<AgentBrowserStreamTarget[]> {
   const script = `
 const {spawnSync}=require('child_process');
-const env={...process.env, PATH:'${AGENT_BROWSER_PATH}:'+(process.env.PATH||''), HOME:'/home/node'};
+const env=${AGENT_BROWSER_NODE_ENV};
 function run(args){
   const r=spawnSync('agent-browser',args,{encoding:'utf8',env,timeout:${Math.max(800, timeoutMs - 500)}});
   return {status:r.status, out:((r.stdout||'')+(r.stderr||'')).trim()};
@@ -246,7 +260,7 @@ export async function discoverAgentBrowserPageUrl(
     : `['get','url']`;
   const script = `
 const {spawnSync}=require('child_process');
-const env={...process.env, PATH:'${AGENT_BROWSER_PATH}:'+(process.env.PATH||''), HOME:'/home/node'};
+const env=${AGENT_BROWSER_NODE_ENV};
 const r=spawnSync('agent-browser',${args},{encoding:'utf8',env,timeout:${Math.max(500, timeoutMs - 200)}});
 const out=((r.stdout||'')+(r.stderr||'')).trim();
 if(r.status!==0||!out){process.stderr.write(out.slice(0,300));process.exit(2);}
@@ -306,7 +320,7 @@ export async function forceLiveBrowserPaint(
     : '[';
   const script = `
 const {spawnSync}=require('child_process');
-const env={...process.env, PATH:'${AGENT_BROWSER_PATH}:'+(process.env.PATH||''), HOME:'/home/node'};
+const env=${AGENT_BROWSER_NODE_ENV};
 const args=${sessionArgs}'screenshot','/tmp/.nanoclaw-live-paint.png'];
 spawnSync('agent-browser',args,{encoding:'utf8',env,timeout:8000});
 process.exit(0);

@@ -2,6 +2,7 @@ import {
   GATEWAY_PUBLIC_URL,
   GATEWAY_WORKER_URL,
   WORKER_AUTH_TOKEN,
+  WORKER_BUILD_TURN_TIMEOUT_MS,
   WORKER_JOB_TIMEOUT_MS,
 } from '../config.js';
 import { log } from '../log.js';
@@ -61,6 +62,7 @@ export async function processMessageOnWorker(
 /**
  * Enqueue a Worker run asynchronously. Worker returns 202 immediately and later
  * POSTs the result to the Gateway callback URL.
+ * Builder/edit turns stream outbound continuously and finalize on processing_ack.
  */
 export async function enqueueProcessMessageOnWorker(
   payload: WorkerProcessMessageRequest,
@@ -74,6 +76,8 @@ export async function enqueueProcessMessageOnWorker(
       ...payload.options,
       async: true,
       callback_url: callbackUrl,
+      wait_for_turn: payload.options?.wait_for_turn ?? true,
+      timeout_ms: payload.options?.timeout_ms ?? WORKER_BUILD_TURN_TIMEOUT_MS,
     },
   };
 

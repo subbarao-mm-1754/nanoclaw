@@ -6,6 +6,7 @@ import {
   continueBuild,
   draftFilesFromEditTurn,
   getBuild,
+  handleBuilderOutboundStream,
   handleBuilderRunCallback,
   normalizeDraftAgentFiles,
   previewMatchesTarget,
@@ -23,14 +24,15 @@ import { listAgentFiles } from '../store/agent-files.js';
 
 const prepareWorkspaceOnWorkerMock = vi.fn();
 const enqueueProcessMessageOnWorkerMock = vi.fn();
+const processMessageOnWorkerMock = vi.fn();
 const destroyWorkspaceOnWorkerMock = vi.fn();
 const createAgentMock = vi.fn();
 
 vi.mock('../worker-client.js', () => ({
   prepareWorkspaceOnWorker: (...args: unknown[]) => prepareWorkspaceOnWorkerMock(...args),
   enqueueProcessMessageOnWorker: (...args: unknown[]) => enqueueProcessMessageOnWorkerMock(...args),
+  processMessageOnWorker: (...args: unknown[]) => processMessageOnWorkerMock(...args),
   destroyWorkspaceOnWorker: (...args: unknown[]) => destroyWorkspaceOnWorkerMock(...args),
-  processMessageOnWorker: vi.fn(),
 }));
 
 vi.mock('../agent-service.js', async (importOriginal) => {
@@ -45,6 +47,7 @@ beforeEach(() => {
   initGatewayTestDb();
   prepareWorkspaceOnWorkerMock.mockReset();
   enqueueProcessMessageOnWorkerMock.mockReset();
+  processMessageOnWorkerMock.mockReset();
   destroyWorkspaceOnWorkerMock.mockReset();
   createAgentMock.mockReset();
 
@@ -56,6 +59,16 @@ beforeEach(() => {
     content_hash: 'test-hash',
   });
   enqueueProcessMessageOnWorkerMock.mockResolvedValue({ run_id: 'run-1', status: 'accepted' });
+  processMessageOnWorkerMock.mockResolvedValue({
+    job_id: 'inject-1',
+    status: 'completed',
+    workspace_id: 'ws-builder',
+    session: { id: 'sess', agent_group_id: 'ag' },
+    workspace: { root: '/tmp', group_dir: '/tmp/agent', claude_shared_dir: '/tmp/.claude' },
+    session_paths: { inbound_db: '', outbound_db: '' },
+    inbound_message_id: 'bmsg',
+    outbound: [],
+  });
   destroyWorkspaceOnWorkerMock.mockResolvedValue(undefined);
   createAgentMock.mockImplementation(async (input: { name: string; owner_user_id: string }) => ({
     workspace_id: 'ws-result',
@@ -221,6 +234,31 @@ describe('builder service', () => {
     expect(enqueueArg.job_id).toBe(job.runs[0]!.id);
   });
 
+  it('injects follow-up into the active turn while in_progress', async () => {
+    const user = createUser({
+      email: 'inject@example.com',
+      password: 'password123',
+      display_name: 'Inject',
+    });
+    const job = await startBuild(user, { message: 'Build something' });
+    enqueueProcessMessageOnWorkerMock.mockClear();
+    processMessageOnWorkerMock.mockClear();
+
+    const continued = await continueBuild(user, job.id, { message: 'Also support dark mode' });
+
+    expect(continued.status).toBe('in_progress');
+    expect(continued.messages.some((m) => m.content.text === 'Also support dark mode')).toBe(true);
+    expect(enqueueProcessMessageOnWorkerMock).not.toHaveBeenCalled();
+    expect(processMessageOnWorkerMock).toHaveBeenCalledTimes(1);
+    const injectArg = processMessageOnWorkerMock.mock.calls[0]![0] as {
+      options?: { wait_for_turn?: boolean; wait_for_outbound?: boolean };
+      inbound: { content: { text: string } };
+    };
+    expect(injectArg.options?.wait_for_turn).toBe(false);
+    expect(injectArg.options?.wait_for_outbound).toBe(false);
+    expect(injectArg.inbound.content.text).toBe('Also support dark mode');
+  });
+
   it('moves to waiting_for_user on needs_input callback', async () => {
     const user = createUser({
       email: 'wait@example.com',
@@ -257,6 +295,51 @@ describe('builder service', () => {
     expect(updated.status).toBe('waiting_for_user');
     expect(updated.messages.some((m) => m.role === 'builder')).toBe(true);
     expect(destroyWorkspaceOnWorkerMock).not.toHaveBeenCalled();
+  });
+
+  it('finalizes from streamed outbound when run-result has empty outbound', async () => {
+    const user = createUser({
+      email: 'stream@example.com',
+      password: 'password123',
+      display_name: 'Stream',
+    });
+    const job = await startBuild(user, { message: 'Build food agent' });
+    const runId = job.runs[0]!.id;
+
+    await handleBuilderOutboundStream({
+      build_job_id: job.id,
+      job_id: runId,
+      outbound: [
+        {
+          id: 'out-stream-1',
+          kind: 'chat',
+          content: {
+            text: `Ready.\n\n\`\`\`nanoclaw-build
+{"status":"completed","agent_name":"Food Finder","files":[{"path":"CLAUDE.local.md","content":"# Food"}]}
+\`\`\``,
+          },
+        },
+      ],
+    });
+
+    await handleBuilderRunCallback({
+      job_id: runId,
+      build_job_id: job.id,
+      status: 'completed',
+      workspace_id: job.builder_workspace_id,
+      session: { id: job.builder_session_id, agent_group_id: job.builder_agent_group_id },
+      workspace: { root: '', group_dir: '', claude_shared_dir: '' },
+      session_paths: { inbound_db: '', outbound_db: '' },
+      inbound_message_id: job.messages[0]!.id,
+      outbound: [],
+    });
+
+    const updated = getBuild(user, job.id);
+    expect(updated.status).toBe('waiting_for_user');
+    expect(updated.messages.some((m) => m.content.streamed === true)).toBe(true);
+    expect(updated.messages.some((m) => /\/register/i.test(String(m.content.text ?? '')))).toBe(
+      true,
+    );
   });
 
   it('continues a waiting build then registers via /register', async () => {

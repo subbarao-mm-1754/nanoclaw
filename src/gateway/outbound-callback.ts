@@ -3,6 +3,7 @@ import type { WorkerOutboundCallbackPayload } from '../worker/types.js';
 import { log } from '../log.js';
 import { applyMemoryPatch, deliverOutboundMessage } from './delivery.js';
 import { beginHttpDelivery, endHttpDelivery } from './http-channel.js';
+import { handleBuilderOutboundStream } from './builder/service.js';
 import { captureBrowserSessionsFromMemoryPatch } from './store/browser-sessions.js';
 import {
   findConversationBySessionId,
@@ -24,6 +25,28 @@ import { invalidateWorkerWorkspaceCache } from './agent-service.js';
 export async function handleWorkerOutboundCallback(
   payload: WorkerOutboundCallbackPayload,
 ): Promise<{ delivered: number }> {
+  if (payload.build_job_id) {
+    const streamed = await handleBuilderOutboundStream({
+      build_job_id: payload.build_job_id,
+      job_id: payload.job_id,
+      outbound: payload.outbound ?? [],
+    });
+    if (payload.memory_patch) {
+      try {
+        const paths = workerWorkspacePaths(payload.workspace_id);
+        applyMemoryPatch(paths.group_dir, payload.memory_patch);
+        captureBrowserSessionsFromMemoryPatch(payload.workspace_id, payload.memory_patch);
+      } catch (err) {
+        log.warn('Failed applying builder collector memory patch', {
+          workspaceId: payload.workspace_id,
+          buildJobId: payload.build_job_id,
+          err,
+        });
+      }
+    }
+    return streamed;
+  }
+
   const conversation =
     (payload.conversation_id ? getConversation(payload.conversation_id) : null) ??
     findConversationBySessionId(payload.session_id);

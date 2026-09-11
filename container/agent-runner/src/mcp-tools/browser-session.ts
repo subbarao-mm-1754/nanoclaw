@@ -63,7 +63,10 @@ const requestBrowserSession: McpToolDefinition = {
   tool: {
     name: 'request_browser_session',
     description:
-      'Ask the gateway to open a headed browser on the host for the user to log in to a site. Sends a Cliq/chat message with a confirm link. Never ask for passwords. Use when a login-required site has no entry in browser-sessions/index.json.',
+      'Ask the gateway to open a headed browser on the host for the user to log in. ' +
+      'Sends a chat message with a confirm link. Never ask for passwords. ' +
+      'Call this whenever the site shows a login/signin page or session expired — ' +
+      'even if browser-sessions/index.json already has an entry (saved cookies may be stale).',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -75,6 +78,11 @@ const requestBrowserSession: McpToolDefinition = {
         login_url: {
           type: 'string',
           description: 'Optional login page URL (defaults to origin)',
+        },
+        force: {
+          type: 'boolean',
+          description:
+            'Open a fresh headed login even if a saved session exists (default true). Set false only to reuse a known-good session.',
         },
       },
       required: ['origin'],
@@ -94,6 +102,8 @@ const requestBrowserSession: McpToolDefinition = {
         origin,
         label: typeof args.label === 'string' ? args.label : undefined,
         login_url: typeof args.login_url === 'string' ? args.login_url : undefined,
+        // Default true: expired cookies still look "active" in the gateway DB.
+        force: args.force !== false,
       }),
     });
     log(`browser_session_request: ${requestId} ${origin}`);
@@ -112,7 +122,7 @@ const requestBrowserSession: McpToolDefinition = {
             reused: true,
             session_id: data.session_id,
             file,
-            message: `Existing session ready. Run: agent-browser state load ${file}`,
+            message: `Existing session ready. Run: agent-browser state load /workspace/agent/${file}`,
           },
           null,
           2,
@@ -128,7 +138,7 @@ const requestBrowserSession: McpToolDefinition = {
           connect_url: data.connect_url,
           message:
             data.message ??
-            'A browser was opened on the gateway host and the user was notified on Cliq. Wait for them to confirm login, then load browser-sessions/<id>.json and continue. Do not ask for passwords.',
+            'A browser was opened on the gateway host and the user was notified. Wait for them to confirm login, then list_browser_sessions, state load the new file, open the site, and continue. Do not ask for passwords.',
         },
         null,
         2,

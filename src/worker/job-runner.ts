@@ -1,6 +1,11 @@
 import fs from 'fs';
 
-import { WORKER_CLEANUP_WORKSPACE, WORKER_JOB_TIMEOUT_MS } from '../config.js';
+import {
+  WORKER_BUILD_TURN_TIMEOUT_MS,
+  WORKER_CLEANUP_WORKSPACE,
+  WORKER_JOB_TIMEOUT_MS,
+  WORKER_OUTBOUND_POST_STOP_GRACE_MS,
+} from '../config.js';
 import { wakeContainer, type WorkerSpawnContext } from '../container-runner.js';
 import {
   ensureSessionWorkspace,
@@ -14,7 +19,13 @@ import {
 import { log } from '../log.js';
 import { containerConfigFromSnapshot } from '../container-config.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
-import { collectOutboundMessages, startSessionCollector, stopSessionCollector } from './outbound-collector.js';
+import {
+  collectOutboundMessages,
+  drainOutboundBatch,
+  startSessionCollector,
+  stopSessionCollector,
+  waitForInboundTurn,
+} from './outbound-collector.js';
 import { loadWorkspaceManifest, workerWorkspacePaths } from './workspace-store.js';
 import type { WorkerProcessMessageRequest, WorkerProcessMessageResponse } from './types.js';
 import type { Session } from '../types.js';
@@ -81,18 +92,32 @@ function buildSpawnContext(
   };
 }
 
+/** Async/builder jobs wait for processing_ack turn end (unless overridden). */
+function shouldWaitForTurn(job: WorkerProcessMessageRequest): boolean {
+  if (job.options?.wait_for_turn === true) return true;
+  if (job.options?.wait_for_turn === false) return false;
+  if (job.options?.wait_for_outbound === true) return false;
+  return Boolean(job.options?.async || job.build_job_id);
+}
+
+/** Legacy one-shot: block until first outbound (explicit only, or non-turn async). */
 function shouldWaitForOutbound(job: WorkerProcessMessageRequest): boolean {
+  if (shouldWaitForTurn(job)) return false;
   if (job.options?.wait_for_outbound === true) return true;
   if (job.options?.wait_for_outbound === false) return false;
-  // Builder / async jobs still need outbound in the HTTP/callback result.
-  return Boolean(job.options?.async || job.build_job_id);
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Process a message against a previously prepared workspace: write inbound,
- * spawn container. For normal channel traffic, starts a continuous outbound
- * collector and returns after wake (delivery happens when the agent writes).
- * Async/builder jobs still block until outbound or timeout.
+ * spawn container.
+ * - Normal channel traffic: continuous collector, return after wake.
+ * - /build and /edit: continuous collector + wait for processing_ack turn end.
+ * - Legacy wait_for_outbound: block until first outbound or timeout.
  */
 export async function runProcessMessageJob(
   job: WorkerProcessMessageRequest,
@@ -112,6 +137,7 @@ export async function runProcessMessageJob(
   const { agent_group_id: agentGroupId } = job.session;
   const sessionId = job.session.id;
   const runContainer = job.options?.run_container !== false;
+  const waitForTurn = shouldWaitForTurn(job);
   const waitForOutbound = shouldWaitForOutbound(job);
 
   log.info('Worker process-message starting', {
@@ -120,7 +146,9 @@ export async function runProcessMessageJob(
     sessionId,
     agentGroupId,
     runContainer,
+    waitForTurn,
     waitForOutbound,
+    buildJobId: job.build_job_id,
   });
 
   const memoryBaseline = captureMemoryBaseline(paths.group_dir);
@@ -182,14 +210,15 @@ export async function runProcessMessageJob(
     };
   }
 
-  const timeoutMs = job.options?.timeout_ms ?? WORKER_JOB_TIMEOUT_MS;
+  const turnTimeoutMs =
+    job.options?.timeout_ms ??
+    (waitForTurn ? WORKER_BUILD_TURN_TIMEOUT_MS : WORKER_JOB_TIMEOUT_MS);
   const startedAt = Date.now();
   const provider = manifest.container_config.provider ?? null;
   const session = buildSession(job, provider);
   const spawnContext = buildSpawnContext(manifest, paths);
 
-  // Continuous collector for channel traffic — delivers when the agent writes,
-  // independent of this request's lifetime.
+  // Continuous collector for channel traffic and builder/edit turns.
   if (!waitForOutbound) {
     startSessionCollector({
       workspaceId: job.workspace_id,
@@ -198,6 +227,7 @@ export async function runProcessMessageJob(
       delivery: job.delivery,
       conversationId: job.conversation_id,
       jobId: job.job_id,
+      buildJobId: job.build_job_id,
       groupDir: paths.group_dir,
     });
   }
@@ -222,8 +252,7 @@ export async function runProcessMessageJob(
   }
   log.info('Worker container ready', { jobId: job.job_id, sessionId, spawnMs });
 
-  if (!waitForOutbound) {
-    // Delivery is owned by the session collector.
+  if (!waitForOutbound && !waitForTurn) {
     return {
       ...baseResponse,
       status: 'completed',
@@ -232,6 +261,67 @@ export async function runProcessMessageJob(
     };
   }
 
+  if (waitForTurn) {
+    const remainingMs = Math.max(0, turnTimeoutMs - (Date.now() - startedAt));
+    const turnStartedAt = Date.now();
+    const turnResult = await waitForInboundTurn({
+      agentGroupId,
+      sessionId,
+      inboundMessageId: job.inbound.id,
+      timeoutMs: remainingMs,
+    });
+    // Let the continuous collector push any late chat rows before we drain leftovers.
+    await sleep(WORKER_OUTBOUND_POST_STOP_GRACE_MS);
+    const leftover = await drainOutboundBatch(
+      job.workspace_id,
+      agentGroupId,
+      sessionId,
+      job.delivery,
+    );
+    const memoryPatch = collectMemoryPatch(paths.group_dir, memoryBaseline);
+    const turnMs = Date.now() - turnStartedAt;
+    const elapsedMs = Date.now() - startedAt;
+
+    let status: WorkerProcessMessageResponse['status'] = 'completed';
+    let detail: string | undefined;
+    let error: string | undefined;
+    if (turnResult === 'completed') {
+      status = 'completed';
+    } else if (turnResult === 'timeout') {
+      status = 'timeout';
+      detail =
+        'Builder turn did not finish before timeout (agent still processing — raise WORKER_BUILD_TURN_TIMEOUT_MS if needed)';
+    } else if (turnResult === 'failed') {
+      status = 'failed';
+      error = 'Builder turn failed inside the container';
+    } else {
+      status = 'failed';
+      error = 'Builder container stopped before the turn completed';
+    }
+
+    log.info('Worker process-message turn finished', {
+      jobId: job.job_id,
+      workspaceId: job.workspace_id,
+      sessionId,
+      turnResult,
+      leftoverCount: leftover.length,
+      spawnMs,
+      turnMs,
+      elapsedMs,
+    });
+
+    return {
+      ...baseResponse,
+      status,
+      outbound: leftover,
+      memory_patch: memoryPatch,
+      detail,
+      error,
+    };
+  }
+
+  // Legacy one-shot outbound wait.
+  const timeoutMs = turnTimeoutMs;
   const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
   const collectStartedAt = Date.now();
   const outbound = await collectOutboundMessages({

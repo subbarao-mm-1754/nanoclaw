@@ -37,6 +37,9 @@ To remove the module entirely: delete this directory, remove the import from `sr
 - **Never `stream disable` from the live-browser PATH wrapper after `open`** — disable was
   observed to leave Chromium on `about:blank` (open prints the real URL, then clicks fail
   and Agent Studio goes white). Enable-only + paint flush instead.
+- **Always strip OneCLI `HTTP(S)_PROXY` on wrapper invocations** — with the credential proxy
+  set, a successful `open` is followed by `get url` → `about:blank` (Live view flashes then
+  whites out). agent-browser’s local CDP/daemon traffic must not go through the proxy.
 - Auto-pin wrapper runs enable (if needed) + screenshot paint after every successful `open`.
 
 ### Security

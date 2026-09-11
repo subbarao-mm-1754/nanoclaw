@@ -317,6 +317,11 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Follow-ups pushed into an open query stay `processing` until the next
+  // `result` (or processQuery exit). Marking them completed on push made
+  // gateway wait_for_turn finish early with empty outbound while Claude was
+  // still working (/build and /edit).
+  const openFollowUpIds = new Set<string>();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -392,8 +397,8 @@ async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        for (const id of keptIds) openFollowUpIds.add(id);
         query.push(prompt);
-        markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -454,6 +459,10 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        if (openFollowUpIds.size > 0) {
+          markCompleted([...openFollowUpIds]);
+          openFollowUpIds.clear();
+        }
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
           if (hasUnwrapped && !unwrappedNudged) {
@@ -473,6 +482,11 @@ async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    // Any follow-ups still claimed when the stream ends (no further result).
+    if (openFollowUpIds.size > 0) {
+      markCompleted([...openFollowUpIds]);
+      openFollowUpIds.clear();
+    }
   }
 
   return { continuation: queryContinuation };

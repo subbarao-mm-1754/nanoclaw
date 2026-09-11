@@ -89,6 +89,14 @@ export const WORKER_PORT = parseInt(process.env.WORKER_PORT || '8080', 10);
 export const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || '';
 export const WORKER_MAX_BODY_BYTES = parseInt(process.env.WORKER_MAX_BODY_BYTES || '1048576', 10); // 1MB
 export const WORKER_JOB_TIMEOUT_MS = parseInt(process.env.WORKER_JOB_TIMEOUT_MS || '120000', 10);
+/**
+ * Max time a /build or /edit turn may stay in processing_ack before the worker
+ * reports timeout. Independent of first-outbound wait (builders stream outbound).
+ */
+export const WORKER_BUILD_TURN_TIMEOUT_MS = parseInt(
+  process.env.WORKER_BUILD_TURN_TIMEOUT_MS || '600000',
+  10,
+);
 /** Poll interval for continuous session outbound collectors. */
 export const WORKER_OUTBOUND_COLLECT_POLL_MS = parseInt(
   process.env.WORKER_OUTBOUND_COLLECT_POLL_MS || '1000',

@@ -34,6 +34,8 @@ export interface SessionCollectorTarget {
   delivery: WorkerDelivery;
   conversationId?: string;
   jobId?: string;
+  /** Gateway build/edit job — continuous chat is delivered via builder path. */
+  buildJobId?: string;
   /** When set, collector captures memory patch on stop. */
   groupDir?: string;
 }
@@ -269,11 +271,13 @@ async function pushCollected(collector: ActiveCollector, outbound: WorkerCollect
     agent_group_id: collector.agentGroupId,
     conversation_id: collector.conversationId,
     job_id: collector.jobId,
+    build_job_id: collector.buildJobId,
     outbound,
   });
   log.info('Worker outbound collector delivered batch', {
     sessionId: collector.sessionId,
     count: outbound.length,
+    buildJobId: collector.buildJobId,
   });
 }
 
@@ -368,6 +372,7 @@ async function finalizeCollector(sessionId: string, reason: string): Promise<voi
         agent_group_id: collector.agentGroupId,
         conversation_id: collector.conversationId,
         job_id: collector.jobId,
+        build_job_id: collector.buildJobId,
         outbound: batch,
         memory_patch: memoryPatch,
       });
@@ -392,6 +397,7 @@ export function startSessionCollector(target: SessionCollectorTarget): void {
     existing.delivery = target.delivery;
     existing.conversationId = target.conversationId ?? existing.conversationId;
     existing.jobId = target.jobId ?? existing.jobId;
+    existing.buildJobId = target.buildJobId ?? existing.buildJobId;
     existing.workspaceId = target.workspaceId;
     existing.agentGroupId = target.agentGroupId;
     if (target.groupDir && !existing.memoryBaseline) {
@@ -495,6 +501,71 @@ export function stopOutboundCollectorRuntime(): void {
     clearInterval(loopTimer);
     loopTimer = null;
   }
+}
+
+export type InboundTurnWaitResult = 'completed' | 'failed' | 'timeout' | 'container-stopped';
+
+function readProcessingAckStatus(
+  agentGroupId: string,
+  sessionId: string,
+  inboundMessageId: string,
+): string | null {
+  try {
+    const outDb = openOutboundDb(agentGroupId, sessionId);
+    try {
+      const row = outDb
+        .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
+        .get(inboundMessageId) as { status: string } | undefined;
+      return row?.status ?? null;
+    } finally {
+      outDb.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Block until the container marks `inboundMessageId` completed/failed in
+ * processing_ack, the container stops, or timeoutMs elapses.
+ * Used by /build and /edit so turn completion is event-driven while outbound
+ * streams via the continuous collector.
+ */
+export async function waitForInboundTurn(opts: {
+  agentGroupId: string;
+  sessionId: string;
+  inboundMessageId: string;
+  timeoutMs: number;
+}): Promise<InboundTurnWaitResult> {
+  const { agentGroupId, sessionId, inboundMessageId, timeoutMs } = opts;
+  const deadline = Date.now() + timeoutMs;
+  let containerStoppedAt: number | null = null;
+
+  while (Date.now() < deadline) {
+    const status = readProcessingAckStatus(agentGroupId, sessionId, inboundMessageId);
+    if (status === 'completed') return 'completed';
+    if (status === 'failed') return 'failed';
+
+    if (!isContainerRunning(sessionId)) {
+      if (containerStoppedAt === null) {
+        containerStoppedAt = Date.now();
+      } else if (Date.now() - containerStoppedAt >= POST_STOP_GRACE_MS) {
+        const after = readProcessingAckStatus(agentGroupId, sessionId, inboundMessageId);
+        if (after === 'completed') return 'completed';
+        if (after === 'failed') return 'failed';
+        return 'container-stopped';
+      }
+    } else {
+      containerStoppedAt = null;
+    }
+
+    await sleep(POLL_MS);
+  }
+
+  const finalStatus = readProcessingAckStatus(agentGroupId, sessionId, inboundMessageId);
+  if (finalStatus === 'completed') return 'completed';
+  if (finalStatus === 'failed') return 'failed';
+  return 'timeout';
 }
 
 function sleep(ms: number): Promise<void> {

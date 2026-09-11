@@ -107,6 +107,12 @@ function parseProcessOptions(root: Record<string, unknown>): WorkerProcessMessag
     }
     options.wait_for_outbound = opts.wait_for_outbound;
   }
+  if (opts.wait_for_turn !== undefined) {
+    if (typeof opts.wait_for_turn !== 'boolean') {
+      throw new WorkerValidationError('body.options.wait_for_turn must be a boolean');
+    }
+    options.wait_for_turn = opts.wait_for_turn;
+  }
   if (options.async && !options.callback_url) {
     throw new WorkerValidationError('body.options.callback_url is required when options.async is true');
   }

@@ -76,10 +76,16 @@ export interface WorkerProcessMessageRequest {
     async?: boolean;
     callback_url?: string;
     /**
-     * When true (default for async/builder), block until outbound or timeout.
-     * When false, start a continuous session collector and return after wake.
+     * When true, block until a matching chat outbound appears (or timeout).
+     * Used by tests / legacy one-shot collection. Prefer wait_for_turn for builds.
      */
     wait_for_outbound?: boolean;
+    /**
+     * When true (default for async/builder), stream outbound via the continuous
+     * collector and block until processing_ack completes for the inbound message
+     * (or timeout / container stop). Then POST run-result with memory_patch.
+     */
+    wait_for_turn?: boolean;
   };
 }
 
@@ -89,7 +95,10 @@ export interface WorkerOutboundCallbackPayload {
   session_id: string;
   agent_group_id: string;
   conversation_id?: string;
+  /** Worker / build run id (process-message job_id). */
   job_id?: string;
+  /** When set, gateway routes delivery through the builder/edit channel path. */
+  build_job_id?: string;
   outbound: WorkerCollectedOutbound[];
   memory_patch?: WorkerMemoryPatch;
 }

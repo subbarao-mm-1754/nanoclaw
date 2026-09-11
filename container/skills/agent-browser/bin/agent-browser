@@ -1,0 +1,4 @@
+#!/bin/sh
+# PATH shim — keep this file LF-only. Logic lives in agent-browser.cjs
+# so Node does not inherit /app/package.json "type":"module".
+exec node /app/skills/agent-browser/bin/agent-browser.cjs "$@"

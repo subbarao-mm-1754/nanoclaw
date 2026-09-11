@@ -594,25 +594,19 @@ export async function routeChannelInbound(input: {
 
   const active = getActiveBuildJobForUser(user.id);
   if (active) {
-    if (active.status === 'in_progress') {
-      await replyToChannel(
-        input.channel_type,
-        input.platform_id,
-        input.thread_id,
-        'Still working on your previous reply — hang tight.',
-      );
-      return { kind: 'builder', action: 'busy', jobId: active.id };
-    }
-
-    if (active.status === 'waiting_for_user') {
+    if (active.status === 'in_progress' || active.status === 'waiting_for_user') {
       if (!text) {
         await replyToChannel(
           input.channel_type,
           input.platform_id,
           input.thread_id,
-          isEditJob(active)
-            ? 'Send a text reply to continue the edit (or `/test <message>`, `/save`, `/cancel`).'
-            : 'Send a text reply to continue the build (or `/cancel`).',
+          active.status === 'in_progress'
+            ? isEditJob(active)
+              ? 'Editor is still working — send a text reply to add to this turn (or `/cancel`).'
+              : 'Builder is still working — send a text reply to add to this turn (or `/cancel`).'
+            : isEditJob(active)
+              ? 'Send a text reply to continue the edit (or `/test <message>`, `/save`, `/cancel`).'
+              : 'Send a text reply to continue the build (or `/cancel`).',
         );
         return { kind: 'builder', action: 'help', jobId: active.id };
       }
@@ -629,6 +623,16 @@ export async function routeChannelInbound(input: {
         return { kind: 'builder', action: 'continued', jobId: active.id };
       }
       await continueBuild(user, active.id, { message: text });
+      if (active.status === 'in_progress') {
+        await replyToChannel(
+          input.channel_type,
+          input.platform_id,
+          input.thread_id,
+          isEditJob(active)
+            ? 'Got it — added to the current edit turn.'
+            : 'Got it — added to the current build turn.',
+        );
+      }
       return { kind: 'builder', action: 'continued', jobId: active.id };
     }
   }

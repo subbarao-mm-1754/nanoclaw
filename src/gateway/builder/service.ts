@@ -41,6 +41,7 @@ import {
   destroyWorkspaceOnWorker,
   enqueueProcessMessageOnWorker,
   prepareWorkspaceOnWorker,
+  processMessageOnWorker,
 } from '../worker-client.js';
 import type { WorkerProcessMessageResponse } from '../../worker/types.js';
 import { builderAgentFiles, editorAgentFiles } from './prompt.js';
@@ -198,6 +199,92 @@ async function deliverBuildText(job: BuildJob, text: string): Promise<void> {
       err,
     });
   }
+}
+
+/**
+ * Continuous collector → gateway: deliver builder/edit chat as soon as it lands,
+ * without completing the run. Turn completion is handled by handleBuilderRunCallback.
+ */
+export async function handleBuilderOutboundStream(payload: {
+  build_job_id: string;
+  job_id?: string;
+  outbound: Array<{
+    id: string;
+    kind: string;
+    content: Record<string, unknown>;
+  }>;
+}): Promise<{ delivered: number }> {
+  const job = getBuildJob(payload.build_job_id);
+  if (!job) {
+    log.warn('Builder outbound stream for unknown job', { buildJobId: payload.build_job_id });
+    return { delivered: 0 };
+  }
+
+  const run = payload.job_id ? getBuildRun(payload.job_id) : null;
+  const isTest = run?.kind === 'test';
+  const target = job.target_workspace_id ? getWorkspace(job.target_workspace_id) : null;
+  const agentName = target?.name ?? job.title ?? 'draft';
+  const prefix = `[test · ${agentName} draft]`;
+
+  let delivered = 0;
+  for (const out of payload.outbound) {
+    const existing = listBuildMessages(job.id).find((m) => m.id === out.id);
+    if (existing) continue;
+
+    const rawText =
+      typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
+    const stripped = stripBuildFence(rawText) || rawText;
+    const displayText = isTest ? `${prefix}\n${stripped}`.trim() : stripped;
+
+    insertBuildMessage({
+      id: out.id,
+      job_id: job.id,
+      direction: 'outbound',
+      role: isTest ? 'system' : 'builder',
+      content: {
+        ...out.content,
+        text: displayText,
+        raw_text: rawText,
+        streamed: true,
+        ...(isTest ? { test: true } : {}),
+      },
+      run_id: payload.job_id ?? null,
+    });
+    await deliverBuildText(job, displayText);
+    delivered += 1;
+  }
+
+  log.info('Gateway streamed builder outbound', {
+    buildJobId: job.id,
+    runId: payload.job_id,
+    delivered,
+  });
+  return { delivered };
+}
+
+function streamedOutboundForRun(
+  jobId: string,
+  runId: string,
+): Array<{ id: string; content: Record<string, unknown> }> {
+  return listBuildMessages(jobId)
+    .filter(
+      (m) =>
+        m.run_id === runId &&
+        m.direction === 'outbound' &&
+        (m.role === 'builder' || m.content.streamed === true || m.content.test === true),
+    )
+    .map((m) => ({
+      id: m.id,
+      content: {
+        ...m.content,
+        text:
+          typeof m.content.raw_text === 'string'
+            ? m.content.raw_text
+            : typeof m.content.text === 'string'
+              ? m.content.text
+              : JSON.stringify(m.content),
+      },
+    }));
 }
 
 async function startRun(job: BuildJob, inboundMessage: BuildMessage, user: GatewayUser): Promise<BuildRun> {
@@ -966,13 +1053,6 @@ export async function continueBuild(
     throw new BuildError(`Build job is already ${job.status}`, 409);
   }
 
-  if (job.status === 'in_progress') {
-    throw new BuildError(
-      'Builder is still processing the previous turn. Wait until status is waiting_for_user.',
-      409,
-    );
-  }
-
   const message = insertBuildMessage({
     id: generateId('bmsg'),
     job_id: job.id,
@@ -981,8 +1061,67 @@ export async function continueBuild(
     content: { text },
   });
 
+  // Active turn: inject into the running session so the open Claude query
+  // picks it up as a follow-up. Do not start a second wait_for_turn run.
+  if (job.status === 'in_progress') {
+    await injectIntoActiveBuildTurn(job, message, user);
+    return getBuildJobDetail(job.id)!;
+  }
+
   await startRun(job, message, user);
   return getBuildJobDetail(job.id)!;
+}
+
+/**
+ * Write a user reply into the builder/editor session while a turn is still
+ * running. The container follow-up poller pushes it into the active query;
+ * the existing wait_for_turn run finalizes when that query emits result.
+ */
+async function injectIntoActiveBuildTurn(
+  job: BuildJob,
+  inboundMessage: BuildMessage,
+  user: GatewayUser,
+): Promise<void> {
+  await ensureBuilderWorkspace(user);
+  const delivery = deliveryForJob(job, user);
+  const text =
+    typeof inboundMessage.content.text === 'string'
+      ? inboundMessage.content.text
+      : JSON.stringify(inboundMessage.content);
+
+  await processMessageOnWorker({
+    job_id: generateId('inject'),
+    build_job_id: job.id,
+    workspace_id: job.builder_workspace_id,
+    session: {
+      id: job.builder_session_id,
+      agent_group_id: job.builder_agent_group_id,
+    },
+    delivery: {
+      channel_type: delivery.channel_type,
+      platform_id: delivery.platform_id,
+      thread_id: delivery.thread_id,
+      name: 'client',
+      display_name: user.display_name,
+    },
+    inbound: {
+      id: inboundMessage.id,
+      kind: 'chat',
+      timestamp: inboundMessage.created_at,
+      content: { text },
+      sender: { id: user.id, display_name: user.display_name },
+    },
+    options: {
+      run_container: true,
+      wait_for_turn: false,
+      wait_for_outbound: false,
+    },
+  });
+
+  log.info('Injected follow-up into active build turn', {
+    jobId: job.id,
+    inboundId: inboundMessage.id,
+  });
 }
 
 export async function cancelBuild(user: GatewayUser, jobId?: string): Promise<BuildJobDetail> {
@@ -1287,8 +1426,11 @@ async function handlePreviewTestCallback(
 
   updateBuildRun(run.id, 'completed', { worker_status: result.status });
 
+  const streamed = streamedOutboundForRun(job.id, run.id);
   const outbound = result.outbound ?? [];
-  if (outbound.length === 0) {
+  const streamedIds = new Set(streamed.map((m) => m.id));
+
+  if (streamed.length === 0 && outbound.length === 0) {
     const empty = `${prefix}\nDraft agent produced no reply.`;
     insertBuildMessage({
       id: generateId('bmsg'),
@@ -1302,12 +1444,14 @@ async function handlePreviewTestCallback(
     return;
   }
 
+  // Leftover rows not yet pushed by the continuous collector.
   for (const out of outbound) {
+    if (streamedIds.has(out.id)) continue;
     const rawText =
       typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
     const displayText = `${prefix}\n${rawText}`.trim();
     insertBuildMessage({
-      id: generateId('bmsg'),
+      id: out.id,
       job_id: job.id,
       direction: 'outbound',
       role: 'system',
@@ -1368,19 +1512,26 @@ export async function handleBuilderRunCallback(
 
   updateBuildRun(runId, 'completed', { worker_status: result.status });
 
+  const streamed = streamedOutboundForRun(detail.id, runId);
   const outbound = result.outbound ?? [];
-  const outboundTexts: string[] = [];
+  const streamedIds = new Set(streamed.map((m) => m.id));
+  const outboundTexts: string[] = streamed.map((m) => {
+    const t = m.content.text;
+    return typeof t === 'string' ? t : JSON.stringify(m.content);
+  });
   const patchFiles = filesFromMemoryPatch(result.memory_patch);
 
+  // Deliver leftover outbound that the continuous collector did not push yet.
   for (let i = 0; i < outbound.length; i++) {
     const out = outbound[i]!;
+    if (streamedIds.has(out.id)) continue;
     const rawText =
       typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
     const displayText = stripBuildFence(rawText) || rawText;
     outboundTexts.push(rawText);
     const isLast = i === outbound.length - 1;
     insertBuildMessage({
-      id: generateId('bmsg'),
+      id: out.id,
       job_id: detail.id,
       direction: 'outbound',
       role: 'builder',
@@ -1395,7 +1546,19 @@ export async function handleBuilderRunCallback(
     await deliverBuildText(detail, displayText);
   }
 
-  let parsed = parseBuildResultFromOutbound(outbound);
+  const parseOutbound = [
+    ...streamed.map((m) => ({
+      id: m.id,
+      kind: 'chat',
+      channel_type: null,
+      platform_id: null,
+      thread_id: null,
+      content: m.content,
+    })),
+    ...outbound.filter((o) => !streamedIds.has(o.id)),
+  ];
+
+  let parsed = parseBuildResultFromOutbound(parseOutbound);
 
   if (parsed?.status === 'completed' && (!parsed.files || parsed.files.length === 0) && patchFiles.length > 0) {
     const fromPatch = draftFilesFromEditTurn(null, patchFiles);
