@@ -66,6 +66,7 @@ export function formatAgentList(
   return agents
     .map((a, i) => {
       const markers: string[] = [];
+      if (a.agent_kind === 'orchestrator') markers.push('orchestrator');
       if (a.is_default) markers.push('default');
       if (currentWorkspaceId && a.workspace_id === currentWorkspaceId) markers.push('active in this chat');
       const suffix = markers.length ? ` [${markers.join(', ')}]` : '';
@@ -92,7 +93,7 @@ export function formatAgentsForUser(
     'Your agents:',
     formatAgentList(agents, current),
     '',
-    'Switch this chat with `/use <name or id>`.',
+    'Switch this chat with `/use <name or id>` (works for agents and orchestrators).',
     'Edit an agent (this chat stays on the current agent) with `/edit <name>`.',
     'Delete an agent permanently with `/delete <name or id>`.',
   ].join('\n');

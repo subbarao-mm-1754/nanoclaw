@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { openInboundDb, openOutboundDbRw, writeOutboundDirect } from '../session-manager.js';
+import { ensureSessionWorkspace, openInboundDb, openOutboundDbRw, writeOutboundDirect } from '../session-manager.js';
 import { runProcessMessageJob } from './job-runner.js';
 import { runPrepareWorkspace } from './prepare-workspace.js';
 import { parseMultipartBody } from './multipart.js';
@@ -14,7 +14,7 @@ import {
 } from './validate.js';
 import { materializeWorkspace } from './workspace-materializer.js';
 import { startWorkerServer, stopWorkerServer } from './server.js';
-import { collectOutboundMessages } from './outbound-collector.js';
+import { collectOutboundMessages, waitForInboundTurn } from './outbound-collector.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
 import { loadWorkspaceManifest, saveWorkspaceManifest } from './workspace-store.js';
 import { WORKER_PORT } from '../config.js';
@@ -47,6 +47,8 @@ vi.mock('../config.js', async () => {
     WORKER_AUTH_TOKEN: '',
     WORKER_JOB_TIMEOUT_MS: 5000,
     WORKER_BUILD_TURN_TIMEOUT_MS: 5000,
+    WORKER_BUILD_PROGRESS_INTERVAL_MS: 60_000,
+    WORKER_BUILD_TURN_MAX_MS: 30_000,
     WORKER_OUTBOUND_POST_STOP_GRACE_MS: 50,
     WORKER_OUTBOUND_COLLECT_POLL_MS: 50,
     WORKER_CLEANUP_WORKSPACE: false,
@@ -616,6 +618,57 @@ describe('runProcessMessageJob', () => {
     const result = await runProcessMessageJob(job);
     expect(result.status).toBe('timeout');
     expect(result.detail).toMatch(/turn did not finish/i);
+  });
+
+  it('extends builder idle timeout while still processing and reports progress', async () => {
+    prepareTestWorkspace();
+    const sessionId = 'sess-progress-1';
+    const inboundId = 'in-progress-1';
+    ensureSessionWorkspace(AGENT_GROUP_ID, sessionId);
+    const outDb = openOutboundDbRw(AGENT_GROUP_ID, sessionId);
+    try {
+      outDb
+        .prepare(
+          `INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed)
+           VALUES (?, 'processing', datetime('now'))`,
+        )
+        .run(inboundId);
+    } finally {
+      outDb.close();
+    }
+
+    isContainerRunningMock.mockReturnValue(true);
+    const progressAt: number[] = [];
+    const started = Date.now();
+
+    // Complete after ~350ms so we get at least one progress tick with a 120ms interval
+    // and idle timeout of 250ms (would have timed out without extension).
+    setTimeout(() => {
+      const db = openOutboundDbRw(AGENT_GROUP_ID, sessionId);
+      try {
+        db.prepare(
+          `INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed)
+           VALUES (?, 'completed', datetime('now'))`,
+        ).run(inboundId);
+      } finally {
+        db.close();
+      }
+    }, 350);
+
+    const result = await waitForInboundTurn({
+      agentGroupId: AGENT_GROUP_ID,
+      sessionId,
+      inboundMessageId: inboundId,
+      timeoutMs: 250,
+      maxMs: 5000,
+      progressIntervalMs: 120,
+      onProgress: async () => {
+        progressAt.push(Date.now() - started);
+      },
+    });
+
+    expect(result).toBe('completed');
+    expect(progressAt.length).toBeGreaterThanOrEqual(1);
   });
 
   it('fails when workspace does not exist', async () => {

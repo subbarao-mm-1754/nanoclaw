@@ -64,6 +64,32 @@ export async function handleWorkerOutboundCallback(
   const jobId = payload.job_id ?? `collector-${payload.session_id}`;
   const deliveredIds: string[] = [];
 
+  const agentOutbound = outbound.filter((o) => o.channel_type === 'agent');
+  const chatOutbound = outbound.filter((o) => o.channel_type !== 'agent');
+
+  if (agentOutbound.length > 0) {
+    try {
+      const { routeAgentOutboundMessages } = await import('./orchestration/runtime.js');
+      const routed = await routeAgentOutboundMessages({
+        sourceWorkspaceId: payload.workspace_id,
+        sourceSessionId: payload.session_id,
+        sourceAgentGroupId: payload.agent_group_id,
+        conversationId: conversation.id,
+        outbound: agentOutbound,
+      });
+      log.info('Gateway routed agent-to-agent outbound', {
+        sessionId: payload.session_id,
+        count: agentOutbound.length,
+        routed,
+      });
+    } catch (err) {
+      log.error('Gateway failed routing agent-to-agent outbound', {
+        sessionId: payload.session_id,
+        err,
+      });
+    }
+  }
+
   const processingInbound = findLatestProcessingInbound(conversation.id);
   const useHttp = conversation.channel_type === 'http' && Boolean(processingInbound);
 
@@ -76,7 +102,7 @@ export async function handleWorkerOutboundCallback(
   }
 
   try {
-    for (const out of outbound) {
+    for (const out of chatOutbound) {
       const channelType = out.channel_type ?? conversation.channel_type;
       const platformId = out.platform_id ?? conversation.platform_id;
       const threadId =

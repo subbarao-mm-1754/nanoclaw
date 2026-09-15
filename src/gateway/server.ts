@@ -80,6 +80,14 @@ import { AgentAccessError } from './store/agent-files.js';
 import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { listUserAgents } from './store/agent-select.js';
 import {
+  getActiveRunSummary,
+  getOrchestrationOverview,
+  getOrchestrationRun,
+  listOrchestrationEvents,
+  listOrchestrationRuns,
+  parseRunState,
+} from './orchestration/store.js';
+import {
   bindBrowserSessionToWorkspace,
   createBrowserSession,
   getBrowserSession,
@@ -194,10 +202,17 @@ async function handleCreateAgent(req: http.IncomingMessage, res: http.ServerResp
 
 function handleListAgents(req: http.IncomingMessage, res: http.ServerResponse): void {
   const user = requireUserSession(req);
-  const agents = listUserAgents(user.id).map((workspace) => ({
-    ...workspace,
-    files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
-  }));
+  const agents = listUserAgents(user.id).map((workspace) => {
+    const base = {
+      ...workspace,
+      files: getAgent(workspace.workspace_id, user.id)?.files ?? [],
+    };
+    if (workspace.agent_kind !== 'orchestrator') return base;
+    return {
+      ...base,
+      orchestration_active: getActiveRunSummary(workspace.workspace_id),
+    };
+  });
   jsonResponse(res, 200, { agents });
 }
 
@@ -209,6 +224,85 @@ function handleGetAgent(req: http.IncomingMessage, res: http.ServerResponse, wor
     return;
   }
   jsonResponse(res, 200, { agent });
+}
+
+function requireOwnedAgent(userId: string, workspaceId: string) {
+  return getAgent(workspaceId, userId);
+}
+
+function handleGetAgentOrchestration(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): void {
+  const user = requireUserSession(req);
+  const agent = requireOwnedAgent(user.id, workspaceId);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return;
+  }
+  if (agent.agent_kind !== 'orchestrator') {
+    jsonResponse(res, 400, { error: 'Not an orchestrator agent' });
+    return;
+  }
+  jsonResponse(res, 200, {
+    workspace_id: workspaceId,
+    agent_name: agent.name,
+    ...getOrchestrationOverview(workspaceId),
+  });
+}
+
+function handleListAgentOrchestrationRuns(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  url: URL,
+): void {
+  const user = requireUserSession(req);
+  const agent = requireOwnedAgent(user.id, workspaceId);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return;
+  }
+  if (agent.agent_kind !== 'orchestrator') {
+    jsonResponse(res, 400, { error: 'Not an orchestrator agent' });
+    return;
+  }
+  const activeOnly = url.searchParams.get('active') === '1' || url.searchParams.get('active') === 'true';
+  const limitRaw = url.searchParams.get('limit');
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 20;
+  const runs = listOrchestrationRuns(workspaceId, {
+    limit: Number.isFinite(limit) ? limit : 20,
+    activeOnly,
+  }).map((r) => ({ ...r, state: parseRunState(r) }));
+  jsonResponse(res, 200, { runs });
+}
+
+function handleGetAgentOrchestrationRun(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  runId: string,
+): void {
+  const user = requireUserSession(req);
+  const agent = requireOwnedAgent(user.id, workspaceId);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return;
+  }
+  if (agent.agent_kind !== 'orchestrator') {
+    jsonResponse(res, 400, { error: 'Not an orchestrator agent' });
+    return;
+  }
+  const run = getOrchestrationRun(runId);
+  if (!run || run.orchestrator_workspace_id !== workspaceId) {
+    jsonResponse(res, 404, { error: 'Run not found' });
+    return;
+  }
+  jsonResponse(res, 200, {
+    run: { ...run, state: parseRunState(run) },
+    events: listOrchestrationEvents(runId),
+  });
 }
 
 async function handleUpdateAgent(
@@ -1129,6 +1223,36 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
         await handleDeleteAgent(req, res, workspaceId);
         return;
       }
+    }
+
+    const agentOrchMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/orchestration$/);
+    if (agentOrchMatch && req.method === 'GET') {
+      handleGetAgentOrchestration(req, res, decodeURIComponent(agentOrchMatch[1]!));
+      return;
+    }
+
+    const agentOrchRunsMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/orchestration\/runs$/);
+    if (agentOrchRunsMatch && req.method === 'GET') {
+      handleListAgentOrchestrationRuns(
+        req,
+        res,
+        decodeURIComponent(agentOrchRunsMatch[1]!),
+        url,
+      );
+      return;
+    }
+
+    const agentOrchRunMatch = pathname.match(
+      /^\/v1\/agents\/([^/]+)\/orchestration\/runs\/([^/]+)$/,
+    );
+    if (agentOrchRunMatch && req.method === 'GET') {
+      handleGetAgentOrchestrationRun(
+        req,
+        res,
+        decodeURIComponent(agentOrchRunMatch[1]!),
+        decodeURIComponent(agentOrchRunMatch[2]!),
+      );
+      return;
     }
 
     if (req.method === 'GET' && pathname === '/v1/builds') {

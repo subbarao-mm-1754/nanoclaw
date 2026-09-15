@@ -1,6 +1,8 @@
 import fs from 'fs';
 
 import {
+  WORKER_BUILD_PROGRESS_INTERVAL_MS,
+  WORKER_BUILD_TURN_MAX_MS,
   WORKER_BUILD_TURN_TIMEOUT_MS,
   WORKER_CLEANUP_WORKSPACE,
   WORKER_JOB_TIMEOUT_MS,
@@ -22,6 +24,7 @@ import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
 import {
   collectOutboundMessages,
   drainOutboundBatch,
+  pushBuilderTurnProgress,
   startSessionCollector,
   stopSessionCollector,
   waitForInboundTurn,
@@ -155,10 +158,23 @@ export async function runProcessMessageJob(
 
   ensureSessionWorkspace(agentGroupId, sessionId);
   writeSessionRoutingFromJob(agentGroupId, sessionId, job.delivery);
-  writeDestinationsFromJob(agentGroupId, sessionId, {
-    ...job.delivery,
-    display_name: job.delivery.display_name ?? job.inbound.sender?.display_name,
-  });
+  const extraDestinations = (job.extra_destinations ?? []).map((d) => ({
+    name: d.name,
+    display_name: d.display_name ?? null,
+    type: d.type,
+    channel_type: d.channel_type ?? null,
+    platform_id: d.platform_id ?? null,
+    agent_group_id: d.agent_group_id ?? null,
+  }));
+  writeDestinationsFromJob(
+    agentGroupId,
+    sessionId,
+    {
+      ...job.delivery,
+      display_name: job.delivery.display_name ?? job.inbound.sender?.display_name,
+    },
+    extraDestinations,
+  );
 
   const wroteInbound = writeSessionMessageIfAbsent(agentGroupId, sessionId, {
     id: job.inbound.id,
@@ -262,13 +278,28 @@ export async function runProcessMessageJob(
   }
 
   if (waitForTurn) {
-    const remainingMs = Math.max(0, turnTimeoutMs - (Date.now() - startedAt));
+    const remainingIdleMs = Math.max(0, turnTimeoutMs - (Date.now() - startedAt));
+    const remainingMaxMs = Math.max(0, WORKER_BUILD_TURN_MAX_MS - (Date.now() - startedAt));
     const turnStartedAt = Date.now();
     const turnResult = await waitForInboundTurn({
       agentGroupId,
       sessionId,
       inboundMessageId: job.inbound.id,
-      timeoutMs: remainingMs,
+      timeoutMs: remainingIdleMs,
+      maxMs: remainingMaxMs,
+      progressIntervalMs: WORKER_BUILD_PROGRESS_INTERVAL_MS,
+      onProgress: async (info) => {
+        await pushBuilderTurnProgress({
+          workspaceId: job.workspace_id,
+          agentGroupId,
+          sessionId,
+          delivery: job.delivery,
+          jobId: job.job_id,
+          buildJobId: job.build_job_id,
+          conversationId: job.conversation_id,
+          elapsedMs: info.elapsedMs,
+        });
+      },
     });
     // Let the continuous collector push any late chat rows before we drain leftovers.
     await sleep(WORKER_OUTBOUND_POST_STOP_GRACE_MS);
@@ -290,7 +321,7 @@ export async function runProcessMessageJob(
     } else if (turnResult === 'timeout') {
       status = 'timeout';
       detail =
-        'Builder turn did not finish before timeout (agent still processing — raise WORKER_BUILD_TURN_TIMEOUT_MS if needed)';
+        'Builder turn did not finish before timeout (agent still processing — raise WORKER_BUILD_TURN_TIMEOUT_MS / WORKER_BUILD_TURN_MAX_MS if needed)';
     } else if (turnResult === 'failed') {
       status = 'failed';
       error = 'Builder turn failed inside the container';

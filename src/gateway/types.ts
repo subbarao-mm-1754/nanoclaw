@@ -33,6 +33,8 @@ export interface GatewayAgentFile {
   content: string;
 }
 
+export type GatewayAgentKind = 'agent' | 'orchestrator';
+
 export interface GatewayWorkspace {
   workspace_id: string;
   agent_group_id: string;
@@ -44,6 +46,8 @@ export interface GatewayWorkspace {
   container_config: ContainerConfigSnapshot | null;
   /** Last content hash acknowledged by the Worker (skip prepare when still matching). */
   worker_content_hash: string | null;
+  /** Solo agent (default) or multi-agent orchestrator. */
+  agent_kind: GatewayAgentKind;
   created_at: string;
   updated_at: string;
 }
@@ -167,9 +171,38 @@ export interface BuildJobDetail extends BuildJob {
 /** Parsed from builder outbound (structured JSON fence / marker). */
 export type ParsedBuildStatus = 'needs_input' | 'completed' | 'failed' | 'progress';
 
+/** Specialist declared when building an orchestrator. */
+export interface ParsedBuildSpecialist {
+  name: string;
+  action: 'create' | 'reuse';
+  agent_name?: string;
+  role?: string;
+  workspace_id?: string;
+  reuse_name?: string;
+  files?: GatewayAgentFile[];
+}
+
+export interface ParsedBuildGraph {
+  entry?: string;
+  nodes: Array<{
+    id: string;
+    agent?: string;
+    type?: 'task' | 'decision' | 'join';
+    description?: string;
+  }>;
+  edges?: Array<{ from: string; to: string; when?: string }>;
+  loops?: Array<{ from: string; to: string; max_iterations: number; when?: string }>;
+}
+
 export interface ParsedBuildResult {
   status: ParsedBuildStatus;
   agent_name?: string;
   files?: GatewayAgentFile[];
   error?: string;
+  /** Solo agent (default) or multi-agent orchestrator. */
+  agent_kind?: GatewayAgentKind;
+  /** When true, Gateway should present the plan and wait for `/register`. */
+  confirmation_required?: boolean;
+  specialists?: ParsedBuildSpecialist[];
+  graph?: ParsedBuildGraph;
 }

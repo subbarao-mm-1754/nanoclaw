@@ -21,6 +21,90 @@ function parseFiles(raw: unknown): GatewayAgentFile[] | undefined {
   return files.length > 0 ? files : undefined;
 }
 
+function parseSpecialists(raw: unknown): ParsedBuildResult['specialists'] {
+  if (!Array.isArray(raw)) return undefined;
+  const out: NonNullable<ParsedBuildResult['specialists']> = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const obj = entry as Record<string, unknown>;
+    const name = typeof obj.name === 'string' ? obj.name.trim() : '';
+    if (!name) continue;
+    const action = obj.action === 'reuse' ? 'reuse' : 'create';
+    out.push({
+      name,
+      action,
+      agent_name: typeof obj.agent_name === 'string' ? obj.agent_name : undefined,
+      role: typeof obj.role === 'string' ? obj.role : undefined,
+      workspace_id: typeof obj.workspace_id === 'string' ? obj.workspace_id : undefined,
+      reuse_name: typeof obj.reuse_name === 'string' ? obj.reuse_name : undefined,
+      files: parseFiles(obj.files),
+    });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseGraph(raw: unknown): ParsedBuildResult['graph'] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.nodes) || obj.nodes.length === 0) return undefined;
+  const nodes: NonNullable<ParsedBuildResult['graph']>['nodes'] = [];
+  for (const n of obj.nodes) {
+    if (!n || typeof n !== 'object' || Array.isArray(n)) continue;
+    const node = n as Record<string, unknown>;
+    if (typeof node.id !== 'string' || !node.id.trim()) continue;
+    nodes.push({
+      id: node.id.trim(),
+      agent: typeof node.agent === 'string' ? node.agent : undefined,
+      type:
+        node.type === 'task' || node.type === 'decision' || node.type === 'join'
+          ? node.type
+          : undefined,
+      description: typeof node.description === 'string' ? node.description : undefined,
+    });
+  }
+  if (nodes.length === 0) return undefined;
+
+  const edges: NonNullable<ParsedBuildResult['graph']>['edges'] = [];
+  if (Array.isArray(obj.edges)) {
+    for (const e of obj.edges) {
+      if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+      const edge = e as Record<string, unknown>;
+      if (typeof edge.from !== 'string' || typeof edge.to !== 'string') continue;
+      edges.push({
+        from: edge.from,
+        to: edge.to,
+        when: typeof edge.when === 'string' ? edge.when : undefined,
+      });
+    }
+  }
+
+  const loops: NonNullable<ParsedBuildResult['graph']>['loops'] = [];
+  if (Array.isArray(obj.loops)) {
+    for (const l of obj.loops) {
+      if (!l || typeof l !== 'object' || Array.isArray(l)) continue;
+      const loop = l as Record<string, unknown>;
+      if (typeof loop.from !== 'string' || typeof loop.to !== 'string') continue;
+      const max =
+        typeof loop.max_iterations === 'number' && loop.max_iterations > 0
+          ? Math.floor(loop.max_iterations)
+          : 2;
+      loops.push({
+        from: loop.from,
+        to: loop.to,
+        max_iterations: max,
+        when: typeof loop.when === 'string' ? loop.when : undefined,
+      });
+    }
+  }
+
+  return {
+    entry: typeof obj.entry === 'string' ? obj.entry : nodes[0]?.id,
+    nodes,
+    edges: edges.length ? edges : undefined,
+    loops: loops.length ? loops : undefined,
+  };
+}
+
 function parseBuildObject(raw: string): ParsedBuildResult | null {
   let parsed: unknown;
   try {
@@ -34,11 +118,27 @@ function parseBuildObject(raw: string): ParsedBuildResult | null {
   const status = asStatus(obj.status);
   if (!status) return null;
 
+  const agentKind =
+    obj.agent_kind === 'orchestrator'
+      ? 'orchestrator'
+      : obj.agent_kind === 'agent'
+        ? 'agent'
+        : undefined;
+
   return {
     status,
     agent_name: typeof obj.agent_name === 'string' ? obj.agent_name : undefined,
     error: typeof obj.error === 'string' ? obj.error : undefined,
     files: parseFiles(obj.files),
+    agent_kind: agentKind,
+    confirmation_required:
+      obj.confirmation_required === true
+        ? true
+        : obj.confirmation_required === false
+          ? false
+          : undefined,
+    specialists: parseSpecialists(obj.specialists),
+    graph: parseGraph(obj.graph),
   };
 }
 

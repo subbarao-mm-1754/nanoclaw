@@ -315,7 +315,7 @@ export async function routeChannelInbound(input: {
         input.channel_type,
         input.platform_id,
         input.thread_id,
-        'Usage: `/use <agent name or workspace id>`\n\n' +
+        'Usage: `/use <agent or orchestrator name or workspace id>`\n\n' +
           formatAgentsForUser(user, input.channel_type, input.platform_id, input.thread_id),
       );
       return { kind: 'builder', action: 'help' };
@@ -334,7 +334,9 @@ export async function routeChannelInbound(input: {
         input.channel_type,
         input.platform_id,
         input.thread_id,
-        `This chat is now using agent "${agent.name}" (\`${agent.workspace_id}\`). Send a normal message to talk to it.`,
+        agent.agent_kind === 'orchestrator'
+          ? `This chat is now using orchestrator "${agent.name}" (\`${agent.workspace_id}\`). Send a normal message to start coordinated work.`
+          : `This chat is now using agent "${agent.name}" (\`${agent.workspace_id}\`). Send a normal message to talk to it.`,
       );
       return { kind: 'builder', action: 'use' };
     } catch (err) {
@@ -446,11 +448,14 @@ export async function routeChannelInbound(input: {
     }
 
     const job = await startBuild(user, { message: description, delivery });
+    const { isMultiAgentOrchestrationEnabled } = await import('./orchestration/config.js');
     await replyToChannel(
       input.channel_type,
       input.platform_id,
       input.thread_id,
-      'Starting agent build… I’ll ask questions here as needed. Use `/cancel` to stop.',
+      isMultiAgentOrchestrationEnabled()
+        ? 'Starting build… I’ll decide single agent vs orchestrator from your description, ask before creating a multi-agent team, and wait for `/register`. Use `/cancel` to stop.'
+        : 'Starting agent build… I’ll ask questions here as needed. Use `/cancel` to stop.',
     );
     await maybeStartBuildMcpOAuth({
       user,

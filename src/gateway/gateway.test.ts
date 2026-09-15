@@ -201,7 +201,8 @@ describe('gateway processor', () => {
       conv.id,
     );
     await processNextPendingInbound();
-    expect(prepareWorkspaceOnWorkerMock).not.toHaveBeenCalled();
+    // Worker ensure is always invoked (cheap no-op when content_hash matches on Worker).
+    expect(prepareWorkspaceOnWorkerMock).toHaveBeenCalledTimes(1);
     expect(processMessageOnWorkerMock).toHaveBeenCalledTimes(2);
   });
 
@@ -407,7 +408,8 @@ describe('gateway auth and agents', () => {
     });
 
     expect(agent.owner_user_id).toBe(alice.id);
-    expect(prepareWorkspaceOnWorkerMock).toHaveBeenCalledTimes(1);
+    // createAgent prepares once, then ensureWorkspaceOnWorker prepares again after integrations.
+    expect(prepareWorkspaceOnWorkerMock).toHaveBeenCalledTimes(2);
     expect(getAgent(agent.workspace_id, alice.id)?.files).toHaveLength(1);
 
     expect(getAgent(agent.workspace_id, bob.id)).toBeNull();

@@ -226,6 +226,92 @@ button:disabled {
   color: var(--accent);
 }
 
+.badge.orchestrator {
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+}
+
+.badge.running {
+  background: rgba(74, 222, 128, 0.18);
+  color: var(--success);
+}
+
+.badge.waiting {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+.badge.failed {
+  background: rgba(255, 107, 107, 0.2);
+  color: var(--danger);
+}
+
+.orch-subtitle {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.orch-list,
+.orch-events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.orch-list li,
+.orch-events li {
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.orch-list li.selected {
+  border-color: var(--accent);
+}
+
+.orch-list button.linkish {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.orch-graph {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.orch-active {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface2);
+  font-size: 0.9rem;
+}
+
+.orch-active.empty-state {
+  color: var(--muted);
+}
+
+.orch-meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 0.25rem;
+}
+
 .file-block {
   border: 1px solid var(--border);
   border-radius: 8px;

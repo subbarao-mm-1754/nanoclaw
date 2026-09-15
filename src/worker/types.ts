@@ -57,6 +57,15 @@ export interface WorkerProcessMessageRequest {
     agent_group_id: string;
   };
   delivery: WorkerDelivery;
+  /** Extra destinations (orchestrator specialists / parent link). */
+  extra_destinations?: Array<{
+    name: string;
+    display_name?: string | null;
+    type: 'channel' | 'agent';
+    channel_type?: string | null;
+    platform_id?: string | null;
+    agent_group_id?: string | null;
+  }>;
   inbound: {
     id: string;
     kind: string;

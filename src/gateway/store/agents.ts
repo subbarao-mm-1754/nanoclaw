@@ -13,6 +13,7 @@ import {
   deleteConversationsForWorkspace,
   rebindConversationsToWorkspace,
 } from './conversations.js';
+import { deleteOrchestrationForWorkspace } from '../orchestration/store.js';
 import {
   deleteWorkspace,
   getWorkspace,
@@ -53,6 +54,7 @@ export function createAgentRecord(input: {
   is_default?: boolean;
   workspace_id?: string;
   agent_group_id?: string;
+  agent_kind?: 'agent' | 'orchestrator';
 }): GatewayAgent {
   const workspaceId = input.workspace_id ?? generateId('ws');
   const agentGroupId = input.agent_group_id ?? generateId('ag');
@@ -71,6 +73,7 @@ export function createAgentRecord(input: {
     cli_scope: input.cli_scope ?? 'group',
     container_config: containerConfig,
     is_default: input.is_default,
+    agent_kind: input.agent_kind ?? 'agent',
   });
 
   saveAgentFiles(workspaceId, input.files);
@@ -134,6 +137,12 @@ export function deleteAgentRecord(workspaceId: string, userId: string): DeleteAg
     conversationsRebound = rebindConversationsToWorkspace(workspaceId, fallback);
   } else {
     conversationsCleared = deleteConversationsForWorkspace(workspaceId);
+  }
+
+  try {
+    deleteOrchestrationForWorkspace(workspaceId);
+  } catch {
+    // Orchestration tables may be absent on very old DBs mid-migrate.
   }
 
   deleteWorkspace(workspaceId);

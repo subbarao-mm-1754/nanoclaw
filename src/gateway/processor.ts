@@ -35,32 +35,44 @@ async function processOneInbound(): Promise<boolean> {
   updateMessageStatus(inbound.id, 'processing', { worker_job_id: jobId });
 
   const content = JSON.parse(inbound.content_json) as Record<string, unknown>;
-  const payload: WorkerProcessMessageRequest = {
-    job_id: jobId,
-    workspace_id: conversation.workspace_id,
-    conversation_id: conversation.id,
-    session: {
-      id: conversation.session_id,
-      agent_group_id: conversation.agent_group_id,
-    },
-    delivery: {
-      channel_type: inbound.channel_type,
-      platform_id: inbound.platform_id,
-      thread_id: inbound.thread_id,
-      display_name: inbound.sender_display_name ?? conversation.display_name ?? undefined,
-    },
-    inbound: {
-      id: sessionInboundMessageId(inbound.id, conversation.agent_group_id),
-      kind: inbound.kind,
-      timestamp: inbound.created_at,
-      content,
-      sender: inbound.sender_id
-        ? { id: inbound.sender_id, display_name: inbound.sender_display_name ?? undefined }
-        : undefined,
-    },
-  };
 
   try {
+    const { ensureOrchestrationRunForUserMessage, extraDestinationsForWorkspace } =
+      await import('./orchestration/index.js');
+    const goalText =
+      typeof content.text === 'string' ? content.text : JSON.stringify(content);
+    ensureOrchestrationRunForUserMessage({
+      workspaceId: conversation.workspace_id,
+      conversationId: conversation.id,
+      goalText,
+    });
+
+    const payload: WorkerProcessMessageRequest = {
+      job_id: jobId,
+      workspace_id: conversation.workspace_id,
+      conversation_id: conversation.id,
+      session: {
+        id: conversation.session_id,
+        agent_group_id: conversation.agent_group_id,
+      },
+      delivery: {
+        channel_type: inbound.channel_type,
+        platform_id: inbound.platform_id,
+        thread_id: inbound.thread_id,
+        display_name: inbound.sender_display_name ?? conversation.display_name ?? undefined,
+      },
+      extra_destinations: extraDestinationsForWorkspace(conversation.workspace_id),
+      inbound: {
+        id: sessionInboundMessageId(inbound.id, conversation.agent_group_id),
+        kind: inbound.kind,
+        timestamp: inbound.created_at,
+        content,
+        sender: inbound.sender_id
+          ? { id: inbound.sender_id, display_name: inbound.sender_display_name ?? undefined }
+          : undefined,
+      },
+    };
+
     await ensureWorkspaceOnWorker(conversation.workspace_id);
 
     let result;

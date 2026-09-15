@@ -149,6 +149,35 @@
             Set as default agent for incoming messages
           </label>
 
+          <div id="orchestration-panel" class="hidden">
+            <h2 style="margin-top: 1.5rem">Orchestration</h2>
+            <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
+              Team, graph/loops, and live run activity for this orchestrator.
+              Refresh updates every few seconds while this page is open.
+            </p>
+            <div id="orch-error" class="error hidden"></div>
+
+            <h3 class="orch-subtitle">Team</h3>
+            <ul id="orch-members" class="orch-list"></ul>
+            <p class="empty hidden" id="orch-members-empty">No specialists linked yet.</p>
+
+            <h3 class="orch-subtitle">Graph &amp; loops</h3>
+            <div id="orch-graph" class="orch-graph"></div>
+            <p class="empty hidden" id="orch-graph-empty">No graph registered for this orchestrator.</p>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.25rem">
+              <h3 class="orch-subtitle" style="margin: 0">Activity</h3>
+              <button type="button" class="secondary" id="orch-refresh-btn">Refresh</button>
+            </div>
+            <div id="orch-active" class="orch-active"></div>
+            <h3 class="orch-subtitle">Recent runs</h3>
+            <ul id="orch-runs" class="orch-list"></ul>
+            <p class="empty hidden" id="orch-runs-empty">No runs yet. Message this orchestrator from Cliq with <code>/use</code>.</p>
+            <h3 class="orch-subtitle">Event timeline</h3>
+            <ul id="orch-events" class="orch-events"></ul>
+            <p class="empty hidden" id="orch-events-empty">No events for the selected run.</p>
+          </div>
+
           <h2 style="margin-top: 1.5rem">MCP servers</h2>
           <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
             Optional MCP servers for the agent container. Saved with the agent and

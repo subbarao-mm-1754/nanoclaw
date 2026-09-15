@@ -16,6 +16,7 @@ function parseContainerConfig(json: string | null): ContainerConfigSnapshot | nu
 }
 
 function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
+  const kind = row.agent_kind === 'orchestrator' ? 'orchestrator' : 'agent';
   return {
     workspace_id: row.workspace_id as string,
     agent_group_id: row.agent_group_id as string,
@@ -26,6 +27,7 @@ function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
     cli_scope: (row.cli_scope as string) || 'group',
     container_config: parseContainerConfig(row.container_config_json as string | null),
     worker_content_hash: (row.worker_content_hash as string | null) ?? null,
+    agent_kind: kind,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -40,10 +42,12 @@ export function registerWorkspace(input: {
   folder?: string;
   cli_scope?: string;
   container_config?: ContainerConfigSnapshot;
+  agent_kind?: 'agent' | 'orchestrator';
 }): GatewayWorkspace {
   const db = getGatewayDb();
   const ts = now();
   const isDefault = input.is_default ? 1 : 0;
+  const agentKind = input.agent_kind === 'orchestrator' ? 'orchestrator' : 'agent';
 
   return db.transaction(() => {
     if (isDefault) {
@@ -53,9 +57,9 @@ export function registerWorkspace(input: {
       `INSERT INTO gateway_workspaces (
          workspace_id, agent_group_id, name, is_default,
          owner_user_id, folder, cli_scope, container_config_json,
-         created_at, updated_at
+         agent_kind, created_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id) DO UPDATE SET
          agent_group_id = excluded.agent_group_id,
          name = excluded.name,
@@ -64,6 +68,7 @@ export function registerWorkspace(input: {
          folder = COALESCE(excluded.folder, gateway_workspaces.folder),
          cli_scope = COALESCE(excluded.cli_scope, gateway_workspaces.cli_scope),
          container_config_json = COALESCE(excluded.container_config_json, gateway_workspaces.container_config_json),
+         agent_kind = excluded.agent_kind,
          updated_at = excluded.updated_at`,
     ).run(
       input.workspace_id,
@@ -74,6 +79,7 @@ export function registerWorkspace(input: {
       input.folder ?? null,
       input.cli_scope ?? 'group',
       input.container_config ? JSON.stringify(input.container_config) : null,
+      agentKind,
       ts,
       ts,
     );
@@ -86,6 +92,13 @@ export function getWorkspace(workspaceId: string): GatewayWorkspace | null {
   const row = getGatewayDb()
     .prepare('SELECT * FROM gateway_workspaces WHERE workspace_id = ?')
     .get(workspaceId) as Record<string, unknown> | undefined;
+  return row ? rowToWorkspace(row) : null;
+}
+
+export function getWorkspaceByAgentGroupId(agentGroupId: string): GatewayWorkspace | null {
+  const row = getGatewayDb()
+    .prepare('SELECT * FROM gateway_workspaces WHERE agent_group_id = ? LIMIT 1')
+    .get(agentGroupId) as Record<string, unknown> | undefined;
   return row ? rowToWorkspace(row) : null;
 }
 

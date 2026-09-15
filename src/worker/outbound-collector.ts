@@ -120,32 +120,50 @@ export async function drainOutboundBatch(
     const due = getDueOutboundMessages(outDb).filter((m) => !delivered.has(m.id) && !skipIds.has(m.id));
 
     for (const msg of due) {
-      if (msg.kind === 'system' || msg.channel_type === 'agent') {
-        if (msg.kind === 'system') {
-          try {
-            // Session collector drains with delivery=null so all chat destinations
-            // are pushed; browser-session notify still needs a channel target —
-            // fall back to session_routing written at job start.
-            const notifyDelivery = resolveSystemNotifyDelivery(delivery, inDb);
-            const handledBrowser = await handleBrowserSessionSystemMessage({
+      if (msg.kind === 'system') {
+        try {
+          // Session collector drains with delivery=null so all chat destinations
+          // are pushed; browser-session notify still needs a channel target —
+          // fall back to session_routing written at job start.
+          const notifyDelivery = resolveSystemNotifyDelivery(delivery, inDb);
+          const handledBrowser = await handleBrowserSessionSystemMessage({
+            workspaceId,
+            agentGroupId,
+            sessionId,
+            delivery: notifyDelivery,
+            rawContent: msg.content,
+          });
+          if (!handledBrowser) {
+            await handleKnowledgeSystemMessage({
               workspaceId,
               agentGroupId,
               sessionId,
-              delivery: notifyDelivery,
               rawContent: msg.content,
             });
-            if (!handledBrowser) {
-              await handleKnowledgeSystemMessage({
-                workspaceId,
-                agentGroupId,
-                sessionId,
-                rawContent: msg.content,
-              });
-            }
-          } catch (err) {
-            log.error('Failed handling system action', { sessionId, msgId: msg.id, err });
           }
+        } catch (err) {
+          log.error('Failed handling system action', { sessionId, msgId: msg.id, err });
         }
+        markDelivered(inDb, msg.id, null);
+        continue;
+      }
+
+      // Agent-to-agent: push to Gateway for orchestration routing (not channel adapters).
+      if (msg.channel_type === 'agent') {
+        let content: Record<string, unknown>;
+        try {
+          content = JSON.parse(msg.content) as Record<string, unknown>;
+        } catch {
+          content = { raw: msg.content };
+        }
+        results.push({
+          id: msg.id,
+          kind: msg.kind,
+          channel_type: msg.channel_type,
+          platform_id: msg.platform_id,
+          thread_id: msg.thread_id,
+          content,
+        });
         markDelivered(inDb, msg.id, null);
         continue;
       }
@@ -261,6 +279,58 @@ async function postOutboundToGateway(payload: WorkerOutboundCallbackPayload): Pr
     const text = await res.text().catch(() => '');
     throw new Error(`Outbound callback HTTP ${res.status}: ${text.slice(0, 200)}`);
   }
+}
+
+function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  if (mins <= 0) return `${secs}s`;
+  if (secs === 0) return `${mins}m`;
+  return `${mins}m ${secs}s`;
+}
+
+/**
+ * Host-side "still working" chat for long builder turns — does not come from the
+ * LLM; keeps the user informed and resets the idle timeout window.
+ */
+export async function pushBuilderTurnProgress(opts: {
+  workspaceId: string;
+  agentGroupId: string;
+  sessionId: string;
+  delivery: WorkerDelivery;
+  jobId?: string;
+  buildJobId?: string;
+  conversationId?: string;
+  elapsedMs: number;
+}): Promise<void> {
+  const text =
+    `Still working on this build… (~${formatElapsed(opts.elapsedMs)} elapsed, agent still processing). ` +
+    `I'll keep going — no need to reply.`;
+  const id = `progress-${opts.sessionId}-${Date.now()}`;
+  await postOutboundToGateway({
+    workspace_id: opts.workspaceId,
+    session_id: opts.sessionId,
+    agent_group_id: opts.agentGroupId,
+    conversation_id: opts.conversationId,
+    job_id: opts.jobId,
+    build_job_id: opts.buildJobId,
+    outbound: [
+      {
+        id,
+        kind: 'chat',
+        channel_type: opts.delivery.channel_type,
+        platform_id: opts.delivery.platform_id,
+        thread_id: opts.delivery.thread_id,
+        content: { text, progress: true },
+      },
+    ],
+  });
+  log.info('Worker posted builder turn progress', {
+    sessionId: opts.sessionId,
+    buildJobId: opts.buildJobId,
+    elapsedMs: opts.elapsedMs,
+  });
 }
 
 async function pushCollected(collector: ActiveCollector, outbound: WorkerCollectedOutbound[]): Promise<void> {
@@ -525,28 +595,56 @@ function readProcessingAckStatus(
   }
 }
 
+export interface InboundTurnProgressInfo {
+  elapsedMs: number;
+  status: string | null;
+  containerRunning: boolean;
+}
+
 /**
  * Block until the container marks `inboundMessageId` completed/failed in
- * processing_ack, the container stops, or timeoutMs elapses.
+ * processing_ack, the container stops, or the idle/absolute timeout elapses.
  * Used by /build and /edit so turn completion is event-driven while outbound
  * streams via the continuous collector.
+ *
+ * When `progressIntervalMs` is set and the turn is still `processing` with a
+ * live container, `onProgress` fires on that cadence and the idle deadline is
+ * extended by `timeoutMs` (capped by `maxMs` when provided).
  */
 export async function waitForInboundTurn(opts: {
   agentGroupId: string;
   sessionId: string;
   inboundMessageId: string;
   timeoutMs: number;
+  /** Absolute wall-clock cap from turn start (optional). */
+  maxMs?: number;
+  /** Interval for host-side progress heartbeats (0/undefined = disabled). */
+  progressIntervalMs?: number;
+  onProgress?: (info: InboundTurnProgressInfo) => void | Promise<void>;
 }): Promise<InboundTurnWaitResult> {
-  const { agentGroupId, sessionId, inboundMessageId, timeoutMs } = opts;
-  const deadline = Date.now() + timeoutMs;
+  const {
+    agentGroupId,
+    sessionId,
+    inboundMessageId,
+    timeoutMs,
+    maxMs,
+    progressIntervalMs,
+    onProgress,
+  } = opts;
+  const startedAt = Date.now();
+  let idleDeadline = startedAt + timeoutMs;
+  const absoluteDeadline =
+    typeof maxMs === 'number' && maxMs > 0 ? startedAt + maxMs : Number.POSITIVE_INFINITY;
+  let lastProgressAt = startedAt;
   let containerStoppedAt: number | null = null;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < Math.min(idleDeadline, absoluteDeadline)) {
     const status = readProcessingAckStatus(agentGroupId, sessionId, inboundMessageId);
     if (status === 'completed') return 'completed';
     if (status === 'failed') return 'failed';
 
-    if (!isContainerRunning(sessionId)) {
+    const containerRunning = isContainerRunning(sessionId);
+    if (!containerRunning) {
       if (containerStoppedAt === null) {
         containerStoppedAt = Date.now();
       } else if (Date.now() - containerStoppedAt >= POST_STOP_GRACE_MS) {
@@ -557,6 +655,28 @@ export async function waitForInboundTurn(opts: {
       }
     } else {
       containerStoppedAt = null;
+    }
+
+    if (
+      progressIntervalMs &&
+      progressIntervalMs > 0 &&
+      onProgress &&
+      containerRunning &&
+      status === 'processing' &&
+      Date.now() - lastProgressAt >= progressIntervalMs
+    ) {
+      lastProgressAt = Date.now();
+      try {
+        await onProgress({
+          elapsedMs: lastProgressAt - startedAt,
+          status,
+          containerRunning,
+        });
+      } catch (err) {
+        log.warn('Builder turn progress callback failed', { sessionId, inboundMessageId, err });
+      }
+      // Sliding idle window: still actively processing → grant another timeoutMs.
+      idleDeadline = Math.min(Date.now() + timeoutMs, absoluteDeadline);
     }
 
     await sleep(POLL_MS);

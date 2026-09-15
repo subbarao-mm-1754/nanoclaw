@@ -29,6 +29,10 @@ let liveBrowserStallReconnects = 0;
 /** Poll worker status while the modal is open so we pick up navigations / session switches. */
 let liveBrowserStatusTimer = null;
 let liveBrowserLastFrameBytes = 0;
+/** Poll orchestration overview while editing an orchestrator. */
+let orchPollTimer = null;
+let orchSelectedRunId = null;
+let orchWorkspaceId = null;
 
 function getToken() {
   return localStorage.getItem(TOKEN_KEY);
@@ -99,6 +103,7 @@ function slugify(name) {
 }
 
 function setView(view) {
+  if (view !== 'editor') hideOrchestrationPanel();
   hide($('auth-section'));
   hide($('dashboard-section'));
   hide($('editor-section'));
@@ -362,7 +367,205 @@ function collectFiles() {
   return files.filter((f) => f.path);
 }
 
+function stopOrchPolling() {
+  if (orchPollTimer) {
+    clearInterval(orchPollTimer);
+    orchPollTimer = null;
+  }
+  orchWorkspaceId = null;
+  orchSelectedRunId = null;
+}
+
+function hideOrchestrationPanel() {
+  stopOrchPolling();
+  hide($('orchestration-panel'));
+  hide($('orch-error'));
+}
+
+function showOrchError(msg) {
+  const el = $('orch-error');
+  el.textContent = msg;
+  show(el);
+}
+
+function clearOrchError() {
+  hide($('orch-error'));
+  $('orch-error').textContent = '';
+}
+
+function formatOrchGraph(graph) {
+  if (!graph || !graph.nodes?.length) return '';
+  const lines = [];
+  if (graph.entry) lines.push(`entry: ${graph.entry}`);
+  lines.push('nodes:');
+  for (const n of graph.nodes) {
+    const bits = [`  ${n.id}`];
+    if (n.agent) bits.push(`→ ${n.agent}`);
+    if (n.type) bits.push(`(${n.type})`);
+    if (n.description) bits.push(`— ${n.description}`);
+    lines.push(bits.join(' '));
+  }
+  if (graph.edges?.length) {
+    lines.push('edges:');
+    for (const e of graph.edges) {
+      lines.push(`  ${e.from} → ${e.to}${e.when ? ` when ${e.when}` : ''}`);
+    }
+  }
+  if (graph.loops?.length) {
+    lines.push('loops:');
+    for (const l of graph.loops) {
+      lines.push(
+        `  ${l.from} ↻ ${l.to} (max ${l.max_iterations})${l.when ? ` when ${l.when}` : ''}`,
+      );
+    }
+  }
+  return lines.join('\n');
+}
+
+function renderOrchestrationOverview(data) {
+  clearOrchError();
+
+  const members = data.members || [];
+  const membersEl = $('orch-members');
+  membersEl.innerHTML = '';
+  if (!members.length) {
+    show($('orch-members-empty'));
+  } else {
+    hide($('orch-members-empty'));
+    for (const m of members) {
+      const li = document.createElement('li');
+      li.innerHTML = `<strong>${escapeHtml(m.local_name)}</strong>${
+        m.role ? ` — ${escapeHtml(m.role)}` : ''
+      }<div class="orch-meta">${escapeHtml(m.member_workspace_id)}</div>`;
+      membersEl.appendChild(li);
+    }
+  }
+
+  const graphText = formatOrchGraph(data.graph);
+  if (graphText) {
+    hide($('orch-graph-empty'));
+    $('orch-graph').textContent = graphText;
+    show($('orch-graph'));
+  } else {
+    $('orch-graph').textContent = '';
+    hide($('orch-graph'));
+    show($('orch-graph-empty'));
+  }
+
+  const active = data.active_run;
+  const activeEl = $('orch-active');
+  if (active) {
+    activeEl.classList.remove('empty-state');
+    const state = active.state || {};
+    const lastTo = state.last_delegate_to ? String(state.last_delegate_to) : '';
+    activeEl.innerHTML = `
+      <div><span class="badge ${escapeAttr(active.status)}">${escapeHtml(active.status)}</span>
+      <strong>Active run</strong> <code>${escapeHtml(active.id)}</code></div>
+      ${active.goal ? `<div style="margin-top:0.4rem">${escapeHtml(active.goal)}</div>` : ''}
+      <div class="orch-meta">
+        node: ${escapeHtml(active.current_node || '—')}
+        ${lastTo ? ` · last specialist workspace: ${escapeHtml(lastTo)}` : ''}
+        · updated ${escapeHtml(active.updated_at)}
+      </div>`;
+    if (!orchSelectedRunId) orchSelectedRunId = active.id;
+  } else {
+    activeEl.classList.add('empty-state');
+    activeEl.textContent = 'No active run. Waiting for a Cliq message to this orchestrator.';
+  }
+
+  const runs = data.recent_runs || [];
+  const runsEl = $('orch-runs');
+  runsEl.innerHTML = '';
+  if (!runs.length) {
+    show($('orch-runs-empty'));
+  } else {
+    hide($('orch-runs-empty'));
+    for (const run of runs) {
+      const li = document.createElement('li');
+      if (run.id === orchSelectedRunId) li.classList.add('selected');
+      li.innerHTML = `
+        <button type="button" class="linkish select-run-btn" data-id="${escapeAttr(run.id)}">
+          <span class="badge ${escapeAttr(run.status)}">${escapeHtml(run.status)}</span>
+          ${escapeHtml(run.id)}
+        </button>
+        <div class="orch-meta">${
+          run.goal ? escapeHtml(run.goal.slice(0, 120)) : '—'
+        } · ${escapeHtml(run.updated_at)}</div>`;
+      li.querySelector('.select-run-btn').addEventListener('click', () => {
+        orchSelectedRunId = run.id;
+        void loadOrchestrationRunDetail(orchWorkspaceId, run.id);
+        for (const item of runsEl.querySelectorAll('li')) item.classList.remove('selected');
+        li.classList.add('selected');
+      });
+      runsEl.appendChild(li);
+    }
+  }
+
+  const eventsSource =
+    (active && active.id === orchSelectedRunId && active.events) ||
+    null;
+  if (eventsSource) {
+    renderOrchEvents(eventsSource);
+  } else if (orchSelectedRunId && orchWorkspaceId) {
+    void loadOrchestrationRunDetail(orchWorkspaceId, orchSelectedRunId);
+  } else {
+    renderOrchEvents([]);
+  }
+}
+
+function renderOrchEvents(events) {
+  const el = $('orch-events');
+  el.innerHTML = '';
+  if (!events?.length) {
+    show($('orch-events-empty'));
+    return;
+  }
+  hide($('orch-events-empty'));
+  for (const ev of events) {
+    const li = document.createElement('li');
+    const payload =
+      ev.payload && Object.keys(ev.payload).length
+        ? ` · ${escapeHtml(JSON.stringify(ev.payload))}`
+        : '';
+    li.innerHTML = `<strong>${escapeHtml(ev.event_type)}</strong>
+      <span class="orch-meta">${escapeHtml(ev.created_at)}${payload}</span>`;
+    el.appendChild(li);
+  }
+}
+
+async function loadOrchestrationRunDetail(workspaceId, runId) {
+  try {
+    const data = await api(
+      `/v1/agents/${encodeURIComponent(workspaceId)}/orchestration/runs/${encodeURIComponent(runId)}`,
+    );
+    renderOrchEvents(data.events || []);
+  } catch (err) {
+    showOrchError(err.message || String(err));
+  }
+}
+
+async function loadOrchestrationOverview(workspaceId, { quiet = false } = {}) {
+  if (!workspaceId) return;
+  try {
+    const data = await api(`/v1/agents/${encodeURIComponent(workspaceId)}/orchestration`);
+    renderOrchestrationOverview(data);
+  } catch (err) {
+    if (!quiet) showOrchError(err.message || String(err));
+  }
+}
+
+function showOrchestrationPanel(workspaceId) {
+  orchWorkspaceId = workspaceId;
+  show($('orchestration-panel'));
+  void loadOrchestrationOverview(workspaceId);
+  stopOrchPolling();
+  orchPollTimer = setInterval(() => {
+    void loadOrchestrationOverview(workspaceId, { quiet: true });
+  }, 4000);
+}
+
 function resetEditor() {
+  hideOrchestrationPanel();
   editingWorkspaceId = null;
   editingContainerConfig = null;
   $('editor-title').textContent = 'New agent';
@@ -384,7 +587,8 @@ function resetEditor() {
 function fillEditor(agent) {
   editingWorkspaceId = agent.workspace_id;
   editingContainerConfig = agent.container_config ? { ...agent.container_config } : null;
-  $('editor-title').textContent = `Edit: ${agent.name}`;
+  $('editor-title').textContent =
+    agent.agent_kind === 'orchestrator' ? `Orchestrator: ${agent.name}` : `Edit: ${agent.name}`;
   $('agent-name').value = agent.name;
   $('agent-folder').value = agent.folder || '';
   $('agent-provider').value = agent.container_config?.provider || 'claude';
@@ -400,6 +604,12 @@ function fillEditor(agent) {
   ensureAtLeastOneFile();
   clearEditorMessages();
   show($('delete-agent-btn'));
+
+  if (agent.agent_kind === 'orchestrator') {
+    showOrchestrationPanel(agent.workspace_id);
+  } else {
+    hideOrchestrationPanel();
+  }
 }
 
 async function loadAgents() {
@@ -415,11 +625,21 @@ async function loadAgents() {
 
   for (const agent of data.agents) {
     const li = document.createElement('li');
+    const orchBadge =
+      agent.agent_kind === 'orchestrator' ? '<span class="badge orchestrator">orchestrator</span>' : '';
+    const active = agent.orchestration_active;
+    const activeBadge = active
+      ? `<span class="badge ${escapeAttr(active.status)}">${escapeHtml(active.status)}</span>`
+      : '';
     li.innerHTML = `
       <div>
         <strong>${escapeHtml(agent.name)}</strong>
+        ${orchBadge}
         ${agent.is_default ? '<span class="badge default">default</span>' : ''}
-        <div class="agent-meta">${escapeHtml(agent.workspace_id)} · ${agent.files?.length ?? 0} files</div>
+        ${activeBadge}
+        <div class="agent-meta">${escapeHtml(agent.workspace_id)} · ${agent.files?.length ?? 0} files${
+          active?.current_node ? ` · node ${escapeHtml(active.current_node)}` : ''
+        }</div>
       </div>
       <div class="agent-actions">
         ${
@@ -427,7 +647,9 @@ async function loadAgents() {
             ? `<button type="button" class="secondary live-browser-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Live browser</button>`
             : ''
         }
-        <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">Edit</button>
+        <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">${
+          agent.agent_kind === 'orchestrator' ? 'Open' : 'Edit'
+        }</button>
         <button type="button" class="danger secondary delete-agent-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Delete</button>
       </div>
     `;
@@ -810,6 +1032,10 @@ $('md-folder-input').addEventListener('change', (e) => {
 
 $('cancel-editor-btn').addEventListener('click', () => {
   setView('dashboard');
+});
+
+$('orch-refresh-btn').addEventListener('click', () => {
+  if (orchWorkspaceId) void loadOrchestrationOverview(orchWorkspaceId);
 });
 
 $('delete-agent-btn').addEventListener('click', () => {

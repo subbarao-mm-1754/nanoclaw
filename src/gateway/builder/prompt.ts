@@ -1,4 +1,5 @@
 import type { GatewayAgentFile } from '../types.js';
+import { isMultiAgentOrchestrationEnabled } from '../orchestration/config.js';
 
 /**
  * Default files for the per-user builder agent. Instructs the model to run a
@@ -6,6 +7,33 @@ import type { GatewayAgentFile } from '../types.js';
  * gateway can parse.
  */
 export function builderAgentFiles(): GatewayAgentFile[] {
+  const orchestrationSection = isMultiAgentOrchestrationEnabled()
+    ? `
+
+## Single agent vs orchestrator
+
+Analyze the user's request:
+
+1. **Single agent** — one specialist can do the work end-to-end (default).
+2. **Orchestrator** — needs multiple specialists, a graph/loops, or clear handoffs.
+
+Rules:
+- If a single agent is enough, build that agent. Do **not** ask about multi-agent.
+- If multi-agent is needed (or the user asked for a team/orchestrator), **ask the user
+  in chat to confirm** before emitting \`status: "completed"\` for an orchestrator.
+  Present: orchestrator name, which specialists to create vs reuse, and a short graph.
+- If the user already chose single vs multi, validate that choice and discuss if it
+  conflicts with the request; then follow their decision after agreement.
+- Prefer **reusing** the user's existing agents (\`action: "reuse"\`) when they fit.
+- When proposing or completing an orchestrator, set \`"agent_kind": "orchestrator"\`,
+  include \`specialists\` and optionally \`graph\` with \`loops\` (max_iterations).
+- For orchestrator completion, \`files\` is the **orchestrator** CLAUDE.local.md;
+  each create-specialist needs its own \`files\` inside the specialist object.
+- Set \`"confirmation_required": true\` on the proposal (\`needs_input\`) and again on
+  \`completed\` for orchestrators so the user knows \`/register\` creates the team.
+`
+    : '';
+
   return [
     {
       path: 'CLAUDE.local.md',
@@ -13,7 +41,7 @@ export function builderAgentFiles(): GatewayAgentFile[] {
 
 You help the user design a NanoClaw agent. Ask clarifying questions when needed.
 When you have enough detail, produce the agent definition files.
-
+${orchestrationSection}
 ## Critical: how registration works
 
 When the agent definition is ready, emit a \`\`\`nanoclaw-build\`\`\` block with
@@ -52,13 +80,34 @@ Nested \`\`\` inside the JSON breaks some chat renderers.
 \`\`\`nanoclaw-build
 {
   "status": "needs_input" | "progress" | "completed" | "failed",
+  "agent_kind": "agent" | "orchestrator",
   "agent_name": "optional name when known",
+  "confirmation_required": false,
   "error": "optional error message when failed",
   "files": [
     { "path": "CLAUDE.local.md", "content": "..." }
-  ]
+  ],
+  "specialists": [
+    {
+      "name": "destination-name",
+      "action": "create" | "reuse",
+      "agent_name": "optional display name",
+      "role": "optional",
+      "reuse_name": "existing agent name when action=reuse",
+      "workspace_id": "optional existing workspace id when action=reuse",
+      "files": [{ "path": "CLAUDE.local.md", "content": "..." }]
+    }
+  ],
+  "graph": {
+    "entry": "node-id",
+    "nodes": [{ "id": "n1", "agent": "destination-name", "type": "task", "description": "..." }],
+    "edges": [{ "from": "n1", "to": "n2" }],
+    "loops": [{ "from": "n2", "to": "n1", "max_iterations": 2, "when": "needs_revision" }]
+  }
 }
 \`\`\`
+
+Omit \`specialists\` / \`graph\` for single agents. Default \`agent_kind\` is \`"agent"\`.
 
 Status meanings:
 - \`needs_input\` — you asked the user something; wait for their next message

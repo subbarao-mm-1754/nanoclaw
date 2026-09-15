@@ -22,6 +22,11 @@ const envConfig = readEnvFile([
   'LIVE_BROWSER_HOST_PORT_START',
   'LIVE_BROWSER_HOST_PORT_END',
   'LIVE_BROWSER_TICKET_TTL_MS',
+  'MULTI_AGENT_ORCHESTRATION_ENABLED',
+  'WORKER_BUILD_TURN_TIMEOUT_MS',
+  'WORKER_BUILD_PROGRESS_INTERVAL_MS',
+  'WORKER_BUILD_TURN_MAX_MS',
+  'WORKER_JOB_TIMEOUT_MS',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -88,13 +93,39 @@ export const WORKER_HOST = process.env.WORKER_HOST || '127.0.0.1';
 export const WORKER_PORT = parseInt(process.env.WORKER_PORT || '8080', 10);
 export const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || '';
 export const WORKER_MAX_BODY_BYTES = parseInt(process.env.WORKER_MAX_BODY_BYTES || '1048576', 10); // 1MB
-export const WORKER_JOB_TIMEOUT_MS = parseInt(process.env.WORKER_JOB_TIMEOUT_MS || '120000', 10);
+export const WORKER_JOB_TIMEOUT_MS = parseInt(
+  process.env.WORKER_JOB_TIMEOUT_MS || envConfig.WORKER_JOB_TIMEOUT_MS || '120000',
+  10,
+);
 /**
- * Max time a /build or /edit turn may stay in processing_ack before the worker
- * reports timeout. Independent of first-outbound wait (builders stream outbound).
+ * Idle budget for a /build or /edit turn: max time since the last progress
+ * heartbeat (or turn start) before the worker reports timeout. While the
+ * container is still processing, each progress ping resets this window.
  */
 export const WORKER_BUILD_TURN_TIMEOUT_MS = parseInt(
-  process.env.WORKER_BUILD_TURN_TIMEOUT_MS || '600000',
+  process.env.WORKER_BUILD_TURN_TIMEOUT_MS ||
+    envConfig.WORKER_BUILD_TURN_TIMEOUT_MS ||
+    '600000',
+  10,
+);
+/**
+ * How often the worker posts a "still working" status to the channel during
+ * a long builder turn. Also the cadence for extending the idle timeout.
+ */
+export const WORKER_BUILD_PROGRESS_INTERVAL_MS = parseInt(
+  process.env.WORKER_BUILD_PROGRESS_INTERVAL_MS ||
+    envConfig.WORKER_BUILD_PROGRESS_INTERVAL_MS ||
+    '300000',
+  10,
+);
+/**
+ * Hard cap on total builder-turn wall time (progress extensions cannot exceed).
+ * Default: 2 hours.
+ */
+export const WORKER_BUILD_TURN_MAX_MS = parseInt(
+  process.env.WORKER_BUILD_TURN_MAX_MS ||
+    envConfig.WORKER_BUILD_TURN_MAX_MS ||
+    '7200000',
   10,
 );
 /** Poll interval for continuous session outbound collectors. */
@@ -158,6 +189,17 @@ export const KNOWLEDGE_ENABLED =
  */
 export const LIVE_BROWSER_ENABLED =
   (process.env.LIVE_BROWSER_ENABLED ?? envConfig.LIVE_BROWSER_ENABLED ?? 'false') === 'true';
+
+/**
+ * Multi-agent orchestrators via Gateway `/build` + `/use`.
+ * On by default — set MULTI_AGENT_ORCHESTRATION_ENABLED=false to force single-agent builds only.
+ * Gateway setting `multi_agent_orchestration_enabled` overrides env when set.
+ */
+export const MULTI_AGENT_ORCHESTRATION_ENABLED =
+  (process.env.MULTI_AGENT_ORCHESTRATION_ENABLED ??
+    envConfig.MULTI_AGENT_ORCHESTRATION_ENABLED ??
+    'true') !== 'false';
+
 /** Fixed stream port inside the agent container (agent-browser). */
 export const LIVE_BROWSER_STREAM_PORT = parseInt(
   process.env.LIVE_BROWSER_STREAM_PORT || envConfig.LIVE_BROWSER_STREAM_PORT || '9223',

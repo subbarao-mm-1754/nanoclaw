@@ -229,6 +229,33 @@ export function parseProcessMessageRequest(body: unknown): WorkerProcessMessageR
     };
   }
 
+  let extraDestinations: WorkerProcessMessageRequest['extra_destinations'];
+  if (root.extra_destinations !== undefined) {
+    if (!Array.isArray(root.extra_destinations)) {
+      throw new WorkerValidationError('body.extra_destinations must be an array');
+    }
+    extraDestinations = [];
+    for (const entry of root.extra_destinations) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new WorkerValidationError('body.extra_destinations entries must be objects');
+      }
+      const row = entry as Record<string, unknown>;
+      const name = requireString(row, 'name', 'body.extra_destinations[]');
+      const type = row.type === 'agent' ? 'agent' : row.type === 'channel' ? 'channel' : null;
+      if (!type) {
+        throw new WorkerValidationError('body.extra_destinations[].type must be channel or agent');
+      }
+      extraDestinations.push({
+        name,
+        display_name: typeof row.display_name === 'string' ? row.display_name : null,
+        type,
+        channel_type: typeof row.channel_type === 'string' ? row.channel_type : null,
+        platform_id: typeof row.platform_id === 'string' ? row.platform_id : null,
+        agent_group_id: typeof row.agent_group_id === 'string' ? row.agent_group_id : null,
+      });
+    }
+  }
+
   return {
     job_id: jobId,
     build_job_id:
@@ -248,6 +275,7 @@ export function parseProcessMessageRequest(body: unknown): WorkerProcessMessageR
       name: deliveryName,
       display_name: deliveryDisplayName,
     },
+    extra_destinations: extraDestinations,
     inbound: {
       id: inboundId,
       kind: inboundKind,

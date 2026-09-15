@@ -511,14 +511,32 @@ function guessAgentNameFromMessages(job: BuildJob): string | undefined {
 /** Tell the user the create build is ready — they finish with `/register`. */
 async function promptCreateRegister(
   job: BuildJob,
-  options?: { agentName?: string; runId?: string | null },
+  options?: { agentName?: string; runId?: string | null; parsed?: ParsedBuildResult },
 ): Promise<void> {
+  const parsed = options?.parsed;
+  const isOrch =
+    parsed?.agent_kind === 'orchestrator' ||
+    (parsed?.specialists && parsed.specialists.length > 0);
   const name =
-    options?.agentName?.trim() || guessAgentNameFromMessages(job) || 'your agent';
-  const text = [
-    `Build complete for "${name}".`,
-    'Send `/register` to register it with the Gateway (this also cleans up the builder).',
-  ].join('\n');
+    options?.agentName?.trim() ||
+    parsed?.agent_name?.trim() ||
+    guessAgentNameFromMessages(job) ||
+    (isOrch ? 'your orchestrator' : 'your agent');
+
+  let text: string;
+  if (isOrch) {
+    const { formatOrchestratorProposal } = await import('../orchestration/register.js');
+    text = [
+      formatOrchestratorProposal(parsed ?? { status: 'completed', agent_name: name }),
+      '',
+      'Send `/register` to create the orchestrator (and any new specialists).',
+    ].join('\n');
+  } else {
+    text = [
+      `Build complete for "${name}".`,
+      'Send `/register` to register it with the Gateway (this also cleans up the builder).',
+    ].join('\n');
+  }
 
   updateBuildJobStatus(job.id, 'waiting_for_user');
   insertBuildMessage({
@@ -526,7 +544,7 @@ async function promptCreateRegister(
     job_id: job.id,
     direction: 'outbound',
     role: 'system',
-    content: { text, ready_to_register: true },
+    content: { text, ready_to_register: true, agent_kind: isOrch ? 'orchestrator' : 'agent' },
     run_id: options?.runId ?? null,
   });
   await deliverBuildText(job, text);
@@ -1342,20 +1360,79 @@ async function finalizeCompletedBuild(
     return null;
   }
 
-  const agentName = parsed.agent_name?.trim() || job.title || 'New Agent';
-  const agent = await createAgent({
-    name: agentName,
-    owner_user_id: job.user_id,
-    files,
-    is_default: false,
-  });
+  const wantsOrchestrator =
+    parsed.agent_kind === 'orchestrator' ||
+    (Array.isArray(parsed.specialists) && parsed.specialists.length > 0);
+
+  let agent: GatewayAgent;
+  let doneText: string;
+
+  if (wantsOrchestrator) {
+    const { isMultiAgentOrchestrationEnabled } = await import('../orchestration/config.js');
+    if (!isMultiAgentOrchestrationEnabled()) {
+      updateBuildJobStatus(job.id, 'failed', {
+        error: 'Multi-agent orchestration is disabled',
+      });
+      await deliverBuildText(
+        job,
+        'This build requested an orchestrator, but multi-agent orchestration is disabled. Set MULTI_AGENT_ORCHESTRATION_ENABLED=true (or the gateway setting) and try again, or rebuild as a single agent.',
+      );
+      await cleanupBuilder(job);
+      return null;
+    }
+
+    try {
+      const { registerOrchestratorFromBuild } = await import('../orchestration/register.js');
+      const result = await registerOrchestratorFromBuild({
+        userId: job.user_id,
+        parsed,
+        files,
+      });
+      agent = result.orchestrator;
+      const createdNote =
+        result.createdNames.length > 0
+          ? `Created specialists: ${result.createdNames.map((n) => `"${n}"`).join(', ')}.`
+          : 'All specialists were reused from your existing agents.';
+      doneText = [
+        `Orchestrator "${agent.name}" created and this chat is now using it.`,
+        `id: \`${agent.workspace_id}\``,
+        createdNote,
+        '',
+        'Next messages here go to this orchestrator. Switch later with `/agents` and `/use <name>`.',
+        'Build another with `/build …`.',
+      ].join('\n');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      updateBuildJobStatus(job.id, 'failed', { error: message });
+      await deliverBuildText(job, `Failed to register orchestrator: ${message}`);
+      await cleanupBuilder(job);
+      return null;
+    }
+  } else {
+    const agentName = parsed.agent_name?.trim() || job.title || 'New Agent';
+    agent = await createAgent({
+      name: agentName,
+      owner_user_id: job.user_id,
+      files,
+      is_default: false,
+      agent_kind: 'agent',
+    });
+
+    doneText = [
+      `Agent "${agentName}" created and this chat is now using it.`,
+      `id: \`${agent.workspace_id}\``,
+      '',
+      'Next messages here go to this agent. Switch later with `/agents` and `/use <name>`.',
+      'Build another with `/build …`.',
+    ].join('\n');
+  }
 
   await attachPendingMcp(job, agent.workspace_id, agent.agent_group_id);
 
   updateBuildJobStatus(job.id, 'completed', {
     result_workspace_id: agent.workspace_id,
     result_agent_group_id: agent.agent_group_id,
-    title: agentName,
+    title: agent.name,
   });
 
   // Bind this channel chat to the new agent so the next message goes there.
@@ -1375,14 +1452,6 @@ async function finalizeCompletedBuild(
       });
     }
   }
-
-  const doneText = [
-    `Agent "${agentName}" created and this chat is now using it.`,
-    `id: \`${agent.workspace_id}\``,
-    '',
-    'Next messages here go to this agent. Switch later with `/agents` and `/use <name>`.',
-    'Build another with `/build …`.',
-  ].join('\n');
 
   insertBuildMessage({
     id: generateId('bmsg'),
@@ -1640,6 +1709,7 @@ export async function handleBuilderRunCallback(
         await promptCreateRegister(detail, {
           agentName: parsed.agent_name ?? guessAgentNameFromMessages(detail),
           runId,
+          parsed,
         });
       } else {
         await promptCreateNotReady(detail, runId);
@@ -1683,6 +1753,7 @@ export async function handleBuilderRunCallback(
     await promptCreateRegister(detail, {
       agentName: parsed.agent_name ?? guessAgentNameFromMessages(detail),
       runId,
+      parsed,
     });
   }
 }

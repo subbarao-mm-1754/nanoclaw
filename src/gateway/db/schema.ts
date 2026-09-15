@@ -42,7 +42,59 @@ function migrateGatewaySchema(db: Database.Database): void {
     if (!columnExists(db, 'gateway_workspaces', 'worker_content_hash')) {
       db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN worker_content_hash TEXT`);
     }
+    if (!columnExists(db, 'gateway_workspaces', 'agent_kind')) {
+      db.exec(
+        `ALTER TABLE gateway_workspaces ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'agent'`,
+      );
+    }
   }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_orchestrator_members (
+      orchestrator_workspace_id TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      member_workspace_id       TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      member_agent_group_id     TEXT NOT NULL,
+      local_name                TEXT NOT NULL,
+      role                      TEXT,
+      created_at                TEXT NOT NULL,
+      PRIMARY KEY (orchestrator_workspace_id, local_name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orch_members_member
+      ON gateway_orchestrator_members(member_workspace_id);
+
+    CREATE TABLE IF NOT EXISTS gateway_orchestrator_graphs (
+      orchestrator_workspace_id TEXT PRIMARY KEY REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      graph_json               TEXT NOT NULL,
+      updated_at               TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS gateway_orchestration_runs (
+      id                         TEXT PRIMARY KEY,
+      orchestrator_workspace_id  TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      conversation_id            TEXT,
+      status                     TEXT NOT NULL CHECK(status IN ('running', 'waiting', 'completed', 'failed')),
+      current_node               TEXT,
+      state_json                 TEXT NOT NULL DEFAULT '{}',
+      goal                       TEXT,
+      created_at                 TEXT NOT NULL,
+      updated_at                 TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orch_runs_workspace
+      ON gateway_orchestration_runs(orchestrator_workspace_id, status);
+
+    CREATE TABLE IF NOT EXISTS gateway_orchestration_events (
+      id            TEXT PRIMARY KEY,
+      run_id        TEXT NOT NULL REFERENCES gateway_orchestration_runs(id) ON DELETE CASCADE,
+      event_type    TEXT NOT NULL,
+      payload_json  TEXT,
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orch_events_run
+      ON gateway_orchestration_events(run_id);
+  `);
 
   if (tableExists(db, 'build_jobs')) {
     if (!columnExists(db, 'build_jobs', 'delivery_channel_type')) {
@@ -282,6 +334,7 @@ export function initGatewaySchema(db: Database.Database): void {
       cli_scope              TEXT NOT NULL DEFAULT 'group',
       container_config_json  TEXT,
       worker_content_hash    TEXT,
+      agent_kind             TEXT NOT NULL DEFAULT 'agent',
       created_at             TEXT NOT NULL,
       updated_at             TEXT NOT NULL
     );

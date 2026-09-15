@@ -123,6 +123,7 @@ export async function createAgent(input: {
   container_config?: ContainerConfigSnapshot;
   files: GatewayAgentFile[];
   is_default?: boolean;
+  agent_kind?: 'agent' | 'orchestrator';
 }): Promise<GatewayAgent> {
   if (input.files.length === 0) {
     throw new Error('At least one agent file is required (e.g. CLAUDE.local.md)');
@@ -159,6 +160,7 @@ export async function createAgent(input: {
     folder,
     container_config: containerConfig,
     cli_scope: cliScope,
+    agent_kind: input.agent_kind ?? 'agent',
   });
 
   setWorkerContentHash(workspaceId, prepared.content_hash);

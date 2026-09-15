@@ -233,33 +233,60 @@ export interface WorkerJobDelivery {
 /**
  * Project the job's delivery address into inbound.db `destinations` so the
  * container agent can dispatch replies. Worker/gateway path — no central DB.
+ * Optional `extra` rows (e.g. orchestrator specialists) are merged in.
  */
 export function writeDestinationsFromJob(
   agentGroupId: string,
   sessionId: string,
   delivery: WorkerJobDelivery,
+  extra: DestinationRow[] = [],
 ): void {
   const dbPath = inboundDbPath(agentGroupId, sessionId);
   if (!fs.existsSync(dbPath)) return;
 
-  const name = delivery.name?.trim() || 'client';
+  const name = delivery.name?.trim() || (delivery.channel_type === 'agent' ? 'orchestrator' : 'client');
   const displayName = delivery.display_name?.trim() || delivery.platform_id;
-  const row: DestinationRow = {
-    name,
-    display_name: displayName,
-    type: 'channel',
-    channel_type: delivery.channel_type,
-    platform_id: delivery.platform_id,
-    agent_group_id: null,
-  };
+
+  const primary: DestinationRow =
+    delivery.channel_type === 'agent'
+      ? {
+          name,
+          display_name: displayName,
+          type: 'agent',
+          channel_type: null,
+          platform_id: null,
+          agent_group_id: delivery.platform_id,
+        }
+      : {
+          name,
+          display_name: displayName,
+          type: 'channel',
+          channel_type: delivery.channel_type,
+          platform_id: delivery.platform_id,
+          agent_group_id: null,
+        };
+
+  const seen = new Set<string>([primary.name]);
+  const rows: DestinationRow[] = [primary];
+  for (const row of extra) {
+    if (!row.name || seen.has(row.name)) continue;
+    seen.add(row.name);
+    rows.push(row);
+  }
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
-    replaceDestinations(db, [row]);
+    replaceDestinations(db, rows);
   } finally {
     db.close();
   }
-  log.debug('Destinations written from job', { sessionId, name, channelType: delivery.channel_type, platformId: delivery.platform_id });
+  log.debug('Destinations written from job', {
+    sessionId,
+    name,
+    channelType: delivery.channel_type,
+    platformId: delivery.platform_id,
+    extraCount: extra.length,
+  });
 }
 
 /**
