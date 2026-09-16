@@ -489,8 +489,10 @@ function createAdapter(): ChannelAdapter | null {
         return;
       }
 
-      // Normal text message
+      // Caption text first, then attachments. Do not return after text alone —
+      // otherwise files on the same outbound message never upload to Cliq.
       const text = (content.markdown as string) || (content.text as string);
+      let messageId: string | undefined;
       if (text) {
         try {
           // Always send via bot endpoint so messages are posted by the bot identity.
@@ -509,8 +511,9 @@ function createAdapter(): ChannelAdapter | null {
             throw new Error(`Zoho Cliq bot send failed (${res.status}): ${body}`);
           }
           const data = await parseOptionalJsonBody<{ message_id?: string }>(res);
-          if (data.message_id) {
-            deliveredMessageIds.add(data.message_id);
+          messageId = data.message_id;
+          if (messageId) {
+            deliveredMessageIds.add(messageId);
             if (deliveredMessageIds.size > MAX_DELIVERED_ID_CACHE) {
               const oldest = deliveredMessageIds.values().next().value;
               if (oldest) deliveredMessageIds.delete(oldest);
@@ -518,22 +521,20 @@ function createAdapter(): ChannelAdapter | null {
           }
           log.info('Zoho Cliq message delivered', {
             chatId,
-            messageId: data.message_id ?? null,
+            messageId: messageId ?? null,
             textPreview: text.slice(0, 80),
           });
-          return data.message_id;
         } catch (err) {
           log.error('Zoho Cliq deliver failed', { chatId, err });
           throw err;
         }
       }
 
-      // File attachments
       if (message.files && message.files.length > 0) {
         for (const file of message.files) {
           try {
             const formData = new FormData();
-            formData.append('file', new Blob([file.data]), file.filename);
+            formData.append('file', new Blob([new Uint8Array(file.data)]), file.filename);
 
             const token = await ensureToken();
             const res = await fetch(`${apiBase}/api/v2/chats/${chatId}/files`, {
@@ -542,15 +543,27 @@ function createAdapter(): ChannelAdapter | null {
               body: formData,
             });
             if (!res.ok) {
-              log.warn('Zoho Cliq file upload failed', { chatId, status: res.status });
+              const body = await res.text().catch(() => '');
+              log.warn('Zoho Cliq file upload failed', {
+                chatId,
+                filename: file.filename,
+                status: res.status,
+                body: body.slice(0, 200),
+              });
+            } else {
+              log.info('Zoho Cliq file uploaded', {
+                chatId,
+                filename: file.filename,
+                bytes: file.data.length,
+              });
             }
           } catch (err) {
-            log.warn('Zoho Cliq file upload error', { chatId, err });
+            log.warn('Zoho Cliq file upload error', { chatId, filename: file.filename, err });
           }
         }
       }
 
-      return undefined;
+      return messageId;
     },
 
     async syncConversations(): Promise<ConversationInfo[]> {

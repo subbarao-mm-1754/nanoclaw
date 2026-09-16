@@ -1,6 +1,10 @@
 /**
  * Gateway-side agent-to-agent routing for orchestrators.
  * Worker pushes channel_type=agent outbound; we wake the target workspace.
+ *
+ * When a fixed graph is registered, LangGraph (in-process) owns control flow:
+ * waits, loop caps, auto-delegate. The orchestrator agent remains the user-facing
+ * decision maker but cannot mutate graph/loops/rules.
  */
 import { generateId } from '../auth.js';
 import { log } from '../../log.js';
@@ -15,6 +19,13 @@ import { processMessageOnWorker } from '../worker-client.js';
 import type { WorkerCollectedOutbound } from '../../worker/types.js';
 import { isMultiAgentOrchestrationEnabled } from './config.js';
 import {
+  isLangGraphOrchestrator,
+  localNameForMember,
+  onOrchestratorDecision,
+  onOrchestratorUserMessage,
+  onSpecialistReply,
+} from './langgraph/index.js';
+import {
   appendOrchestrationEvent,
   createOrchestrationRun,
   getActiveOrchestrationRun,
@@ -24,6 +35,14 @@ import {
 
 function specialistSessionId(orchestratorSessionId: string, memberWorkspaceId: string): string {
   return `sess-orch-${orchestratorSessionId}-${memberWorkspaceId}`.slice(0, 120);
+}
+
+function outboundText(msg: WorkerCollectedOutbound): string {
+  return typeof msg.content.text === 'string'
+    ? msg.content.text
+    : typeof msg.content.raw_text === 'string'
+      ? msg.content.raw_text
+      : JSON.stringify(msg.content);
 }
 
 export async function routeAgentOutboundMessages(input: {
@@ -53,19 +72,73 @@ export async function routeAgentOutboundMessages(input: {
       continue;
     }
 
-    const text =
-      typeof msg.content.text === 'string'
-        ? msg.content.text
-        : typeof msg.content.raw_text === 'string'
-          ? msg.content.raw_text
-          : JSON.stringify(msg.content);
-
+    const text = outboundText(msg);
     const sourceWs = getWorkspace(input.sourceWorkspaceId);
     const sessionId = specialistSessionId(input.sourceSessionId, target.workspace_id);
     const inboundId = sessionInboundMessageId(msg.id, target.agent_group_id);
 
-    // Track run state on the orchestrator side.
-    if (sourceWs?.agent_kind === 'orchestrator') {
+    // --- LangGraph hard runner hooks ---
+    let skipSoftWake = false;
+
+    if (sourceWs?.agent_kind === 'orchestrator' && isLangGraphOrchestrator(sourceWs.workspace_id)) {
+      const members = (
+        await import('./store.js')
+      ).listOrchestratorMembers(sourceWs.workspace_id);
+      const member = members.find((m) => m.member_agent_group_id === target.agent_group_id);
+      const branch = member?.local_name || target.name;
+      const decision = await onOrchestratorDecision({
+        orchestratorWorkspaceId: sourceWs.workspace_id,
+        conversationId: input.conversationId,
+        orchestratorSessionId: input.sourceSessionId,
+        branch,
+        taskPacket: text,
+      });
+      if (decision.handled && decision.autoDelegating) {
+        // Graph already woke the specialist via await_specialist side-effect.
+        skipSoftWake = true;
+        routed++;
+      } else if (decision.handled && !decision.autoDelegating) {
+        // Decision consumed (e.g. rejected / routed to another decision node).
+        // Still allow soft wake if the orchestrator explicitly messaged a specialist
+        // outside an auto-delegate interrupt — only skip when rejected.
+        // Keep soft wake for compatibility when graph is waiting on specialist already.
+      }
+    } else if (
+      target.agent_kind === 'orchestrator' &&
+      isLangGraphOrchestrator(target.workspace_id)
+    ) {
+      const fromName = localNameForMember(target.workspace_id, input.sourceWorkspaceId);
+      const { getActiveOrchestrationRun, parseRunState } = await import('./store.js');
+      const active = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
+      const lg = active
+        ? (parseRunState(active).langgraph as { orchestrator_session_id?: string } | undefined)
+        : undefined;
+
+      let orchSession = lg?.orchestrator_session_id || '';
+      if (!orchSession && input.sourceSessionId.startsWith('sess-orch-')) {
+        const rest = input.sourceSessionId.slice('sess-orch-'.length);
+        const suffix = `-${input.sourceWorkspaceId}`;
+        orchSession = rest.endsWith(suffix) ? rest.slice(0, -suffix.length) : rest;
+      }
+      if (!orchSession) orchSession = input.sourceSessionId;
+
+      const handled = await onSpecialistReply({
+        orchestratorWorkspaceId: target.workspace_id,
+        conversationId: input.conversationId,
+        orchestratorSessionId: orchSession,
+        fromWorkspaceId: input.sourceWorkspaceId,
+        fromLocalName: fromName ?? undefined,
+        text,
+        messageId: msg.id,
+      });
+      if (handled) {
+        skipSoftWake = true;
+        routed++;
+      }
+    }
+
+    // Soft / legacy run tracking when not fully handled by LangGraph auto-path.
+    if (sourceWs?.agent_kind === 'orchestrator' && !skipSoftWake) {
       let run = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId);
       if (!run) {
         const graph = getOrchestratorGraph(sourceWs.workspace_id);
@@ -88,7 +161,7 @@ export async function routeAgentOutboundMessages(input: {
           last_message_id: msg.id,
         },
       });
-    } else if (target.agent_kind === 'orchestrator') {
+    } else if (target.agent_kind === 'orchestrator' && !skipSoftWake) {
       const run = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
       if (run) {
         appendOrchestrationEvent(run.id, 'specialist_reply', {
@@ -98,6 +171,8 @@ export async function routeAgentOutboundMessages(input: {
         updateOrchestrationRun(run.id, { status: 'running' });
       }
     }
+
+    if (skipSoftWake) continue;
 
     try {
       await ensureWorkspaceOnWorker(target.workspace_id);
@@ -111,8 +186,7 @@ export async function routeAgentOutboundMessages(input: {
           agent_group_id: target.agent_group_id,
         },
         delivery: {
-          // Reply path back to source agent.
-          channel_type: 'agent',
+          channel_type: 'agent' as const,
           platform_id: input.sourceAgentGroupId,
           thread_id: null,
           name: 'orchestrator',
@@ -161,19 +235,35 @@ export async function routeAgentOutboundMessages(input: {
   return routed;
 }
 
-/** Start (or refresh) an orchestration run when a user messages an orchestrator. */
-export function ensureOrchestrationRunForUserMessage(input: {
+/**
+ * Start (or refresh) an orchestration run when a user messages an orchestrator.
+ * LangGraph-backed when a fixed graph exists; otherwise soft DB tracking only.
+ */
+export async function ensureOrchestrationRunForUserMessage(input: {
   workspaceId: string;
   conversationId: string;
+  sessionId?: string;
   goalText: string;
-}): void {
+}): Promise<void> {
   if (!isMultiAgentOrchestrationEnabled()) return;
   const ws = getWorkspace(input.workspaceId);
   if (!ws || ws.agent_kind !== 'orchestrator') return;
 
+  if (isLangGraphOrchestrator(input.workspaceId)) {
+    await onOrchestratorUserMessage({
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      sessionId: input.sessionId || `sess-${input.conversationId}`,
+      goalText: input.goalText,
+    });
+    return;
+  }
+
   const existing = getActiveOrchestrationRun(input.workspaceId, input.conversationId);
   if (existing) {
-    appendOrchestrationEvent(existing.id, 'user_message', { preview: input.goalText.slice(0, 200) });
+    appendOrchestrationEvent(existing.id, 'user_message', {
+      preview: input.goalText.slice(0, 200),
+    });
     return;
   }
   const graph = getOrchestratorGraph(input.workspaceId);

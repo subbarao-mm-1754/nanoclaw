@@ -16,6 +16,22 @@ import {
   updateMessageStatus,
 } from './store/messages.js';
 import { invalidateWorkerWorkspaceCache } from './agent-service.js';
+import type { WorkerCollectedOutbound } from '../worker/types.js';
+
+function outboundFilesForDelivery(
+  out: WorkerCollectedOutbound,
+): Array<{ filename: string; data_base64: string }> | undefined {
+  if (out.file_buffers?.length) {
+    return out.file_buffers.map((f) => ({
+      filename: f.filename,
+      data_base64: f.data.toString('base64'),
+    }));
+  }
+  const legacy = (out as { files?: Array<{ filename: string; data_base64?: string }> }).files;
+  if (!legacy?.length) return undefined;
+  const withData = legacy.filter((f) => typeof f.data_base64 === 'string');
+  return withData.length > 0 ? (withData as Array<{ filename: string; data_base64: string }>) : undefined;
+}
 
 /**
  * Handle continuous collector pushes from the Worker.
@@ -116,7 +132,7 @@ export async function handleWorkerOutboundCallback(
         conversation_id: conversation.id,
         kind: out.kind,
         content: out.content,
-        files: out.files,
+        files: outboundFilesForDelivery(out),
         worker_job_id: jobId,
       });
 

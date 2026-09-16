@@ -128,6 +128,11 @@ export interface WorkerWorkspaceManifest {
 
 export type WorkerJobStatus = 'prepared' | 'completed' | 'failed' | 'timeout';
 
+/** Filename-only reference in JSON metadata (bytes sent via multipart). */
+export interface WorkerOutboundFileRef {
+  filename: string;
+}
+
 export interface WorkerCollectedOutbound {
   id: string;
   kind: string;
@@ -135,7 +140,13 @@ export interface WorkerCollectedOutbound {
   platform_id: string | null;
   thread_id: string | null;
   content: Record<string, unknown>;
-  files?: Array<{ filename: string; data_base64: string }>;
+  /** Declared attachment names (multipart upload or legacy inline base64). */
+  files?: WorkerOutboundFileRef[];
+  /**
+   * In-memory only — stripped before JSON; uploaded as multipart parts.
+   * Keyed by outbound message id + filename on the wire.
+   */
+  file_buffers?: Array<{ filename: string; data: Buffer }>;
 }
 
 export interface WorkerMemoryPatch {

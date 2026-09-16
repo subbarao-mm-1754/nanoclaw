@@ -28,6 +28,7 @@ import {
 } from './builder/service.js';
 import { handleWorkerOutboundCallback } from './outbound-callback.js';
 import type { WorkerOutboundCallbackPayload, WorkerProcessMessageResponse } from '../worker/types.js';
+import { isMultipartRequest as isOutboundMultipartRequest } from '../worker/outbound-multipart.js';
 import {
   bindIntegrationToWorkspace,
   discoverAndRegister,
@@ -440,7 +441,23 @@ async function handleWorkerOutboundCallbackHttp(
     return;
   }
 
-  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as WorkerOutboundCallbackPayload;
+  let body: WorkerOutboundCallbackPayload;
+  try {
+    if (isOutboundMultipartRequest(req)) {
+      const { attachOutboundMultipartFiles, parseOutboundMultipartRequest } = await import(
+        '../worker/outbound-multipart.js'
+      );
+      const parsed = await parseOutboundMultipartRequest(req);
+      body = attachOutboundMultipartFiles(parsed.metadata, parsed.files);
+    } else {
+      body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as WorkerOutboundCallbackPayload;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    jsonResponse(res, 400, { error: message });
+    return;
+  }
+
   if (!body || typeof body !== 'object' || typeof body.session_id !== 'string') {
     jsonResponse(res, 400, { error: 'session_id is required' });
     return;

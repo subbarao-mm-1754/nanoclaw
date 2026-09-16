@@ -1,0 +1,215 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+import { initGatewayTestDb, closeGatewayDb } from '../../db/connection.js';
+import { createUser } from '../../store/users.js';
+import { createAgentRecord } from '../../store/agents.js';
+import { ORCHESTRATION_SETTING_KEY } from '../config.js';
+import { deleteGatewaySetting } from '../../store/settings.js';
+import {
+  getActiveOrchestrationRun,
+  parseRunState,
+  replaceOrchestratorMembers,
+  saveOrchestratorGraph,
+} from '../store.js';
+import {
+  HANDLE_USER_NODE,
+  _resetLangGraphRuntimeForTests,
+  compileOrchestratorLangGraph,
+  isLangGraphOrchestrator,
+  onOrchestratorDecision,
+  onOrchestratorUserMessage,
+  onSpecialistReply,
+} from './index.js';
+import type { OrchestratorGraph } from '../types.js';
+
+vi.mock('./a2a.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./a2a.js')>();
+  return {
+    ...actual,
+    wakeAgentWithText: vi.fn(async () => true),
+    wakeWorkspaceSession: vi.fn(async () => true),
+  };
+});
+
+beforeEach(() => {
+  initGatewayTestDb();
+  deleteGatewaySetting(ORCHESTRATION_SETTING_KEY);
+  _resetLangGraphRuntimeForTests();
+});
+
+afterEach(() => {
+  closeGatewayDb();
+  _resetLangGraphRuntimeForTests();
+});
+
+const sampleGraph: OrchestratorGraph = {
+  entry: 'research',
+  nodes: [
+    { id: 'research', agent: 'researcher', type: 'task', description: 'Find sources' },
+    { id: 'write', agent: 'writer', type: 'task' },
+  ],
+  edges: [{ from: 'research', to: 'write' }],
+  loops: [{ from: 'write', to: 'research', max_iterations: 2, when: 'retry' }],
+};
+
+describe('LangGraph orchestration', () => {
+  it('compiles a builder graph with handle_user hub', () => {
+    const compiled = compileOrchestratorLangGraph(sampleGraph);
+    expect(compiled).not.toBeNull();
+    expect(compiled!.entry).toBe('research');
+    expect(compiled!.isTaskNode('research')).toBe(true);
+    expect(compiled!.nodeAgent('research')).toBe('researcher');
+    expect(compiled!.allowedBranches('research')).toContain('write');
+    expect(compiled!.allowedBranches('write')).toContain('retry');
+  });
+
+  it('returns null for empty graphs (soft mode)', () => {
+    expect(compileOrchestratorLangGraph({ nodes: [] })).toBeNull();
+    expect(compileOrchestratorLangGraph(null)).toBeNull();
+  });
+
+  it('isolates runs per conversation and advances on decisions + specialist replies', async () => {
+    const user = createUser({
+      email: 'lg@test.com',
+      password: 'password123',
+      display_name: 'LG',
+    });
+    const orch = createAgentRecord({
+      name: 'Lead',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# o' }],
+      agent_kind: 'orchestrator',
+    });
+    const researcher = createAgentRecord({
+      name: 'Researcher',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# r' }],
+      agent_kind: 'agent',
+    });
+    const writer = createAgentRecord({
+      name: 'Writer',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# w' }],
+      agent_kind: 'agent',
+    });
+
+    replaceOrchestratorMembers(orch.workspace_id, [
+      {
+        member_workspace_id: researcher.workspace_id,
+        member_agent_group_id: researcher.agent_group_id,
+        local_name: 'researcher',
+      },
+      {
+        member_workspace_id: writer.workspace_id,
+        member_agent_group_id: writer.agent_group_id,
+        local_name: 'writer',
+      },
+    ]);
+    saveOrchestratorGraph(orch.workspace_id, sampleGraph);
+    expect(isLangGraphOrchestrator(orch.workspace_id)).toBe(true);
+
+    const runA = await onOrchestratorUserMessage({
+      workspaceId: orch.workspace_id,
+      conversationId: 'conv-a',
+      sessionId: 'sess-a',
+      goalText: 'Research topic A',
+    });
+    const runB = await onOrchestratorUserMessage({
+      workspaceId: orch.workspace_id,
+      conversationId: 'conv-b',
+      sessionId: 'sess-b',
+      goalText: 'Research topic B',
+    });
+
+    expect(runA?.id).toBeTruthy();
+    expect(runB?.id).toBeTruthy();
+    expect(runA!.id).not.toBe(runB!.id);
+    expect(runA!.status).toBe('waiting');
+    expect(parseRunState(runA!).langgraph).toMatchObject({
+      engine: 'langgraph',
+      thread_id: runA!.id,
+    });
+
+    // User A: orchestrator chooses researcher
+    const d1 = await onOrchestratorDecision({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-a',
+      orchestratorSessionId: 'sess-a',
+      branch: 'researcher',
+      taskPacket: 'Find sources for A',
+    });
+    expect(d1.handled).toBe(true);
+    expect(d1.autoDelegating).toBe(true);
+
+    const waitingA = getActiveOrchestrationRun(orch.workspace_id, 'conv-a');
+    expect(waitingA?.status).toBe('waiting');
+    expect(waitingA?.current_node).toBe('research');
+
+    // Specialist reply for A
+    const handled = await onSpecialistReply({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-a',
+      orchestratorSessionId: 'sess-a',
+      fromWorkspaceId: researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text: 'Sources: 1, 2, 3',
+      messageId: 'msg-1',
+    });
+    expect(handled).toBe(true);
+
+    // Conversation B still independent / waiting on its own decision
+    const stillB = getActiveOrchestrationRun(orch.workspace_id, 'conv-b');
+    expect(stillB?.id).toBe(runB!.id);
+    expect(stillB?.status).toBe('waiting');
+    expect(stillB?.current_node).toBe(HANDLE_USER_NODE);
+  });
+
+  it('rejects branches outside the locked graph', async () => {
+    const user = createUser({
+      email: 'lg2@test.com',
+      password: 'password123',
+      display_name: 'LG2',
+    });
+    const orch = createAgentRecord({
+      name: 'Lead2',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# o' }],
+      agent_kind: 'orchestrator',
+    });
+    const researcher = createAgentRecord({
+      name: 'Researcher2',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# r' }],
+      agent_kind: 'agent',
+    });
+    replaceOrchestratorMembers(orch.workspace_id, [
+      {
+        member_workspace_id: researcher.workspace_id,
+        member_agent_group_id: researcher.agent_group_id,
+        local_name: 'researcher',
+      },
+    ]);
+    saveOrchestratorGraph(orch.workspace_id, {
+      entry: 'research',
+      nodes: [{ id: 'research', agent: 'researcher', type: 'task' }],
+      edges: [],
+    });
+
+    await onOrchestratorUserMessage({
+      workspaceId: orch.workspace_id,
+      conversationId: 'conv-x',
+      sessionId: 'sess-x',
+      goalText: 'Go',
+    });
+
+    const rejected = await onOrchestratorDecision({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-x',
+      orchestratorSessionId: 'sess-x',
+      branch: 'totally-invented-node',
+    });
+    expect(rejected.handled).toBe(true);
+    expect(rejected.autoDelegating).toBe(false);
+    expect(getActiveOrchestrationRun(orch.workspace_id, 'conv-x')?.status).toBe('waiting');
+  });
+});

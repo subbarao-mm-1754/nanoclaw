@@ -124,6 +124,8 @@ export async function registerOrchestratorFromBuild(input: {
   replaceOrchestratorMembers(orchestrator.workspace_id, members);
   if (input.parsed.graph) {
     saveOrchestratorGraph(orchestrator.workspace_id, input.parsed.graph);
+    const { invalidateCompiledGraph } = await import('./langgraph/index.js');
+    invalidateCompiledGraph(orchestrator.workspace_id);
   }
 
   log.info('Registered orchestrator with specialists', {

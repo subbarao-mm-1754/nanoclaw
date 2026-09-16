@@ -10,7 +10,7 @@ function formatGraph(graph: OrchestratorGraph | undefined): string {
     ].join(' ');
   }
 
-  const lines: string[] = ['### Registered graph', ''];
+  const lines: string[] = ['### Registered graph (LangGraph-enforced)', ''];
   if (graph.entry) lines.push(`- Entry node: \`${graph.entry}\``);
   lines.push('- Nodes:');
   for (const n of graph.nodes) {
@@ -25,7 +25,7 @@ function formatGraph(graph: OrchestratorGraph | undefined): string {
     }
   }
   if (graph.loops?.length) {
-    lines.push('- Loops (respect max_iterations):');
+    lines.push('- Loops (hard max_iterations — Gateway enforces):');
     for (const l of graph.loops) {
       lines.push(
         `  - \`${l.from}\` ↻ \`${l.to}\` max ${l.max_iterations}${l.when ? ` when ${l.when}` : ''}`,
@@ -53,11 +53,13 @@ export function composeOrchestratorFiles(input: {
     return `- \`${s.name}\`${role}`;
   });
 
+  const hasGraph = Boolean(input.graph?.nodes?.length);
+
   const appendix = `
 
 ## Multi-agent orchestration (Gateway)
 
-You are an **orchestrator**. Coordinate specialists; do not do their specialized work yourself when a specialist exists.
+You are an **orchestrator** — the only agent the user talks to. Coordinate specialists; do not do their specialized work yourself when a specialist exists.
 
 ### Specialists (send_message destinations)
 ${specialistLines.length ? specialistLines.join('\n') : '- (none registered)'}
@@ -65,11 +67,16 @@ ${specialistLines.length ? specialistLines.join('\n') : '- (none registered)'}
 ${formatGraph(input.graph)}
 
 ### Rules
-1. Talk to the user on the default / \`client\` destination.
+1. Talk to the user on the default / \`client\` destination. Specialists stay invisible to the user.
 2. Delegate tasks with \`send_message\` to a specialist destination name above.
-3. Follow the graph and loop limits. Prefer reuse of prior specialist results over re-asking.
-4. When the goal is met, summarize for the user and stop.
+3. ${
+    hasGraph
+      ? 'The Gateway runs this graph with LangGraph. You may choose among **allowed** next branches (edge `when` labels / node ids / specialist names) and update the plan in conversation. You **must not** invent new nodes, change edges, raise loop limits, or ignore max_iterations.'
+      : 'Follow the graph and loop limits. Prefer reuse of prior specialist results over re-asking.'
+  }
+4. When the goal is met, summarize for the user and stop (choose branch \`complete\` when prompted).
 5. Never invent credentials. Never claim a specialist finished unless you received their reply.
+6. Mid-run user messages are for you — answer status / adjust the plan via allowed branches; do not expose specialist names unless asked.
 `;
 
   const marker = '## Multi-agent orchestration (Gateway)';

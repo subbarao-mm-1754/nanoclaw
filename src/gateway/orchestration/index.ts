@@ -20,6 +20,11 @@ export {
   replaceOrchestratorMembers,
   saveOrchestratorGraph,
 } from './store.js';
+export {
+  startLangGraphNudgeLoop,
+  stopLangGraphNudgeLoop,
+  isLangGraphOrchestrator,
+} from './langgraph/index.js';
 export type {
   AgentKind,
   OrchestratorGraph,

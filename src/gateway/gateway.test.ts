@@ -309,6 +309,53 @@ describe('gateway processor', () => {
     expect(getMessage('msg-out-cb')).toBeNull();
   });
 
+  it('delivers collector outbound with multipart file buffers', async () => {
+    const { handleWorkerOutboundCallback } = await import('./outbound-callback.js');
+    registerWorkspace({
+      workspace_id: 'ws-1',
+      agent_group_id: 'ag-1',
+      name: 'Test Agent',
+      is_default: true,
+    });
+    const conv = getOrCreateConversation({
+      channel_type: 'http',
+      platform_id: 'client-1',
+      thread_id: null,
+    });
+
+    const pdf = Buffer.from('%PDF-test');
+    const result = await handleWorkerOutboundCallback({
+      workspace_id: 'ws-1',
+      session_id: conv.session_id,
+      agent_group_id: 'ag-1',
+      conversation_id: conv.id,
+      job_id: 'job-file',
+      outbound: [
+        {
+          id: 'msg-out-file',
+          kind: 'chat',
+          channel_type: 'http',
+          platform_id: 'client-1',
+          thread_id: null,
+          content: { text: 'PDF attached', files: ['trip.pdf'] },
+          files: [{ filename: 'trip.pdf' }],
+          file_buffers: [{ filename: 'trip.pdf', data: pdf }],
+        },
+      ],
+    });
+
+    expect(result.delivered).toBe(1);
+    expect(deliverOutboundMessageMock).toHaveBeenCalledTimes(1);
+    const deliveredArg = deliverOutboundMessageMock.mock.calls[0]![0];
+    expect(deliveredArg.files_json).toBeTruthy();
+    const files = JSON.parse(deliveredArg.files_json as string) as Array<{
+      filename: string;
+      data_base64: string;
+    }>;
+    expect(files[0].filename).toBe('trip.pdf');
+    expect(Buffer.from(files[0].data_base64, 'base64').toString()).toBe('%PDF-test');
+  });
+
   it('marks inbound failed when worker returns non-completed status', async () => {
     registerWorkspace({
       workspace_id: 'ws-1',

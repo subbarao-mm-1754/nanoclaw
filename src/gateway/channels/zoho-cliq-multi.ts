@@ -383,6 +383,10 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
       }
 
       const text = (content.markdown as string) || (content.text as string);
+      let messageId: string | undefined;
+
+      // Send caption text first, then attachments. Do not return early after
+      // text — otherwise files on the same outbound message are never uploaded.
       if (text) {
         const token = await ensureCliqAccessToken(account.connectionId);
         const sendUrl = `${account.channelEndpoint}?bot_unique_name=${encodeURIComponent(account.botUniqueName)}`;
@@ -398,7 +402,6 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
           const body = await res.text();
           throw new Error(`Zoho Cliq bot send failed (${res.status}): ${body}`);
         }
-        let messageId: string | undefined;
         try {
           const data = (await res.json()) as { message_id?: string };
           messageId = data.message_id;
@@ -417,13 +420,12 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
           chatId,
           messageId: messageId ?? null,
         });
-        return messageId;
       }
 
       if (message.files?.length) {
         for (const file of message.files) {
           const formData = new FormData();
-          formData.append('file', new Blob([file.data]), file.filename);
+          formData.append('file', new Blob([new Uint8Array(file.data)]), file.filename);
           const token = await ensureCliqAccessToken(account.connectionId);
           const res = await fetch(`${account.apiBase}/api/v2/chats/${chatId}/files`, {
             method: 'POST',
@@ -431,12 +433,25 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
             body: formData,
           });
           if (!res.ok) {
-            log.warn('Zoho Cliq multi file upload failed', { chatId, status: res.status });
+            const body = await res.text().catch(() => '');
+            log.warn('Zoho Cliq multi file upload failed', {
+              chatId,
+              filename: file.filename,
+              status: res.status,
+              body: body.slice(0, 200),
+            });
+          } else {
+            log.info('Zoho Cliq multi file uploaded', {
+              connectionId: account.connectionId,
+              chatId,
+              filename: file.filename,
+              bytes: file.data.length,
+            });
           }
         }
       }
 
-      return undefined;
+      return messageId;
     },
 
     async syncConversations(): Promise<ConversationInfo[]> {

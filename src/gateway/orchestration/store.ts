@@ -163,6 +163,7 @@ export function getOrchestrationRun(id: string): OrchestrationRun | null {
 export function getActiveOrchestrationRun(
   orchestratorWorkspaceId: string,
   conversationId?: string | null,
+  options?: { fallbackToAny?: boolean },
 ): OrchestrationRun | null {
   if (conversationId) {
     const row = getGatewayDb()
@@ -174,6 +175,7 @@ export function getActiveOrchestrationRun(
       )
       .get(orchestratorWorkspaceId, conversationId) as Record<string, unknown> | undefined;
     if (row) return rowToRun(row);
+    if (options?.fallbackToAny === false) return null;
   }
   const row = getGatewayDb()
     .prepare(

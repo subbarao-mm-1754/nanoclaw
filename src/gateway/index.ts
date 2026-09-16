@@ -23,6 +23,7 @@ import { initGatewayDb, closeGatewayDb } from './db/connection.js';
 import { startMessageProcessor, stopMessageProcessor } from './processor.js';
 import { startGatewayServer, stopGatewayServer } from './server.js';
 import { getWorkspace, registerWorkspace } from './store/workspaces.js';
+import { startLangGraphNudgeLoop, stopLangGraphNudgeLoop } from './orchestration/langgraph/index.js';
 
 function seedDefaultWorkspace(): void {
   if (!GATEWAY_DEFAULT_WORKSPACE_ID) return;
@@ -54,12 +55,14 @@ async function main(): Promise<void> {
   await startGatewayServer();
   await startGatewayChannels();
   startMessageProcessor(GATEWAY_PROCESS_INTERVAL_MS);
+  startLangGraphNudgeLoop();
 
   log.info('NanoClaw gateway ready');
 }
 
 async function shutdown(signal: string): Promise<void> {
   log.info('Gateway shutdown signal received', { signal });
+  stopLangGraphNudgeLoop();
   stopMessageProcessor();
   await stopGatewayChannels();
   await stopGatewayServer();

@@ -41,9 +41,10 @@ async function processOneInbound(): Promise<boolean> {
       await import('./orchestration/index.js');
     const goalText =
       typeof content.text === 'string' ? content.text : JSON.stringify(content);
-    ensureOrchestrationRunForUserMessage({
+    await ensureOrchestrationRunForUserMessage({
       workspaceId: conversation.workspace_id,
       conversationId: conversation.id,
+      sessionId: conversation.session_id,
       goalText,
     });
 

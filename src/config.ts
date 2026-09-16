@@ -26,6 +26,7 @@ const envConfig = readEnvFile([
   'WORKER_BUILD_TURN_TIMEOUT_MS',
   'WORKER_BUILD_PROGRESS_INTERVAL_MS',
   'WORKER_BUILD_TURN_MAX_MS',
+  'WORKER_OUTBOUND_FILE_MAX_BYTES',
   'WORKER_JOB_TIMEOUT_MS',
 ]);
 
@@ -93,6 +94,16 @@ export const WORKER_HOST = process.env.WORKER_HOST || '127.0.0.1';
 export const WORKER_PORT = parseInt(process.env.WORKER_PORT || '8080', 10);
 export const WORKER_AUTH_TOKEN = process.env.WORKER_AUTH_TOKEN || '';
 export const WORKER_MAX_BODY_BYTES = parseInt(process.env.WORKER_MAX_BODY_BYTES || '1048576', 10); // 1MB
+/** Max size per outbound file attachment (Worker → Gateway multipart). Default 50MB. */
+export const WORKER_OUTBOUND_FILE_MAX_BYTES = parseInt(
+  process.env.WORKER_OUTBOUND_FILE_MAX_BYTES ||
+    envConfig.WORKER_OUTBOUND_FILE_MAX_BYTES ||
+    String(50 * 1024 * 1024),
+  10,
+);
+/** Max total multipart upload body (metadata + all file parts). */
+export const WORKER_OUTBOUND_UPLOAD_MAX_BYTES =
+  WORKER_OUTBOUND_FILE_MAX_BYTES + 2 * 1024 * 1024;
 export const WORKER_JOB_TIMEOUT_MS = parseInt(
   process.env.WORKER_JOB_TIMEOUT_MS || envConfig.WORKER_JOB_TIMEOUT_MS || '120000',
   10,

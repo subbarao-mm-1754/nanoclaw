@@ -3,6 +3,7 @@ import {
   WORKER_AUTH_TOKEN,
   WORKER_OUTBOUND_COLLECT_POLL_MS,
   WORKER_OUTBOUND_POST_STOP_GRACE_MS,
+  WORKER_OUTBOUND_FILE_MAX_BYTES,
 } from '../config.js';
 import {
   getDeliveredIds,
@@ -23,6 +24,7 @@ import type {
 } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
 import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
+import { buildOutboundMultipartBody, type OutboundMultipartFilePart } from './outbound-multipart.js';
 
 const POST_STOP_GRACE_MS = WORKER_OUTBOUND_POST_STOP_GRACE_MS;
 const POLL_MS = WORKER_OUTBOUND_COLLECT_POLL_MS;
@@ -84,11 +86,46 @@ function resolveSystemNotifyDelivery(
   return null;
 }
 
-function encodeFiles(files: Array<{ filename: string; data: Buffer }>): WorkerCollectedOutbound['files'] {
-  return files.map((f) => ({
-    filename: f.filename,
-    data_base64: f.data.toString('base64'),
-  }));
+export interface DrainOutboundOptions {
+  /** When false, rows are returned but not marked delivered (commit after gateway ack). */
+  markDelivered?: boolean;
+}
+
+function assertFileSizeOk(filename: string, data: Buffer): void {
+  if (data.length > WORKER_OUTBOUND_FILE_MAX_BYTES) {
+    throw new Error(
+      `Outbound file ${filename} exceeds WORKER_OUTBOUND_FILE_MAX_BYTES (${WORKER_OUTBOUND_FILE_MAX_BYTES})`,
+    );
+  }
+}
+
+/** Mark outbound rows delivered after Gateway accepts the push. */
+export function commitOutboundBatch(
+  agentGroupId: string,
+  sessionId: string,
+  items: WorkerCollectedOutbound[],
+): void {
+  if (items.length === 0) return;
+  let inDb;
+  try {
+    inDb = openInboundDb(agentGroupId, sessionId);
+  } catch {
+    return;
+  }
+  try {
+    migrateDeliveredTable(inDb);
+    for (const item of items) {
+      markDelivered(inDb, item.id, null);
+      const declared =
+        item.file_buffers?.map((f) => f.filename) ??
+        (Array.isArray(item.content.files) ? (item.content.files as string[]) : []);
+      if (declared.length > 0) {
+        clearOutbox(agentGroupId, sessionId, item.id);
+      }
+    }
+  } finally {
+    inDb.close();
+  }
 }
 
 /**
@@ -103,7 +140,9 @@ export async function drainOutboundBatch(
   sessionId: string,
   delivery: WorkerDelivery | null,
   skipIds: Set<string> = new Set(),
+  opts: DrainOutboundOptions = {},
 ): Promise<WorkerCollectedOutbound[]> {
+  const shouldMarkDelivered = opts.markDelivered ?? true;
   const results: WorkerCollectedOutbound[] = [];
   let outDb;
   let inDb;
@@ -185,6 +224,11 @@ export async function drainOutboundBatch(
       const fileBuffers = declaredFiles.length
         ? readOutboxFiles(agentGroupId, sessionId, msg.id, declaredFiles)
         : undefined;
+      if (fileBuffers) {
+        for (const f of fileBuffers) {
+          assertFileSizeOk(f.filename, f.data);
+        }
+      }
 
       results.push({
         id: msg.id,
@@ -193,12 +237,15 @@ export async function drainOutboundBatch(
         platform_id: msg.platform_id,
         thread_id: msg.thread_id,
         content,
-        files: fileBuffers ? encodeFiles(fileBuffers) : undefined,
+        files: fileBuffers?.map((f) => ({ filename: f.filename })),
+        file_buffers: fileBuffers,
       });
 
-      markDelivered(inDb, msg.id, null);
-      if (declaredFiles.length > 0) {
-        clearOutbox(agentGroupId, sessionId, msg.id);
+      if (shouldMarkDelivered) {
+        markDelivered(inDb, msg.id, null);
+        if (declaredFiles.length > 0) {
+          clearOutbox(agentGroupId, sessionId, msg.id);
+        }
       }
     }
   } finally {
@@ -265,15 +312,61 @@ export async function collectOutboundMessages(opts: CollectOutboundOptions): Pro
   return collected;
 }
 
+function stripFileBuffersForJson(
+  outbound: WorkerCollectedOutbound[],
+): WorkerCollectedOutbound[] {
+  return outbound.map((row) => {
+    const { file_buffers: _buffers, ...rest } = row;
+    return {
+      ...rest,
+      files: row.file_buffers?.map((f) => ({ filename: f.filename })) ?? row.files,
+    };
+  });
+}
+
+function collectMultipartFileParts(
+  outbound: WorkerCollectedOutbound[],
+): OutboundMultipartFilePart[] {
+  const parts: OutboundMultipartFilePart[] = [];
+  for (const row of outbound) {
+    for (const file of row.file_buffers ?? []) {
+      parts.push({
+        messageId: row.id,
+        filename: file.filename,
+        data: file.data,
+      });
+    }
+  }
+  return parts;
+}
+
 async function postOutboundToGateway(payload: WorkerOutboundCallbackPayload): Promise<void> {
   const url = `${GATEWAY_PUBLIC_URL.replace(/\/$/, '')}/v1/worker/callbacks/outbound`;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const fileParts = collectMultipartFileParts(payload.outbound ?? []);
+  const headers: Record<string, string> = {};
   if (WORKER_AUTH_TOKEN) headers.Authorization = `Bearer ${WORKER_AUTH_TOKEN}`;
+
+  let body: Buffer | string;
+  if (fileParts.length > 0) {
+    const metadata: WorkerOutboundCallbackPayload = {
+      ...payload,
+      outbound: stripFileBuffersForJson(payload.outbound ?? []),
+    };
+    const multipart = buildOutboundMultipartBody(metadata, fileParts);
+    headers['Content-Type'] = multipart.contentType;
+    body = multipart.body;
+  } else {
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify({
+      ...payload,
+      outbound: stripFileBuffersForJson(payload.outbound ?? []),
+    });
+  }
 
   const res = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify(payload),
+    body,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -363,11 +456,14 @@ async function tickCollector(collector: ActiveCollector): Promise<void> {
       collector.agentGroupId,
       collector.sessionId,
       null, // deliver all addressed chat rows for this session
+      new Set(),
+      { markDelivered: false },
     );
     if (batch.length > 0) {
       collector.emptyPolls = 0;
       try {
         await pushCollected(collector, batch);
+        commitOutboundBatch(collector.agentGroupId, collector.sessionId, batch);
       } catch (err) {
         log.error('Worker outbound collector gateway push failed', {
           sessionId: collector.sessionId,
@@ -433,6 +529,8 @@ async function finalizeCollector(sessionId: string, reason: string): Promise<voi
       collector.agentGroupId,
       collector.sessionId,
       null,
+      new Set(),
+      { markDelivered: false },
     );
     const memoryPatch = buildMemoryPatch(collector);
     if (batch.length > 0 || memoryPatch) {
@@ -446,6 +544,7 @@ async function finalizeCollector(sessionId: string, reason: string): Promise<voi
         outbound: batch,
         memory_patch: memoryPatch,
       });
+      commitOutboundBatch(collector.agentGroupId, collector.sessionId, batch);
     }
   } catch (err) {
     log.error('Worker outbound collector finalize failed', { sessionId, reason, err });
