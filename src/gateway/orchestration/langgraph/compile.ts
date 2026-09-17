@@ -73,6 +73,36 @@ function resultsSummary(state: OrchestrationGraphState): Record<string, string> 
   return out;
 }
 
+function predecessors(graph: OrchestratorGraph, nodeId: string): string[] {
+  const preds: string[] = [];
+  for (const e of graph.edges ?? []) {
+    if (e.to === nodeId) preds.push(e.from);
+  }
+  return preds;
+}
+
+function hasNodeResult(state: OrchestrationGraphState, nodeId: string): boolean {
+  return Boolean(state.results?.[nodeId]);
+}
+
+/**
+ * If `to` is a join (multiple inbound edges), require sibling predecessors to have
+ * results first — otherwise return the first missing sibling node id.
+ */
+function resolveJoinOrNext(
+  graph: OrchestratorGraph,
+  to: string,
+  from: string,
+  state: OrchestrationGraphState,
+): string {
+  const preds = predecessors(graph, to);
+  if (preds.length > 1) {
+    const missing = preds.filter((p) => p !== from && !hasNodeResult(state, p));
+    if (missing.length > 0) return missing[0]!;
+  }
+  return to;
+}
+
 function pickNext(
   graph: OrchestratorGraph,
   from: string,
@@ -80,6 +110,16 @@ function pickNext(
 ): string | typeof END {
   if (state.decision?.complete || state.branch === 'complete') return END;
   if (state.branch === 'status') return HANDLE_USER_NODE;
+
+  // Sitting on a join target with unfinished siblings (e.g. assemble before images) —
+  // finish the missing predecessor first instead of parking on handle_user.
+  if (from && from !== HANDLE_USER_NODE) {
+    const predsOfFrom = predecessors(graph, from);
+    if (predsOfFrom.length > 1) {
+      const missing = predsOfFrom.filter((p) => !hasNodeResult(state, p));
+      if (missing.length > 0) return missing[0]!;
+    }
+  }
 
   const skip = new Set(state.skip_nodes ?? []);
   const succs = successors(graph, from).filter((s) => !skip.has(s.to));
@@ -95,12 +135,14 @@ function pickNext(
         if (count > max) {
           // Loop exhausted — fall through to non-loop successors or END.
           const nonLoop = succs.filter((s) => !s.isLoop && !s.when);
-          if (nonLoop.length === 1) return nonLoop[0]!.to;
+          if (nonLoop.length === 1) {
+            return resolveJoinOrNext(graph, nonLoop[0]!.to, from, state);
+          }
           if (nonLoop.length === 0) return END;
           return HANDLE_USER_NODE;
         }
       }
-      return byWhen.to;
+      return resolveJoinOrNext(graph, byWhen.to, from, state);
     }
     const byTo = succs.find((s) => s.to === branch);
     if (byTo) {
@@ -110,19 +152,63 @@ function pickNext(
         const max = byTo.maxIterations ?? 2;
         if (count > max) {
           const nonLoop = succs.filter((s) => !s.isLoop);
-          if (nonLoop.length === 1) return nonLoop[0]!.to;
+          if (nonLoop.length === 1) {
+            return resolveJoinOrNext(graph, nonLoop[0]!.to, from, state);
+          }
           return END;
         }
       }
-      return byTo.to;
+      return resolveJoinOrNext(graph, byTo.to, from, state);
     }
   }
 
   const unconditional = succs.filter((s) => !s.when && !s.isLoop);
-  if (unconditional.length === 1) return unconditional[0]!.to;
+  if (unconditional.length === 1) {
+    return resolveJoinOrNext(graph, unconditional[0]!.to, from, state);
+  }
+  if (unconditional.length > 1) {
+    // Fan-out: auto-advance the first unfinished parallel branch instead of
+    // parking forever on handle_user (TripPlanner research → images + logistics).
+    const pending = unconditional.filter((s) => !hasNodeResult(state, s.to));
+    if (pending.length > 0) return pending[0]!.to;
+    // All parallel children done — prefer their shared join if any.
+    const childTargets = new Set<string>();
+    for (const s of unconditional) {
+      for (const next of successors(graph, s.to)) {
+        if (!next.when && !next.isLoop) childTargets.add(next.to);
+      }
+    }
+    if (childTargets.size === 1) {
+      return resolveJoinOrNext(graph, [...childTargets][0]!, from, state);
+    }
+    return HANDLE_USER_NODE;
+  }
   if (unconditional.length === 0 && succs.length === 0) return END;
-  // Ambiguous — orchestrator must decide.
+  // Ambiguous conditional edges — orchestrator must decide.
   return HANDLE_USER_NODE;
+}
+
+/** Exported for unit tests. */
+export function resolveGraphNext(
+  graph: OrchestratorGraph,
+  from: string,
+  state: Partial<OrchestrationGraphState>,
+): string | typeof END {
+  return pickNext(graph, from, {
+    goal: '',
+    last_user_message: '',
+    user_messages: [],
+    current_node: from,
+    branch: null,
+    decision: null,
+    results: {},
+    loop_counts: {},
+    skip_nodes: [],
+    pending_wait: null,
+    status: 'running',
+    error: null,
+    ...state,
+  } as OrchestrationGraphState);
 }
 
 function bumpLoopCounts(
@@ -230,11 +316,10 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
         last_user_message: resume.text,
         user_messages: [resume.text],
         goal: state.goal || resume.text.slice(0, 2000),
-        current_node: HANDLE_USER_NODE,
+        // Keep graph cursor — do not reset to entry on status/chit-chat.
+        current_node: from,
         pending_wait: null,
         status: 'running' as const,
-        // Stay on handle_user for a follow-up decision interrupt on next tick:
-        // re-enter by routing to self via conditional (branch cleared).
         branch: null,
         decision: null,
       };
@@ -243,7 +328,7 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
     if (resume.kind === 'decision') {
       return {
         ...applyDecisionResume(resume),
-        current_node: HANDLE_USER_NODE,
+        current_node: from,
       };
     }
 
@@ -421,9 +506,6 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
     if (state.status === 'failed' || state.status === 'completed' || state.decision?.complete) {
       return END;
     }
-    if (state.last_user_message && !state.decision && state.branch === null) {
-      return HANDLE_USER_NODE;
-    }
     // From handle_user, route as if from logical current (or entry).
     const from = state.current_node && state.current_node !== HANDLE_USER_NODE
       ? state.current_node
@@ -433,6 +515,18 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
       state.decision && (state.current_node === HANDLE_USER_NODE || !state.results || !Object.keys(state.results).length)
         ? entry
         : from;
+
+    // User chit-chat with no explicit branch: if the graph already has progress and
+    // pickNext can advance (e.g. missing join sibling), auto-continue instead of
+    // re-parking forever on await_decision.
+    if (state.last_user_message && !state.decision && state.branch === null) {
+      const hasProgress = Object.keys(state.results ?? {}).length > 0;
+      if (hasProgress) {
+        const auto = pickNext(graph, from, state);
+        if (auto !== END && auto !== HANDLE_USER_NODE) return auto;
+      }
+      return HANDLE_USER_NODE;
+    }
 
     // First decision with empty results: go to entry (or chosen branch node).
     if (state.decision?.branch) {

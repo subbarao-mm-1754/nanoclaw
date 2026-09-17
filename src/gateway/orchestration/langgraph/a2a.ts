@@ -1,6 +1,7 @@
 /**
  * A2A wake helpers used by the LangGraph runner (same Worker path as soft routing).
  */
+import { createHash } from 'node:crypto';
 import { generateId } from '../../auth.js';
 import { log } from '../../../log.js';
 import { sessionInboundMessageId } from '../../../session-message-id.js';
@@ -14,11 +15,32 @@ import { processMessageOnWorker } from '../../worker-client.js';
 import { extraDestinationsForWorkspace } from '../destinations.js';
 import { listOrchestratorMembers } from '../store.js';
 
+/** Peel accidental `sess-orch-…` nesting back to the user conversation session. */
+export function canonicalUserSessionId(sessionId: string): string {
+  let s = sessionId;
+  while (s.startsWith('sess-orch-')) {
+    const rest = s.slice('sess-orch-'.length);
+    const idx = rest.lastIndexOf('-ws-');
+    if (idx <= 0) break;
+    s = rest.slice(0, idx);
+  }
+  return s;
+}
+
+/**
+ * Stable, short specialist session id (avoids 120-char truncation + sess-orch nesting).
+ */
 export function specialistSessionId(
   orchestratorSessionId: string,
   memberWorkspaceId: string,
 ): string {
-  return `sess-orch-${orchestratorSessionId}-${memberWorkspaceId}`.slice(0, 120);
+  const base = canonicalUserSessionId(orchestratorSessionId);
+  const digest = createHash('sha256')
+    .update(`${base}::${memberWorkspaceId}`)
+    .digest('hex')
+    .slice(0, 20);
+  const shortMember = memberWorkspaceId.replace(/^ws-/, '').slice(0, 10);
+  return `sess-a2a-${shortMember}-${digest}`;
 }
 
 export async function wakeAgentWithText(input: {

@@ -315,6 +315,33 @@ describe('zoho-cliq adapter', () => {
       }
     });
 
+    it('flattens ask_question cards into sendable text', async () => {
+      if (!adapter) return;
+
+      const result = await adapter.deliver('zoho-cliq:chat-abc', null, {
+        content: {
+          type: 'ask_question',
+          questionId: 'q1',
+          title: 'Pick a city',
+          question: 'Which city?',
+          options: ['Jaipur', 'Udaipur'],
+        },
+      } as OutboundMessage);
+
+      const messageCalls = fetchSpy.mock.calls.filter((args: unknown[]) => {
+        const url = typeof args[0] === 'string' ? args[0] : '';
+        return url.includes('/channelsbyname/test-channel/message');
+      });
+      expect(messageCalls.length).toBeGreaterThanOrEqual(1);
+      const body = JSON.parse(String((messageCalls[0]![1] as { body?: string }).body || '{}')) as {
+        text?: string;
+      };
+      expect(body.text).toContain('Pick a city');
+      expect(body.text).toContain('Which city?');
+      expect(body.text).toContain('1. Jaipur');
+      expect(result).toBe('msg-001');
+    });
+
     it('sends a text message and returns message_id', async () => {
       if (!adapter) return; // Skip if adapter didn't initialize
 
@@ -373,22 +400,6 @@ describe('zoho-cliq adapter', () => {
       }
     });
 
-    it('handles edit operations', async () => {
-      if (!adapter) return;
-
-      await adapter.deliver('zoho-cliq:chat-abc', null, {
-        content: { operation: 'edit', messageId: 'msg-existing', text: 'edited text' },
-      } as OutboundMessage);
-
-      const editCalls = fetchSpy.mock.calls.filter((args: unknown[]) => {
-        const url = typeof args[0] === 'string' ? args[0] : '';
-        const opts = args[1] as RequestInit | undefined;
-        return url.includes('/messages/msg-existing') && opts?.method === 'PUT';
-      });
-
-      expect(editCalls.length).toBeGreaterThanOrEqual(1);
-    });
-
     it('handles reaction operations', async () => {
       if (!adapter) return;
 
@@ -402,8 +413,27 @@ describe('zoho-cliq adapter', () => {
       });
 
       expect(reactionCalls.length).toBeGreaterThanOrEqual(1);
+      const reactionUrl = String(reactionCalls[0]![0]);
+      expect(reactionUrl).toContain('/messages/msg-existing/reactions');
+      expect(reactionUrl).not.toContain('bot_unique_name');
     });
 
+    it('handles edit operations without bot_unique_name query', async () => {
+      if (!adapter) return;
+
+      await adapter.deliver('zoho-cliq:chat-abc', null, {
+        content: { operation: 'edit', messageId: 'msg-existing', text: 'edited text' },
+      } as OutboundMessage);
+
+      const editCalls = fetchSpy.mock.calls.filter((args: unknown[]) => {
+        const url = typeof args[0] === 'string' ? args[0] : '';
+        const opts = args[1] as RequestInit | undefined;
+        return url.includes('/messages/msg-existing') && opts?.method === 'PUT';
+      });
+
+      expect(editCalls.length).toBeGreaterThanOrEqual(1);
+      expect(String(editCalls[0]![0])).not.toContain('bot_unique_name');
+    });
     it('posts via channel endpoint with bot_unique_name', async () => {
       if (!adapter) return;
 

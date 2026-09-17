@@ -2,13 +2,16 @@ export {
   compileOrchestratorLangGraph,
   graphFingerprint,
   HANDLE_USER_NODE,
+  resolveGraphNext,
 } from './compile.js';
 export type { CompiledOrchestratorGraph } from './compile.js';
 export {
   invalidateCompiledGraph,
   isLangGraphOrchestrator,
+  isOrchestratorSelfAgent,
   localNameForMember,
   onOrchestratorDecision,
+  onOrchestratorSelfTaskComplete,
   onOrchestratorUserMessage,
   onSpecialistReply,
   resumeTimeout,

@@ -62,6 +62,25 @@ export interface LangGraphRunMeta {
   nudge_count?: number;
   last_delegate_to?: string;
   last_message_id?: string;
+  /** True when await_specialist targets the orchestrator workspace (intake/assemble). */
+  self_task?: boolean;
+}
+
+function normAgentName(s: string): string {
+  return s.trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+/** Agent name refers to the orchestrator itself (not a registered specialist member). */
+export function isOrchestratorSelfAgent(
+  orchestratorWorkspaceId: string,
+  agent: string,
+): boolean {
+  const a = agent.trim().toLowerCase();
+  if (!a || a === 'orchestrator') return true;
+  if (resolveMemberByLocalName(orchestratorWorkspaceId, a)) return false;
+  const orch = getWorkspace(orchestratorWorkspaceId);
+  if (!orch) return false;
+  return normAgentName(orch.name) === normAgentName(a);
 }
 
 async function withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
@@ -197,6 +216,39 @@ async function handleInterruptSideEffects(input: {
   if (interrupt.kind === 'await_specialist') {
     const member = resolveMemberByLocalName(input.orchestratorWorkspaceId, interrupt.agent);
     if (!member) {
+      // intake / assemble are often assigned to the orchestrator agent name (e.g. TripPlanner),
+      // which is not in gateway_orchestrator_members — wake the orchestrator session instead.
+      if (isOrchestratorSelfAgent(input.orchestratorWorkspaceId, interrupt.agent)) {
+        const selfInterrupt: InterruptPayload = { ...interrupt, self: true };
+        persistInterrupt(run, selfInterrupt, {
+          fingerprint: getCompiled(input.orchestratorWorkspaceId)?.fingerprint ?? '',
+          self_task: true,
+        });
+        appendOrchestrationEvent(run.id, 'delegate_self', {
+          agent: interrupt.agent,
+          node_id: interrupt.node_id,
+        });
+        const text = [
+          `[LangGraph] Your turn — node "${interrupt.node_id}" (you are the assigned agent).`,
+          `Goal: ${interrupt.goal || '(none)'}`,
+          '',
+          interrupt.task_packet,
+          '',
+          'Do this work now and reply to the user with the deliverable.',
+          'When finished, the graph will advance automatically from your chat reply.',
+          'To skip or revise, send_message to an allowed specialist, or choose complete / needs_revision.',
+        ].join('\n');
+        await wakeWorkspaceSession({
+          workspaceId: orch.workspace_id,
+          sessionId: input.orchestratorSessionId,
+          agentGroupId: orch.agent_group_id,
+          conversationId: input.conversationId,
+          text,
+          inboundMessageId: generateId('lgself'),
+        });
+        return;
+      }
+
       log.warn('LangGraph: specialist not in members', {
         runId: run.id,
         agent: interrupt.agent,
@@ -233,6 +285,7 @@ async function handleInterruptSideEffects(input: {
       persistInterrupt(latest, interrupt, {
         last_delegate_to: member.member_workspace_id,
         last_message_id: messageId,
+        self_task: false,
       });
     }
     return;
@@ -286,7 +339,76 @@ async function invokeOrResume(input: {
 
   let result: unknown;
   if (input.resume) {
-    result = await compiled.app.invoke(new Command({ resume: input.resume }), cfg);
+    try {
+      result = await compiled.app.invoke(new Command({ resume: input.resume }), cfg);
+    } catch (err) {
+      // Gateway restart drops MemorySaver checkpoints — rebuild from DB state.
+      log.warn('LangGraph resume failed; re-invoking from stored run state', {
+        runId: run.id,
+        err,
+      });
+      const stored = parseRunState(run);
+      const summary =
+        (
+          stored.langgraph as
+            | { interrupt?: { results_summary?: Record<string, string>; node_id?: string } }
+            | undefined
+        )?.interrupt?.results_summary || {};
+      const hydratedResults: OrchestrationGraphState['results'] = {
+        ...((stored.results as OrchestrationGraphState['results']) || {}),
+      };
+      for (const [k, v] of Object.entries(summary)) {
+        if (!hydratedResults[k]) {
+          hydratedResults[k] = {
+            text: String(v),
+            from_agent: k,
+            at: new Date().toISOString(),
+          };
+        }
+      }
+      const seed: Partial<OrchestrationGraphState> = {
+        goal: run.goal ?? '',
+        last_user_message:
+          input.resume.kind === 'user'
+            ? input.resume.text
+            : String(stored.last_user_message || ''),
+        user_messages:
+          input.resume.kind === 'user' ? [input.resume.text] : [],
+        current_node: (run.current_node as string) || HANDLE_USER_NODE,
+        results: hydratedResults,
+        loop_counts: (stored.loop_counts as Record<string, number>) || {},
+        skip_nodes: (stored.skip_nodes as string[]) || [],
+        status: 'running',
+        branch: null,
+        decision: null,
+      };
+      if (input.resume.kind === 'specialist') {
+        const nodeId =
+          (stored.langgraph as { interrupt?: { node_id?: string } } | undefined)?.interrupt
+            ?.node_id || run.current_node || 'inbox';
+        seed.results = {
+          ...seed.results,
+          [nodeId]: {
+            text: input.resume.text,
+            from_agent: input.resume.from_agent,
+            message_id: input.resume.message_id,
+            at: new Date().toISOString(),
+            partial: input.resume.partial,
+          },
+        };
+        seed.current_node = nodeId;
+      }
+      if (input.resume.kind === 'decision') {
+        seed.decision = {
+          branch: input.resume.branch,
+          task_packet: input.resume.task_packet,
+          skip_nodes: input.resume.skip_nodes,
+          complete: input.resume.complete,
+        };
+        seed.branch = input.resume.branch;
+      }
+      result = await compiled.app.invoke(seed, cfg);
+    }
   } else {
     result = await compiled.app.invoke(
       {
@@ -364,6 +486,21 @@ export async function onOrchestratorUserMessage(input: {
     let run = getActiveOrchestrationRun(input.workspaceId, input.conversationId, {
       fallbackToAny: false,
     });
+
+    // Soft runs created before LangGraph have no engine meta / interrupt. Close them
+    // so the hard runner can own the next turn (otherwise we only annotate events).
+    if (run) {
+      const meta = metaFromRun(run);
+      if (!meta || meta.engine !== 'langgraph') {
+        updateOrchestrationRun(run.id, { status: 'completed' });
+        appendOrchestrationEvent(run.id, 'completed', {
+          reason: 'superseded_by_langgraph',
+          note: 'Closed stale soft-orchestration run so LangGraph can start fresh',
+        });
+        run = null;
+      }
+    }
+
     if (!run) {
       run = createOrchestrationRun({
         orchestrator_workspace_id: input.workspaceId,
@@ -466,31 +603,71 @@ export async function onSpecialistReply(input: {
   if (!run) return false;
 
   const meta = metaFromRun(run);
+  const members = listOrchestratorMembers(input.orchestratorWorkspaceId);
+  const fromMember = members.find((m) => m.member_workspace_id === input.fromWorkspaceId);
+  const fromName = (input.fromLocalName || fromMember?.local_name || '').toLowerCase();
+
   if (!meta?.interrupt || meta.interrupt.kind !== 'await_specialist') {
-    // Not in a hard wait — let soft routing wake the orchestrator container.
+    // Graph already moved on (or soft path wiped interrupt meta) — keep the result.
+    await recordLateSpecialistReply({
+      run,
+      fromWorkspaceId: input.fromWorkspaceId,
+      fromLocalName: fromName || undefined,
+      text: input.text,
+      messageId: input.messageId,
+    });
     return false;
   }
 
   const expectedAgent = meta.interrupt.agent;
-  const members = listOrchestratorMembers(input.orchestratorWorkspaceId);
-  const fromMember = members.find((m) => m.member_workspace_id === input.fromWorkspaceId);
-  const fromName = (input.fromLocalName || fromMember?.local_name || '').toLowerCase();
   if (expectedAgent && fromName && expectedAgent !== fromName) {
-    log.info('LangGraph: specialist reply from unexpected agent (still accepting)', {
+    // Do not resume the wrong node with another specialist's payload (this is what
+    // stamped logistics text onto assemble after tripplanner member_not_found).
+    log.info('LangGraph: rejecting specialist reply from unexpected agent', {
       runId: run.id,
       expectedAgent,
       fromName,
     });
+    await recordLateSpecialistReply({
+      run,
+      fromWorkspaceId: input.fromWorkspaceId,
+      fromLocalName: fromName || undefined,
+      text: input.text,
+      messageId: input.messageId,
+    });
+    appendOrchestrationEvent(run.id, 'specialist_reply_rejected', {
+      from_workspace_id: input.fromWorkspaceId,
+      expected_agent: expectedAgent,
+      from_agent: fromName,
+    });
+    return false;
   }
 
   await withRunLock(run.id, async () => {
+    const nodeId = meta.interrupt!.node_id;
+    const prev = parseRunState(run);
+    updateOrchestrationRun(run.id, {
+      state: mergeRunState(run, {
+        results: {
+          ...((prev.results as Record<string, unknown>) || {}),
+          [nodeId]: {
+            text: input.text,
+            from_agent: fromName || expectedAgent || 'specialist',
+            message_id: input.messageId,
+            at: new Date().toISOString(),
+          },
+        },
+      }),
+    });
     appendOrchestrationEvent(run.id, 'specialist_reply', {
       from_workspace_id: input.fromWorkspaceId,
       message_id: input.messageId,
       engine: 'langgraph',
+      node_id: nodeId,
     });
+    const latest = getOrchestrationRun(run.id) ?? run;
     await invokeOrResume({
-      run,
+      run: latest,
       compiled,
       resume: {
         kind: 'specialist',
@@ -498,12 +675,113 @@ export async function onSpecialistReply(input: {
         from_agent: fromName || expectedAgent || 'specialist',
         message_id: input.messageId,
       },
-      orchestratorSessionId: input.orchestratorSessionId,
+      orchestratorSessionId: meta.orchestrator_session_id || input.orchestratorSessionId,
       conversationId: input.conversationId,
     });
   });
 
   return true;
+}
+
+/**
+ * Orchestrator finished an intake/assemble (self) node by sending a user-facing chat reply.
+ * Resumes await_specialist and lets the graph auto-advance.
+ */
+export async function onOrchestratorSelfTaskComplete(input: {
+  orchestratorWorkspaceId: string;
+  conversationId?: string | null;
+  orchestratorSessionId: string;
+  text: string;
+  messageId?: string;
+}): Promise<boolean> {
+  if (!isMultiAgentOrchestrationEnabled()) return false;
+  const compiled = getCompiled(input.orchestratorWorkspaceId);
+  if (!compiled) return false;
+
+  const run = getActiveOrchestrationRun(
+    input.orchestratorWorkspaceId,
+    input.conversationId,
+    { fallbackToAny: input.conversationId ? false : true },
+  );
+  if (!run) return false;
+
+  const meta = metaFromRun(run);
+  if (!meta?.interrupt || meta.interrupt.kind !== 'await_specialist') return false;
+  if (!meta.interrupt.self && !meta.self_task) return false;
+  if (!isOrchestratorSelfAgent(input.orchestratorWorkspaceId, meta.interrupt.agent)) {
+    return false;
+  }
+
+  const nodeId = meta.interrupt.node_id;
+  const agent = meta.interrupt.agent || 'orchestrator';
+
+  await withRunLock(run.id, async () => {
+    const prev = parseRunState(run);
+    updateOrchestrationRun(run.id, {
+      state: mergeRunState(run, {
+        results: {
+          ...((prev.results as Record<string, unknown>) || {}),
+          [nodeId]: {
+            text: input.text,
+            from_agent: agent,
+            message_id: input.messageId,
+            at: new Date().toISOString(),
+          },
+        },
+      }),
+    });
+    appendOrchestrationEvent(run.id, 'self_task_complete', {
+      node_id: nodeId,
+      agent,
+      message_id: input.messageId ?? null,
+    });
+    const latest = getOrchestrationRun(run.id) ?? run;
+    await invokeOrResume({
+      run: latest,
+      compiled,
+      resume: {
+        kind: 'specialist',
+        text: input.text,
+        from_agent: agent,
+        message_id: input.messageId,
+      },
+      orchestratorSessionId: meta.orchestrator_session_id || input.orchestratorSessionId,
+      conversationId: input.conversationId,
+    });
+  });
+
+  return true;
+}
+
+async function recordLateSpecialistReply(input: {
+  run: import('../types.js').OrchestrationRun;
+  fromWorkspaceId: string;
+  fromLocalName?: string;
+  text: string;
+  messageId: string;
+}): Promise<void> {
+  const prev = parseRunState(input.run);
+  const key = input.fromLocalName || input.fromWorkspaceId;
+  appendOrchestrationEvent(input.run.id, 'late_specialist_reply', {
+    from_workspace_id: input.fromWorkspaceId,
+    message_id: input.messageId,
+    note: 'Reply arrived after graph left await_specialist (or state was clobbered)',
+  });
+  updateOrchestrationRun(input.run.id, {
+    state: {
+      ...prev,
+      results: {
+        ...((prev.results as Record<string, unknown>) || {}),
+        [key]: {
+          text: input.text,
+          from_agent: input.fromLocalName || key,
+          message_id: input.messageId,
+          at: new Date().toISOString(),
+          late: true,
+        },
+      },
+    },
+  });
 }
 
 /**
@@ -535,9 +813,52 @@ export async function onOrchestratorDecision(input: {
   if (!run) return { handled: false, autoDelegating: false };
 
   const meta = metaFromRun(run);
-  if (!meta?.interrupt) return { handled: false, autoDelegating: false };
+  if (!meta?.interrupt) {
+    // Soft run (or lost MemorySaver interrupt) — reclaim so soft A2A loops cannot
+    // own the conversation and starve Cliq replies.
+    if (!meta || meta.engine !== 'langgraph') {
+      updateOrchestrationRun(run.id, { status: 'completed' });
+      appendOrchestrationEvent(run.id, 'completed', {
+        reason: 'superseded_by_langgraph_reclaim',
+        note: 'Closed soft/interrupt-less run on orchestrator decision',
+      });
+      const fresh = await onOrchestratorUserMessage({
+        workspaceId: input.orchestratorWorkspaceId,
+        conversationId: input.conversationId || run.conversation_id || 'unknown',
+        sessionId: input.orchestratorSessionId,
+        goalText: input.taskPacket || run.goal || input.branch,
+      });
+      if (fresh) {
+        return onOrchestratorDecision(input);
+      }
+    }
+    return { handled: false, autoDelegating: false };
+  }
   if (meta.interrupt.kind === 'await_specialist') {
-    // Mid-wait redirect: allowed (cancel / skip) via decision resume.
+    // Hard wait: do not abandon the specialist because the orchestrator LLM
+    // send_message'd someone else. Only same-node / status / complete may resume.
+    const waitingAgent = (meta.interrupt.agent || '').toLowerCase();
+    const waitingNode = meta.interrupt.node_id.toLowerCase();
+    const branch = input.branch.trim().toLowerCase();
+    const sameWait =
+      branch === waitingAgent ||
+      branch === waitingNode ||
+      branch === 'status' ||
+      branch === 'complete';
+    if (!sameWait) {
+      appendOrchestrationEvent(run.id, 'decision_ignored_while_waiting', {
+        branch: input.branch,
+        waiting_node: meta.interrupt.node_id,
+        waiting_agent: meta.interrupt.agent,
+      });
+      log.info('LangGraph: ignoring orchestrator branch while waiting on specialist', {
+        runId: run.id,
+        branch: input.branch,
+        waitingNode: meta.interrupt.node_id,
+        waitingAgent: meta.interrupt.agent,
+      });
+      return { handled: true, autoDelegating: false };
+    }
   } else if (
     meta.interrupt.kind === 'await_decision' ||
     meta.interrupt.kind === 'await_user'
@@ -686,12 +1007,41 @@ export async function resumeTimeout(
   if (!meta?.interrupt) return;
 
   if (action === 'nudge' && meta.interrupt.kind === 'await_specialist') {
+    const orch = getWorkspace(run.orchestrator_workspace_id);
+    if (!orch) return;
+
+    if (meta.interrupt.self || meta.self_task || isOrchestratorSelfAgent(run.orchestrator_workspace_id, meta.interrupt.agent)) {
+      const nudgeText = [
+        'NUDGE: Please finish the orchestrator task below (partial deliverable is OK) and reply to the user.',
+        'Original task:',
+        meta.interrupt.task_packet,
+      ].join('\n');
+      await wakeWorkspaceSession({
+        workspaceId: orch.workspace_id,
+        sessionId: opts?.orchestratorSessionId || meta.orchestrator_session_id || `sess-nudge-${run.id}`,
+        agentGroupId: orch.agent_group_id,
+        conversationId: run.conversation_id,
+        text: nudgeText,
+        inboundMessageId: generateId('lgnudge'),
+      });
+      appendOrchestrationEvent(run.id, 'nudge', {
+        agent: meta.interrupt.agent,
+        node_id: meta.interrupt.node_id,
+        self: true,
+      });
+      updateOrchestrationRun(run.id, {
+        state: mergeRunState(run, {
+          langgraph: { ...meta, nudge_count: (meta.nudge_count ?? 0) + 1 },
+        }),
+      });
+      return;
+    }
+
     const member = resolveMemberByLocalName(
       run.orchestrator_workspace_id,
       meta.interrupt.agent,
     );
-    const orch = getWorkspace(run.orchestrator_workspace_id);
-    if (member && orch) {
+    if (member) {
       const nudgeText = [
         'NUDGE: Please return whatever result you have now (partial is OK).',
         'Original task:',

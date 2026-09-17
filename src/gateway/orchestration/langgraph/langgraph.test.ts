@@ -19,6 +19,7 @@ import {
   onOrchestratorDecision,
   onOrchestratorUserMessage,
   onSpecialistReply,
+  resolveGraphNext,
 } from './index.js';
 import type { OrchestratorGraph } from '../types.js';
 
@@ -66,6 +67,72 @@ describe('LangGraph orchestration', () => {
   it('returns null for empty graphs (soft mode)', () => {
     expect(compileOrchestratorLangGraph({ nodes: [] })).toBeNull();
     expect(compileOrchestratorLangGraph(null)).toBeNull();
+  });
+
+  it('auto-advances parallel fan-out and join (research → images/logistics → assemble)', () => {
+    const tripGraph: OrchestratorGraph = {
+      entry: 'intake',
+      nodes: [
+        { id: 'intake', agent: 'TripPlanner', type: 'task' },
+        { id: 'research', agent: 'trip-researcher', type: 'task' },
+        { id: 'images', agent: 'scout-images', type: 'task' },
+        { id: 'logistics', agent: 'logistics', type: 'task' },
+        { id: 'assemble', agent: 'TripPlanner', type: 'task' },
+      ],
+      edges: [
+        { from: 'intake', to: 'research' },
+        { from: 'research', to: 'images' },
+        { from: 'research', to: 'logistics' },
+        { from: 'images', to: 'assemble' },
+        { from: 'logistics', to: 'assemble' },
+      ],
+    };
+
+    expect(
+      resolveGraphNext(tripGraph, 'research', {
+        results: { research: { text: 'ok', from_agent: 'trip-researcher', at: '' } },
+      }),
+    ).toBe('images');
+
+    expect(
+      resolveGraphNext(tripGraph, 'images', {
+        results: {
+          research: { text: 'ok', from_agent: 'r', at: '' },
+          images: { text: 'photos', from_agent: 's', at: '' },
+        },
+      }),
+    ).toBe('logistics');
+
+    expect(
+      resolveGraphNext(tripGraph, 'logistics', {
+        results: {
+          research: { text: 'ok', from_agent: 'r', at: '' },
+          images: { text: 'photos', from_agent: 's', at: '' },
+          logistics: { text: 'budget', from_agent: 'l', at: '' },
+        },
+      }),
+    ).toBe('assemble');
+
+    // Join: logistics done but images missing → images first (not assemble / handle_user).
+    expect(
+      resolveGraphNext(tripGraph, 'logistics', {
+        results: {
+          research: { text: 'ok', from_agent: 'r', at: '' },
+          logistics: { text: 'budget', from_agent: 'l', at: '' },
+        },
+      }),
+    ).toBe('images');
+
+    // Already parked on assemble without images → still pull images.
+    expect(
+      resolveGraphNext(tripGraph, 'assemble', {
+        results: {
+          research: { text: 'ok', from_agent: 'r', at: '' },
+          logistics: { text: 'budget', from_agent: 'l', at: '' },
+          assemble: { text: 'bogus', from_agent: 'logistics', at: '' },
+        },
+      }),
+    ).toBe('images');
   });
 
   it('isolates runs per conversation and advances on decisions + specialist replies', async () => {

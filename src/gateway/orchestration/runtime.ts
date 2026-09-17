@@ -25,17 +25,15 @@ import {
   onOrchestratorUserMessage,
   onSpecialistReply,
 } from './langgraph/index.js';
+import { specialistSessionId } from './langgraph/a2a.js';
 import {
   appendOrchestrationEvent,
   createOrchestrationRun,
   getActiveOrchestrationRun,
   getOrchestratorGraph,
+  parseRunState,
   updateOrchestrationRun,
 } from './store.js';
-
-function specialistSessionId(orchestratorSessionId: string, memberWorkspaceId: string): string {
-  return `sess-orch-${orchestratorSessionId}-${memberWorkspaceId}`.slice(0, 120);
-}
 
 function outboundText(msg: WorkerCollectedOutbound): string {
   return typeof msg.content.text === 'string'
@@ -86,22 +84,26 @@ export async function routeAgentOutboundMessages(input: {
       ).listOrchestratorMembers(sourceWs.workspace_id);
       const member = members.find((m) => m.member_agent_group_id === target.agent_group_id);
       const branch = member?.local_name || target.name;
+      const { getActiveOrchestrationRun, parseRunState } = await import('./store.js');
+      const active = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId, {
+        fallbackToAny: false,
+      });
+      const lg = active
+        ? (parseRunState(active).langgraph as { orchestrator_session_id?: string } | undefined)
+        : undefined;
       const decision = await onOrchestratorDecision({
         orchestratorWorkspaceId: sourceWs.workspace_id,
         conversationId: input.conversationId,
-        orchestratorSessionId: input.sourceSessionId,
+        // Never pass nested sess-orch-* ids into the runner — keeps specialist sessions stable.
+        orchestratorSessionId: lg?.orchestrator_session_id || input.sourceSessionId,
         branch,
         taskPacket: text,
       });
-      if (decision.handled && decision.autoDelegating) {
-        // Graph already woke the specialist via await_specialist side-effect.
+      if (decision.handled) {
+        // Graph consumed (or intentionally ignored) this send_message — do not soft-wake
+        // or clobber langgraph state_json.
         skipSoftWake = true;
         routed++;
-      } else if (decision.handled && !decision.autoDelegating) {
-        // Decision consumed (e.g. rejected / routed to another decision node).
-        // Still allow soft wake if the orchestrator explicitly messaged a specialist
-        // outside an auto-delegate interrupt — only skip when rejected.
-        // Keep soft wake for compatibility when graph is waiting on specialist already.
       }
     } else if (
       target.agent_kind === 'orchestrator' &&
@@ -138,37 +140,60 @@ export async function routeAgentOutboundMessages(input: {
     }
 
     // Soft / legacy run tracking when not fully handled by LangGraph auto-path.
+    // CRITICAL: never create/update soft runs for LangGraph orchestrators — that
+    // wipes interrupt meta and leaves TripPlanner stuck in A2A loops with no Cliq reply.
     if (sourceWs?.agent_kind === 'orchestrator' && !skipSoftWake) {
-      let run = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId);
-      if (!run) {
-        const graph = getOrchestratorGraph(sourceWs.workspace_id);
-        run = createOrchestrationRun({
-          orchestrator_workspace_id: sourceWs.workspace_id,
-          conversation_id: input.conversationId,
-          current_node: graph?.entry ?? null,
-          goal: text.slice(0, 500),
+      if (isLangGraphOrchestrator(sourceWs.workspace_id)) {
+        const soft = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId, {
+          fallbackToAny: false,
         });
-      }
-      appendOrchestrationEvent(run.id, 'delegate', {
-        to_workspace_id: target.workspace_id,
-        to_agent_group_id: target.agent_group_id,
-        message_id: msg.id,
-      });
-      updateOrchestrationRun(run.id, {
-        status: 'waiting',
-        state: {
-          last_delegate_to: target.workspace_id,
-          last_message_id: msg.id,
-        },
-      });
-    } else if (target.agent_kind === 'orchestrator' && !skipSoftWake) {
-      const run = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
-      if (run) {
-        appendOrchestrationEvent(run.id, 'specialist_reply', {
-          from_workspace_id: input.sourceWorkspaceId,
+        if (soft) {
+          const st = parseRunState(soft);
+          const engine = (st.langgraph as { engine?: string } | undefined)?.engine;
+          if (engine !== 'langgraph') {
+            updateOrchestrationRun(soft.id, { status: 'completed' });
+            appendOrchestrationEvent(soft.id, 'completed', {
+              reason: 'close_soft_under_langgraph',
+              note: 'Soft run was stealing the conversation from LangGraph',
+            });
+          }
+        }
+        // Fall through to A2A wake below without soft DB tracking.
+      } else {
+        let run = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId);
+        if (!run) {
+          const graph = getOrchestratorGraph(sourceWs.workspace_id);
+          run = createOrchestrationRun({
+            orchestrator_workspace_id: sourceWs.workspace_id,
+            conversation_id: input.conversationId,
+            current_node: graph?.entry ?? null,
+            goal: text.slice(0, 500),
+          });
+        }
+        appendOrchestrationEvent(run.id, 'delegate', {
+          to_workspace_id: target.workspace_id,
+          to_agent_group_id: target.agent_group_id,
           message_id: msg.id,
         });
-        updateOrchestrationRun(run.id, { status: 'running' });
+        updateOrchestrationRun(run.id, {
+          status: 'waiting',
+          state: {
+            ...parseRunState(run),
+            last_delegate_to: target.workspace_id,
+            last_message_id: msg.id,
+          },
+        });
+      }
+    } else if (target.agent_kind === 'orchestrator' && !skipSoftWake) {
+      if (!isLangGraphOrchestrator(target.workspace_id)) {
+        const run = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
+        if (run) {
+          appendOrchestrationEvent(run.id, 'specialist_reply', {
+            from_workspace_id: input.sourceWorkspaceId,
+            message_id: msg.id,
+          });
+          updateOrchestrationRun(run.id, { status: 'running' });
+        }
       }
     }
 

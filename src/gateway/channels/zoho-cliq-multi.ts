@@ -14,6 +14,7 @@ import type {
   OutboundMessage,
 } from '../../channels/adapter.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
+import { formatAskQuestionAsText } from '../../channels/ask-question.js';
 import { log } from '../../log.js';
 import type { OAuthConnection } from '../integrations/types.js';
 import {
@@ -35,6 +36,44 @@ const CHANNEL_TYPE = ZOHO_CLIQ_PROVIDER_ID;
 const POLL_INTERVAL_MS = 5_000;
 const MAX_MESSAGE_POLLS_PER_CYCLE = 3;
 const MAX_DELIVERED_ID_CACHE = 500;
+/** Retries for transient undici "fetch failed" (DNS/reset/timeout) during poll. */
+const FETCH_TRANSIENT_RETRIES = 2;
+const FETCH_RETRY_DELAY_MS = 400;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Undici wraps network failures as TypeError("fetch failed") with a nested cause. */
+function isTransientFetchError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } };
+  if (e.message !== 'fetch failed' && e.name !== 'TypeError') return false;
+  const code = e.cause?.code || '';
+  // Retry common transient codes; also retry when cause is missing (WSL noise).
+  if (!code) return true;
+  return (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    code === 'UND_ERR_HEADERS_TIMEOUT' ||
+    code === 'UND_ERR_BODY_TIMEOUT' ||
+    code === 'UND_ERR_SOCKET'
+  );
+}
+
+function fetchErrorDetails(err: unknown): Record<string, unknown> {
+  if (!err || typeof err !== 'object') return { err };
+  const e = err as { message?: string; cause?: { code?: string; message?: string; errno?: number } };
+  return {
+    message: e.message,
+    causeCode: e.cause?.code ?? null,
+    causeMessage: e.cause?.message ?? null,
+  };
+}
 
 interface ZohoMessage {
   id: string;
@@ -148,33 +187,53 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
   ): Promise<unknown> {
     const token = await ensureCliqAccessToken(account.connectionId);
     const url = path.startsWith('http') ? path : `${account.apiBase}/api/v2${path}`;
-    const res = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Zoho-oauthtoken ${token}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
-    if (res.status === 401 && !retried) {
-      log.warn('Zoho Cliq API 401 — forcing token refresh and retry', {
-        connectionId: account.connectionId,
-        apiBase: account.apiBase,
-        path,
-      });
-      await ensureCliqAccessToken(account.connectionId, { forceRefresh: true });
-      return apiFor(account, method, path, body, true);
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= FETCH_TRANSIENT_RETRIES; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: {
+            Authorization: `Zoho-oauthtoken ${token}`,
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        const text = await res.text();
+        if (res.status === 401 && !retried) {
+          log.warn('Zoho Cliq API 401 — forcing token refresh and retry', {
+            connectionId: account.connectionId,
+            apiBase: account.apiBase,
+            path,
+          });
+          await ensureCliqAccessToken(account.connectionId, { forceRefresh: true });
+          return apiFor(account, method, path, body, true);
+        }
+        if (!res.ok) {
+          throw new Error(`Zoho Cliq API ${method} ${path} failed (${res.status}): ${text.slice(0, 200)}`);
+        }
+        if (!text) return {};
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          throw new Error(`Zoho Cliq returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+        }
+      } catch (err) {
+        lastErr = err;
+        // Don't retry application-level HTTP errors we already threw above.
+        if (err instanceof Error && err.message.startsWith('Zoho Cliq API ')) throw err;
+        if (err instanceof Error && err.message.startsWith('Zoho Cliq returned non-JSON')) throw err;
+        if (!isTransientFetchError(err) || attempt >= FETCH_TRANSIENT_RETRIES) break;
+        log.debug('Zoho Cliq transient fetch — retrying', {
+          connectionId: account.connectionId,
+          path,
+          attempt: attempt + 1,
+          ...fetchErrorDetails(err),
+        });
+        await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
+      }
     }
-    if (!res.ok) {
-      throw new Error(`Zoho Cliq API ${method} ${path} failed (${res.status}): ${text.slice(0, 200)}`);
-    }
-    if (!text) return {};
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new Error(`Zoho Cliq returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
-    }
+    throw lastErr;
   }
 
   function isBotOrOwnMessage(account: AccountRuntime, msg: ZohoMessage): boolean {
@@ -283,6 +342,8 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
         log.warn('Zoho Cliq multi message poll error', {
           connectionId: account.connectionId,
           chatId,
+          apiBase: account.apiBase,
+          ...fetchErrorDetails(err),
           err,
         });
       }
@@ -363,26 +424,38 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
       }
 
       const content = message.content as Record<string, unknown>;
-      const botParam = `bot_unique_name=${encodeURIComponent(account.botUniqueName)}`;
 
       if (content.operation === 'edit' && content.messageId) {
-        await apiFor(account, 'PUT', `/chats/${chatId}/messages/${content.messageId}?${botParam}`, {
-          text: (content.text as string) || (content.markdown as string) || '',
-        });
+        // Chat message APIs reject bot_unique_name as an extra query param.
+        try {
+          await apiFor(account, 'PUT', `/chats/${chatId}/messages/${content.messageId}`, {
+            text: (content.text as string) || (content.markdown as string) || '',
+          });
+        } catch (err) {
+          log.warn('Zoho Cliq multi edit failed', { chatId, err });
+        }
         return;
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await apiFor(
-          account,
-          'POST',
-          `/chats/${chatId}/messages/${content.messageId}/reactions?${botParam}`,
-          { emoji_code: content.emoji as string },
-        );
+        try {
+          await apiFor(
+            account,
+            'POST',
+            `/chats/${chatId}/messages/${content.messageId}/reactions`,
+            { emoji_code: content.emoji as string },
+          );
+        } catch (err) {
+          log.warn('Zoho Cliq multi reaction failed', { chatId, err });
+        }
         return;
       }
 
-      const text = (content.markdown as string) || (content.text as string);
+      const text =
+        (content.markdown as string) ||
+        (content.text as string) ||
+        formatAskQuestionAsText(content) ||
+        undefined;
       let messageId: string | undefined;
 
       // Send caption text first, then attachments. Do not return early after
@@ -449,6 +522,14 @@ export function createZohoCliqMultiAdapter(): ChannelAdapter | null {
             });
           }
         }
+      }
+
+      if (!text && !(message.files && message.files.length > 0)) {
+        log.warn('Zoho Cliq multi deliver skipped — no text/markdown/ask_question and no files', {
+          chatId,
+          contentKeys: Object.keys(content),
+          contentType: content.type ?? null,
+        });
       }
 
       return messageId;

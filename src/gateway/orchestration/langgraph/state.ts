@@ -108,6 +108,8 @@ export type InterruptPayload =
       agent: string;
       task_packet: string;
       goal: string;
+      /** Node agent is the orchestrator itself (not an A2A member). */
+      self?: boolean;
     };
 
 export type ResumePayload =

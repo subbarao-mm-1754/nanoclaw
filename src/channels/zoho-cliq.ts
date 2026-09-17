@@ -30,6 +30,7 @@ import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
+import { formatAskQuestionAsText } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -463,12 +464,11 @@ function createAdapter(): ChannelAdapter | null {
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       const chatId = platformId.replace(/^zohocliq:/, '').replace(/^zoho-cliq:/, '');
       const content = message.content as Record<string, unknown>;
-      const botParam = `bot_unique_name=${encodeURIComponent(botUniqueName)}`;
 
-      // Edit
+      // Edit — chat message APIs reject bot_unique_name as an extra query param.
       if (content.operation === 'edit' && content.messageId) {
         try {
-          await api('PUT', `/chats/${chatId}/messages/${content.messageId}?${botParam}`, {
+          await api('PUT', `/chats/${chatId}/messages/${content.messageId}`, {
             text: (content.text as string) || (content.markdown as string) || '',
           });
         } catch (err) {
@@ -480,7 +480,7 @@ function createAdapter(): ChannelAdapter | null {
       // Reaction
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
         try {
-          await api('POST', `/chats/${chatId}/messages/${content.messageId}/reactions?${botParam}`, {
+          await api('POST', `/chats/${chatId}/messages/${content.messageId}/reactions`, {
             emoji_code: content.emoji as string,
           });
         } catch (err) {
@@ -491,7 +491,12 @@ function createAdapter(): ChannelAdapter | null {
 
       // Caption text first, then attachments. Do not return after text alone —
       // otherwise files on the same outbound message never upload to Cliq.
-      const text = (content.markdown as string) || (content.text as string);
+      // ask_question cards have no `text` field — flatten them for native Cliq.
+      const text =
+        (content.markdown as string) ||
+        (content.text as string) ||
+        formatAskQuestionAsText(content) ||
+        undefined;
       let messageId: string | undefined;
       if (text) {
         try {
@@ -561,6 +566,14 @@ function createAdapter(): ChannelAdapter | null {
             log.warn('Zoho Cliq file upload error', { chatId, filename: file.filename, err });
           }
         }
+      }
+
+      if (!text && !(message.files && message.files.length > 0)) {
+        log.warn('Zoho Cliq deliver skipped — no text/markdown/ask_question and no files', {
+          chatId,
+          contentKeys: Object.keys(content),
+          contentType: content.type ?? null,
+        });
       }
 
       return messageId;

@@ -106,6 +106,45 @@ export async function handleWorkerOutboundCallback(
     }
   }
 
+  // Orchestrator chat reply completes intake/assemble self-nodes in LangGraph.
+  if (chatOutbound.length > 0) {
+    try {
+      const { onOrchestratorSelfTaskComplete } = await import(
+        './orchestration/langgraph/index.js'
+      );
+      const text = chatOutbound
+        .map((o) =>
+          typeof o.content?.text === 'string'
+            ? o.content.text
+            : typeof (o.content as { raw_text?: string })?.raw_text === 'string'
+              ? (o.content as { raw_text: string }).raw_text
+              : '',
+        )
+        .filter(Boolean)
+        .join('\n\n');
+      if (text.trim()) {
+        const done = await onOrchestratorSelfTaskComplete({
+          orchestratorWorkspaceId: payload.workspace_id,
+          conversationId: conversation.id,
+          orchestratorSessionId: payload.session_id,
+          text: text.slice(0, 8000),
+          messageId: chatOutbound[0]?.id,
+        });
+        if (done) {
+          log.info('LangGraph: orchestrator self-task completed via chat outbound', {
+            sessionId: payload.session_id,
+            conversationId: conversation.id,
+          });
+        }
+      }
+    } catch (err) {
+      log.warn('LangGraph self-task complete hook failed', {
+        sessionId: payload.session_id,
+        err,
+      });
+    }
+  }
+
   const processingInbound = findLatestProcessingInbound(conversation.id);
   const useHttp = conversation.channel_type === 'http' && Boolean(processingInbound);
 
