@@ -279,4 +279,103 @@ describe('LangGraph orchestration', () => {
     expect(rejected.autoDelegating).toBe(false);
     expect(getActiveOrchestrationRun(orch.workspace_id, 'conv-x')?.status).toBe('waiting');
   });
+
+  it('does not advance the graph on ack/progress; advances on completed', async () => {
+    const user = createUser({
+      email: 'lg-proto@test.com',
+      password: 'password123',
+      display_name: 'LGProto',
+    });
+    const orch = createAgentRecord({
+      name: 'LeadProto',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# o' }],
+      agent_kind: 'orchestrator',
+    });
+    const researcher = createAgentRecord({
+      name: 'ResearcherProto',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# r' }],
+      agent_kind: 'agent',
+    });
+    replaceOrchestratorMembers(orch.workspace_id, [
+      {
+        member_workspace_id: researcher.workspace_id,
+        member_agent_group_id: researcher.agent_group_id,
+        local_name: 'researcher',
+      },
+    ]);
+    saveOrchestratorGraph(orch.workspace_id, {
+      entry: 'research',
+      nodes: [{ id: 'research', agent: 'researcher', type: 'task' }],
+      edges: [],
+    });
+
+    await onOrchestratorUserMessage({
+      workspaceId: orch.workspace_id,
+      conversationId: 'conv-proto',
+      sessionId: 'sess-proto',
+      goalText: 'Research topic',
+    });
+    await onOrchestratorDecision({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-proto',
+      orchestratorSessionId: 'sess-proto',
+      branch: 'research',
+      taskPacket: 'Find sources',
+    });
+
+    const waiting = getActiveOrchestrationRun(orch.workspace_id, 'conv-proto');
+    expect(waiting?.status).toBe('waiting');
+    expect(waiting?.current_node).toBe('research');
+
+    const ackHandled = await onSpecialistReply({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-proto',
+      orchestratorSessionId: 'sess-proto',
+      fromWorkspaceId: researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text: 'On it — researching…',
+      messageId: 'msg-ack',
+      content: {
+        text: 'On it — researching…',
+        orchestration: { status: 'ack' },
+      },
+    });
+    expect(ackHandled).toBe(true);
+    const stillWaiting = getActiveOrchestrationRun(orch.workspace_id, 'conv-proto');
+    expect(stillWaiting?.status).toBe('waiting');
+    expect(stillWaiting?.current_node).toBe('research');
+    expect((parseRunState(stillWaiting!).results as Record<string, unknown>)?.research).toBeUndefined();
+
+    const done = await onSpecialistReply({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId: 'conv-proto',
+      orchestratorSessionId: 'sess-proto',
+      fromWorkspaceId: researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text: 'Sources: A, B',
+      messageId: 'msg-done',
+      content: {
+        text: 'Sources: A, B',
+        orchestration: { status: 'completed', payload: 'Sources: A, B' },
+      },
+    });
+    expect(done).toBe(true);
+    const { getOrchestrationRun } = await import('../store.js');
+    const runAfter = getOrchestrationRun(waiting!.id)!;
+    const finalResults = parseRunState(runAfter).results as Record<
+      string,
+      { status?: string; text?: string }
+    >;
+    expect(finalResults.research?.status).toBe('completed');
+    expect(finalResults.research?.text).toContain('Sources');
+    // Interrupt cleared / run left waiting-for-specialist.
+    const lg = parseRunState(runAfter).langgraph as { interrupt?: { kind?: string } | null } | undefined;
+    expect(lg?.interrupt?.kind === 'await_specialist').toBe(false);
+    expect(['completed', 'waiting', 'running']).toContain(runAfter.status);
+    if (runAfter.status === 'waiting') {
+      expect(runAfter.current_node).not.toBe('research');
+    }
+  });
 });

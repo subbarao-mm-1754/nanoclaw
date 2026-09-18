@@ -4,12 +4,17 @@
  */
 import { Annotation } from '@langchain/langgraph';
 
+import type { SpecialistReplyStatus } from '../specialist-protocol.js';
+
 export interface SpecialistResult {
   text: string;
   from_agent: string;
   message_id?: string;
   at: string;
+  /** @deprecated Prefer status === 'partial' */
   partial?: boolean;
+  /** Protocol status that produced this result (terminal only when stored on the node). */
+  status?: SpecialistReplyStatus;
 }
 
 /** Orchestrator flow decision — may pick among allowed branches only. */
@@ -128,6 +133,7 @@ export type ResumePayload =
       from_agent: string;
       message_id?: string;
       partial?: boolean;
+      status?: SpecialistReplyStatus;
     }
   | {
       kind: 'timeout';

@@ -13,3 +13,24 @@ export function sessionInboundMessageId(
       : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return `${base}:${agentGroupId}`;
 }
+
+/**
+ * Undo {@link sessionInboundMessageId} before calling channel APIs
+ * (reactions, edits). Session inbound ids are `${platformId}:${agentGroupId}`.
+ *
+ * When `agentGroupId` is known, strip that exact suffix. Otherwise strip a
+ * trailing `:ag-…` namespace (gateway agent group ids from `generateId('ag')`).
+ */
+export function platformMessageIdFromSession(
+  sessionMessageId: string,
+  agentGroupId?: string,
+): string {
+  if (agentGroupId && sessionMessageId.endsWith(`:${agentGroupId}`)) {
+    return sessionMessageId.slice(0, -(agentGroupId.length + 1));
+  }
+  const idx = sessionMessageId.lastIndexOf(':ag-');
+  if (idx > 0 && !sessionMessageId.slice(idx + 1).includes(':')) {
+    return sessionMessageId.slice(0, idx);
+  }
+  return sessionMessageId;
+}

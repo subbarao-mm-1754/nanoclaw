@@ -6,13 +6,36 @@
  * For real Anthropic custom gateways, OneCLI can rewrite Authorization
  * on matching hosts. For Ollama, NO_PROXY bypasses the OneCLI proxy so
  * inference goes direct; Ollama ignores the placeholder key.
+ *
+ * Anthropic telemetry / bootstrap / metrics traffic is disabled by default
+ * (see claude-code-privacy.ts). Opt in with CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC=true.
  */
+import {
+  applyClaudeCodePrivacyEnv,
+  isClaudeCodeNonessentialTrafficAllowed,
+} from '../claude-code-privacy.js';
 import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL', 'NO_PROXY', 'no_proxy', 'ANTHROPIC_API_KEY']);
+  const dotenv = readEnvFile([
+    'ANTHROPIC_BASE_URL',
+    'NO_PROXY',
+    'no_proxy',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC',
+  ]);
   const env: Record<string, string> = {};
+
+  const allowRaw =
+    process.env.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC ||
+    dotenv.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC;
+  const allow = isClaudeCodeNonessentialTrafficAllowed(allowRaw);
+  applyClaudeCodePrivacyEnv(env, allow);
+  // Pass the opt-in through so the agent-runner does not re-apply privacy blocks.
+  if (allow) {
+    env.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC = 'true';
+  }
   if (!dotenv.ANTHROPIC_BASE_URL) return { env };
 
   env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;

@@ -10,6 +10,11 @@ Use the `mcp__nanoclaw__send_message` tool to send a message while you're still 
 - **Longer turn (multiple tool calls, web searches, installs, sub-agents):** Send a short acknowledgment right away ("On it, checking the logs now") so the user knows you got the message.
 - **Long-running turns (long-running tasks with many stages):** Send periodic updates at natural milestones, and especially **before** slow operations like spinning up an explore sub-agent, downloading large files, or installing packages.
 
+**When talking to an orchestrator (multi-agent):** set `orchestration_status`:
+- `ack` / `progress` — still working (does **not** finish your graph node)
+- `completed` / `blocked` / `failed` / `partial` — terminal; advances the graph
+Never send specialist traffic to the user channel — only to `orchestrator`.
+
 **Never narrate micro-steps.** "I'm going to read the file now… okay, I'm reading it… now I'm parsing it…" is noise. Updates should mark meaningful transitions, not every tool call.
 
 **Outcomes, not play-by-play.** When the turn is done, the final message should be about the result, not a transcript of what you did.

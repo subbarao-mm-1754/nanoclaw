@@ -254,7 +254,11 @@ function buildTaskPacket(graph: OrchestratorGraph, nodeId: string, state: Orches
     }
   }
   parts.push(
-    'Reply to the orchestrator with your result (completed payload, or clear failed/blocked reason).',
+    'Reply to the orchestrator using the specialist reply protocol:',
+    '- Mid-work: status "ack" or "progress" (does NOT finish this node).',
+    '- Done: status "completed" with the full payload (or "blocked"/"failed"/"partial").',
+    'Use send_message(..., orchestration_status) or <message to="orchestrator" status="…">.',
+    'Do not send user-facing chat — only reply to the orchestrator.',
   );
   return parts.filter(Boolean).join('\n');
 }
@@ -347,7 +351,8 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
         from_agent: resume.from_agent,
         message_id: resume.message_id,
         at: new Date().toISOString(),
-        partial: resume.partial,
+        partial: resume.partial || resume.status === 'partial',
+        status: resume.status ?? (resume.partial ? 'partial' : 'completed'),
       };
       return {
         results: { [state.current_node || 'inbox']: result },
@@ -443,7 +448,8 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
             from_agent: resume.from_agent || agent,
             message_id: resume.message_id,
             at: new Date().toISOString(),
-            partial: resume.partial,
+            partial: resume.partial || resume.status === 'partial',
+            status: resume.status ?? (resume.partial ? 'partial' : 'completed'),
           };
           return {
             results: { [nodeId]: result },

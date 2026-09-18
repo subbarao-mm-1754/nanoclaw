@@ -361,6 +361,25 @@ function transcriptStartMs(transcriptPath: string): number | null {
 const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
 
 /**
+ * Anthropic bootstrap / telemetry / metrics are off unless the operator
+ * explicitly opts in. Any non-empty DISABLE_* value opts out (Claude Code
+ * truthiness) — never set these to "0"/"false" to re-enable; leave unset.
+ */
+const CLAUDE_CODE_PRIVACY_ENV: Record<string, string> = {
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  DISABLE_TELEMETRY: '1',
+  DISABLE_ERROR_REPORTING: '1',
+  DO_NOT_TRACK: '1',
+};
+
+function allowClaudeCodeNonessentialTraffic(
+  env: Record<string, string | undefined>,
+): boolean {
+  const v = (env.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/**
  * Stale-session detection. Matches Claude Code's error text when a
  * resumed session can't be found — missing transcript .jsonl, unknown
  * session ID, etc.
@@ -387,6 +406,13 @@ export class ClaudeProvider implements AgentProvider {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
     };
+    if (!allowClaudeCodeNonessentialTraffic(this.env)) {
+      Object.assign(this.env, CLAUDE_CODE_PRIVACY_ENV);
+    } else {
+      for (const key of Object.keys(CLAUDE_CODE_PRIVACY_ENV)) {
+        delete this.env[key];
+      }
+    }
   }
 
   isSessionInvalid(err: unknown): boolean {

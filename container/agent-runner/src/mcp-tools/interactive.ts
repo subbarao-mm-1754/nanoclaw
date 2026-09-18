@@ -3,8 +3,17 @@
  *
  * ask_user_question is a blocking tool call — it writes a messages_out row
  * with a question card, then polls messages_in for the response.
+ *
+ * Channels that cannot render buttons (e.g. Zoho Cliq) flatten the card to
+ * plain text. In that case the user's next chat reply is accepted as the
+ * answer (matched to an option when possible).
  */
-import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
+import {
+  findPlainTextQuestionAnswer,
+  findQuestionResponse,
+  markCompleted,
+  resolveQuestionChoice,
+} from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
@@ -88,6 +97,7 @@ export const askUserQuestion: McpToolDefinition = {
 
     const questionId = generateId();
     const r = routing();
+    const askedAt = new Date().toISOString();
 
     // Write question card to outbound.db
     writeMessageOut({
@@ -105,20 +115,38 @@ export const askUserQuestion: McpToolDefinition = {
       }),
     });
 
-    log(`ask_user_question: ${questionId} → "${question}" [${options.join(', ')}]`);
+    log(
+      `ask_user_question: ${questionId} → "${question}" [${options.map((o) => o.label).join(', ')}]`,
+    );
 
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
-      const response = findQuestionResponse(questionId);
+      const tagged = findQuestionResponse(questionId);
+      if (tagged) {
+        const parsed = JSON.parse(tagged.content) as {
+          selectedOption?: string;
+          text?: string;
+          value?: string;
+        };
+        markCompleted([tagged.id]);
+        const choice =
+          parsed.selectedOption ??
+          parsed.value ??
+          (typeof parsed.text === 'string' ? parsed.text : '');
+        log(`ask_user_question response: ${questionId} → ${choice}`);
+        return ok(choice);
+      }
 
-      if (response) {
-        const parsed = JSON.parse(response.content);
-        // Mark the response as completed via processing_ack (outbound.db)
-        markCompleted([response.id]);
-
-        log(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
-        return ok(parsed.selectedOption);
+      // Plain-text reply (Zoho Cliq etc. flatten the card — no questionId round-trip).
+      const plain = findPlainTextQuestionAnswer(askedAt);
+      if (plain) {
+        const parsed = JSON.parse(plain.content) as { text?: string };
+        const text = typeof parsed.text === 'string' ? parsed.text : '';
+        const choice = resolveQuestionChoice(text, options);
+        markCompleted([plain.id]);
+        log(`ask_user_question plain reply: ${questionId} → ${choice} (from "${text}")`);
+        return ok(choice);
       }
 
       await sleep(1000);

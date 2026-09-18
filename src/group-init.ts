@@ -1,19 +1,38 @@
 import fs from 'fs';
 import path from 'path';
 
+import {
+  applyClaudeCodePrivacyEnv,
+  isClaudeCodeNonessentialTrafficAllowed,
+} from './claude-code-privacy.js';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
+import { readEnvFile } from './env.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
+
+function allowClaudeCodeNonessentialTraffic(): boolean {
+  const dotenv = readEnvFile(['CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC']);
+  return isClaudeCodeNonessentialTrafficAllowed(
+    process.env.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC ||
+      dotenv.CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC,
+  );
+}
+
+function defaultSettingsEnv(): Record<string, string> {
+  const env: Record<string, string> = {
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+  };
+  applyClaudeCodePrivacyEnv(env, allowClaudeCodeNonessentialTraffic());
+  return env;
+}
 
 const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
-      env: {
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
+      env: defaultSettingsEnv(),
       hooks: {
         PreCompact: [
           {
@@ -83,6 +102,7 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     initialized.push('settings.json');
   } else {
     ensurePreCompactHook(settingsFile, initialized);
+    ensureClaudeCodePrivacySettings(settingsFile, initialized);
   }
 
   // Skills directory — created empty here; symlinks are synced at spawn
@@ -114,6 +134,7 @@ export function ensureClaudeSharedFilesystem(claudeDir: string): void {
     fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
   } else {
     ensurePreCompactHook(settingsFile, []);
+    ensureClaudeCodePrivacySettings(settingsFile, []);
   }
 
   const skillsDst = path.join(claudeDir, 'skills');
@@ -148,5 +169,31 @@ function ensurePreCompactHook(settingsFile: string, initialized: string[]): void
     initialized.push('settings.json (added PreCompact hook)');
   } catch {
     // Don't break init if settings.json is malformed — it'll use whatever's there.
+  }
+}
+
+/**
+ * Keep Claude Code privacy env in sync with CLAUDE_CODE_ALLOW_NONESSENTIAL_TRAFFIC.
+ * Runs on every group init so existing workspaces pick up the default-off policy.
+ */
+function ensureClaudeCodePrivacySettings(settingsFile: string, initialized: string[]): void {
+  try {
+    const raw = fs.readFileSync(settingsFile, 'utf-8');
+    const settings = JSON.parse(raw) as { env?: Record<string, string> };
+    if (!settings.env || typeof settings.env !== 'object') settings.env = {};
+
+    const allow = allowClaudeCodeNonessentialTraffic();
+    const before = JSON.stringify(settings.env);
+    applyClaudeCodePrivacyEnv(settings.env, allow);
+    if (JSON.stringify(settings.env) === before) return;
+
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
+    initialized.push(
+      allow
+        ? 'settings.json (cleared Claude Code privacy blocks)'
+        : 'settings.json (disabled Claude Code nonessential traffic)',
+    );
+  } catch {
+    // Don't break init if settings.json is malformed.
   }
 }

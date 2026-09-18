@@ -95,7 +95,9 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send a message to a named destination. If you have only one destination, you can omit `to`.',
+    description:
+      'Send a message to a named destination. If you have only one destination, you can omit `to`. ' +
+      'When reporting to an orchestrator, set orchestration_status (ack|progress|completed|blocked|failed|partial).',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -104,6 +106,17 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
         },
         text: { type: 'string', description: 'Message content' },
+        orchestration_status: {
+          type: 'string',
+          description:
+            'For agent/orchestrator replies: ack|progress|completed|blocked|failed|partial. ' +
+            'Graph advances only on completed/blocked/failed/partial.',
+        },
+        notify_orchestrator: {
+          type: 'boolean',
+          description:
+            'For ack/progress: soft-notify the orchestrator agent (default: false for ack, true for progress).',
+        },
       },
       required: ['text'],
     },
@@ -115,6 +128,27 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    const statusRaw = args.orchestration_status as string | undefined;
+    const status =
+      typeof statusRaw === 'string' && statusRaw.trim()
+        ? statusRaw.trim().toLowerCase()
+        : undefined;
+    const allowed = new Set(['ack', 'progress', 'completed', 'blocked', 'failed', 'partial']);
+    if (status && !allowed.has(status)) {
+      return err(
+        `Invalid orchestration_status "${statusRaw}". Use: ack|progress|completed|blocked|failed|partial`,
+      );
+    }
+
+    const content: Record<string, unknown> = { text };
+    if (status && routing.channel_type === 'agent') {
+      const orch: Record<string, unknown> = { status };
+      if (typeof args.notify_orchestrator === 'boolean') {
+        orch.notify_orchestrator = args.notify_orchestrator;
+      }
+      content.orchestration = orch;
+    }
+
     const id = generateId();
     const seq = writeMessageOut({
       id,
@@ -123,10 +157,12 @@ export const sendMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
+      content: JSON.stringify(content),
     });
 
-    log(`send_message: #${seq} → ${routing.resolvedName}`);
+    log(
+      `send_message: #${seq} → ${routing.resolvedName}${status ? ` [${status}]` : ''}`,
+    );
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
 };

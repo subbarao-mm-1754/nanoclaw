@@ -142,26 +142,107 @@ export function getMessageIn(id: string): MessageInRow | undefined {
 /**
  * Find a pending response to a question (by questionId in content).
  * Reads from inbound.db, checks processing_ack to skip already-handled responses.
+ *
+ * Also accepts plain chat replies (no questionId) for channels that flatten
+ * ask_question to text (e.g. Zoho Cliq). Those replies may already be marked
+ * `processing` by the concurrent poll-loop follow-up claim — treat those as
+ * candidates too until they are completed/failed.
  */
 export function findQuestionResponse(questionId: string): MessageInRow | undefined {
   const inbound = openInboundDb();
   const outbound = getOutboundDb();
 
   try {
-    const response = inbound
+    const tagged = inbound
       .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
       .get(`%"questionId":"${questionId}"%`) as MessageInRow | undefined;
 
-    if (!response) return undefined;
+    if (tagged && !isTerminalAck(outbound, tagged.id)) {
+      return tagged;
+    }
 
-    // Check it hasn't been acked already
-    const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
-    if (acked) return undefined;
-
-    return response;
+    return undefined;
   } finally {
     inbound.close();
   }
+}
+
+function isTerminalAck(
+  outbound: ReturnType<typeof getOutboundDb>,
+  messageId: string,
+): boolean {
+  const row = outbound
+    .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
+    .get(messageId) as { status: string } | undefined;
+  return row?.status === 'completed' || row?.status === 'failed';
+}
+
+/**
+ * Plain-text answer for ask_user_question when the channel cannot round-trip
+ * questionId (flattened ask_question cards). Prefers messages at/after
+ * `afterTimestamp`, including ones claimed as `processing` by the follow-up poll.
+ */
+export function findPlainTextQuestionAnswer(afterTimestamp: string): MessageInRow | undefined {
+  const inbound = openInboundDb();
+  const outbound = getOutboundDb();
+
+  try {
+    const rows = inbound
+      .prepare(
+        `SELECT * FROM messages_in
+         WHERE status = 'pending'
+           AND kind IN ('chat', 'chat-sdk')
+           AND datetime(timestamp) >= datetime(?)
+         ORDER BY seq ASC`,
+      )
+      .all(afterTimestamp) as MessageInRow[];
+
+    for (const row of rows) {
+      if (isTerminalAck(outbound, row.id)) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(row.content) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      // Structured question responses are handled by findQuestionResponse.
+      if (typeof parsed.questionId === 'string') continue;
+      if (parsed.type && parsed.type !== 'chat') continue;
+      const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+      if (!text) continue;
+      return row;
+    }
+    return undefined;
+  } finally {
+    inbound.close();
+  }
+}
+
+/**
+ * Map a user's free-text reply onto an option value when possible.
+ */
+export function resolveQuestionChoice(
+  replyText: string,
+  options: Array<{ label: string; value: string }>,
+): string {
+  const raw = replyText.trim();
+  if (!raw) return raw;
+
+  const asNum = Number(raw);
+  if (Number.isInteger(asNum) && asNum >= 1 && asNum <= options.length) {
+    return options[asNum - 1]!.value;
+  }
+
+  const lower = raw.toLowerCase();
+  const byValue = options.find((o) => o.value.toLowerCase() === lower);
+  if (byValue) return byValue.value;
+  const byLabel = options.find((o) => o.label.toLowerCase() === lower);
+  if (byLabel) return byLabel.value;
+  const byIncludes = options.find(
+    (o) => lower.includes(o.label.toLowerCase()) || lower.includes(o.value.toLowerCase()),
+  );
+  if (byIncludes) return byIncludes.value;
+  return raw;
 }
 
 /**

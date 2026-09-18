@@ -37,6 +37,11 @@ import type {
   PendingWait,
   ResumePayload,
 } from './state.js';
+import {
+  isTerminalSpecialistStatus,
+  parseSpecialistReply,
+  type ParsedSpecialistReply,
+} from '../specialist-protocol.js';
 
 const checkpointer: BaseCheckpointSaver = new MemorySaver();
 
@@ -580,7 +585,8 @@ export async function onOrchestratorUserMessage(input: {
 }
 
 /**
- * Specialist replied to orchestrator — resume await_specialist interrupt.
+ * Specialist replied to orchestrator — resume await_specialist only on terminal
+ * protocol statuses (completed/blocked/failed/partial). ack/progress keep waiting.
  */
 export async function onSpecialistReply(input: {
   orchestratorWorkspaceId: string;
@@ -590,6 +596,8 @@ export async function onSpecialistReply(input: {
   fromLocalName?: string;
   text: string;
   messageId: string;
+  /** Outbound content object (may include `orchestration` protocol fields). */
+  content?: Record<string, unknown>;
 }): Promise<boolean> {
   if (!isMultiAgentOrchestrationEnabled()) return false;
   const compiled = getCompiled(input.orchestratorWorkspaceId);
@@ -602,6 +610,7 @@ export async function onSpecialistReply(input: {
   );
   if (!run) return false;
 
+  const parsed = parseSpecialistReply(input.content, input.text);
   const meta = metaFromRun(run);
   const members = listOrchestratorMembers(input.orchestratorWorkspaceId);
   const fromMember = members.find((m) => m.member_workspace_id === input.fromWorkspaceId);
@@ -613,8 +622,9 @@ export async function onSpecialistReply(input: {
       run,
       fromWorkspaceId: input.fromWorkspaceId,
       fromLocalName: fromName || undefined,
-      text: input.text,
+      text: parsed.text,
       messageId: input.messageId,
+      status: parsed.status,
     });
     return false;
   }
@@ -632,15 +642,33 @@ export async function onSpecialistReply(input: {
       run,
       fromWorkspaceId: input.fromWorkspaceId,
       fromLocalName: fromName || undefined,
-      text: input.text,
+      text: parsed.text,
       messageId: input.messageId,
+      status: parsed.status,
     });
     appendOrchestrationEvent(run.id, 'specialist_reply_rejected', {
       from_workspace_id: input.fromWorkspaceId,
       expected_agent: expectedAgent,
       from_agent: fromName,
+      status: parsed.status,
     });
     return false;
+  }
+
+  // Non-terminal: stay on await_specialist; never deliver to the user.
+  if (!isTerminalSpecialistStatus(parsed.status)) {
+    await handleNonTerminalSpecialistReply({
+      run,
+      compiled,
+      meta,
+      parsed,
+      fromWorkspaceId: input.fromWorkspaceId,
+      fromName: fromName || expectedAgent || 'specialist',
+      messageId: input.messageId,
+      orchestratorSessionId: meta.orchestrator_session_id || input.orchestratorSessionId,
+      conversationId: input.conversationId,
+    });
+    return true;
   }
 
   await withRunLock(run.id, async () => {
@@ -651,10 +679,12 @@ export async function onSpecialistReply(input: {
         results: {
           ...((prev.results as Record<string, unknown>) || {}),
           [nodeId]: {
-            text: input.text,
+            text: parsed.text,
             from_agent: fromName || expectedAgent || 'specialist',
             message_id: input.messageId,
             at: new Date().toISOString(),
+            status: parsed.status,
+            partial: parsed.status === 'partial',
           },
         },
       }),
@@ -664,6 +694,8 @@ export async function onSpecialistReply(input: {
       message_id: input.messageId,
       engine: 'langgraph',
       node_id: nodeId,
+      status: parsed.status,
+      explicit: parsed.explicit,
     });
     const latest = getOrchestrationRun(run.id) ?? run;
     await invokeOrResume({
@@ -671,9 +703,11 @@ export async function onSpecialistReply(input: {
       compiled,
       resume: {
         kind: 'specialist',
-        text: input.text,
+        text: parsed.text,
         from_agent: fromName || expectedAgent || 'specialist',
         message_id: input.messageId,
+        partial: parsed.status === 'partial',
+        status: parsed.status,
       },
       orchestratorSessionId: meta.orchestrator_session_id || input.orchestratorSessionId,
       conversationId: input.conversationId,
@@ -681,6 +715,79 @@ export async function onSpecialistReply(input: {
   });
 
   return true;
+}
+
+async function handleNonTerminalSpecialistReply(input: {
+  run: OrchestrationRun;
+  compiled: CachedCompile;
+  meta: NonNullable<ReturnType<typeof metaFromRun>>;
+  parsed: ParsedSpecialistReply;
+  fromWorkspaceId: string;
+  fromName: string;
+  messageId: string;
+  orchestratorSessionId: string;
+  conversationId?: string | null;
+}): Promise<void> {
+  const { run, parsed, meta } = input;
+  const nodeId = meta.interrupt?.kind === 'await_specialist' ? meta.interrupt.node_id : run.current_node;
+  const prev = parseRunState(run);
+  const progressKey = `_progress:${nodeId || 'unknown'}:${input.fromName}`;
+
+  updateOrchestrationRun(run.id, {
+    state: mergeRunState(run, {
+      results: {
+        ...((prev.results as Record<string, unknown>) || {}),
+        // Keep progress under a side key — never overwrite the node result slot.
+        [progressKey]: {
+          text: parsed.summary || parsed.text,
+          from_agent: input.fromName,
+          message_id: input.messageId,
+          at: new Date().toISOString(),
+          status: parsed.status,
+        },
+      },
+    }),
+  });
+
+  appendOrchestrationEvent(run.id, 'specialist_progress', {
+    from_workspace_id: input.fromWorkspaceId,
+    message_id: input.messageId,
+    node_id: nodeId,
+    status: parsed.status,
+    notify_orchestrator: parsed.notify_orchestrator,
+    explicit: parsed.explicit,
+    preview: (parsed.summary || parsed.text).slice(0, 200),
+  });
+
+  log.info('LangGraph: specialist non-terminal reply (graph still waiting)', {
+    runId: run.id,
+    status: parsed.status,
+    nodeId,
+    fromName: input.fromName,
+    notify: parsed.notify_orchestrator,
+  });
+
+  if (!parsed.notify_orchestrator) return;
+
+  const orch = getWorkspace(run.orchestrator_workspace_id);
+  if (!orch) return;
+
+  const note = [
+    `[LangGraph] Specialist "${input.fromName}" ${parsed.status} on node "${nodeId ?? '?'}".`,
+    'The graph is still waiting for their terminal result (completed/blocked/failed/partial).',
+    'Do not tell the user this specialist finished. You may give a brief status if helpful.',
+    '',
+    parsed.summary || parsed.text,
+  ].join('\n');
+
+  await wakeWorkspaceSession({
+    workspaceId: orch.workspace_id,
+    sessionId: input.orchestratorSessionId,
+    agentGroupId: orch.agent_group_id,
+    conversationId: input.conversationId,
+    text: note,
+    inboundMessageId: generateId('lgprog'),
+  });
 }
 
 /**
@@ -759,12 +866,14 @@ async function recordLateSpecialistReply(input: {
   fromLocalName?: string;
   text: string;
   messageId: string;
+  status?: string;
 }): Promise<void> {
   const prev = parseRunState(input.run);
   const key = input.fromLocalName || input.fromWorkspaceId;
   appendOrchestrationEvent(input.run.id, 'late_specialist_reply', {
     from_workspace_id: input.fromWorkspaceId,
     message_id: input.messageId,
+    status: input.status ?? null,
     note: 'Reply arrived after graph left await_specialist (or state was clobbered)',
   });
   updateOrchestrationRun(input.run.id, {
@@ -778,6 +887,7 @@ async function recordLateSpecialistReply(input: {
           message_id: input.messageId,
           at: new Date().toISOString(),
           late: true,
+          status: input.status,
         },
       },
     },

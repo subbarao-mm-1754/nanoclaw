@@ -6,7 +6,7 @@ import { log } from '../../log.js';
 import { listUserAgents, resolveUserAgent } from '../store/agent-select.js';
 import { getAgentForUser } from '../store/agents.js';
 import type { GatewayAgent, GatewayAgentFile, ParsedBuildResult } from '../types.js';
-import { composeOrchestratorFiles } from './compose.js';
+import { composeOrchestratorFiles, composeSpecialistFiles } from './compose.js';
 import { isMultiAgentOrchestrationEnabled } from './config.js';
 import { replaceOrchestratorMembers, saveOrchestratorGraph } from './store.js';
 import type { ParsedSpecialistSpec } from './types.js';
@@ -102,10 +102,15 @@ export async function registerOrchestratorFromBuild(input: {
         );
       }
       const agentName = spec.agent_name?.trim() || spec.name || `Specialist ${localName}`;
+      const specialistFiles = composeSpecialistFiles({
+        files,
+        localName,
+        role: spec.role,
+      });
       member = await createAgent({
         name: agentName,
         owner_user_id: input.userId,
-        files,
+        files: specialistFiles,
         is_default: false,
         agent_kind: 'agent',
       });

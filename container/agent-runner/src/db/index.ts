@@ -14,6 +14,8 @@ export {
   markFailed,
   getMessageIn,
   findQuestionResponse,
+  findPlainTextQuestionAnswer,
+  resolveQuestionChoice,
   findKnowledgeResponse,
 } from './messages-in.js';
 export type { MessageInRow } from './messages-in.js';

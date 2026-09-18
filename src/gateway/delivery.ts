@@ -4,7 +4,30 @@ import path from 'path';
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import type { OutboundFile } from '../channels/adapter.js';
 import { log } from '../log.js';
+import { platformMessageIdFromSession } from '../session-message-id.js';
+import { getConversation } from './store/conversations.js';
 import type { CustomerMessage } from './types.js';
+
+/** Reaction/edit payloads carry session-namespaced inbound ids — strip for channel APIs. */
+function contentForChannelDelivery(
+  content: unknown,
+  agentGroupId?: string,
+): unknown {
+  if (!content || typeof content !== 'object') return content;
+  const record = content as Record<string, unknown>;
+  const op = record.operation;
+  if (
+    (op === 'reaction' || op === 'edit') &&
+    typeof record.messageId === 'string' &&
+    record.messageId.length > 0
+  ) {
+    return {
+      ...record,
+      messageId: platformMessageIdFromSession(record.messageId, agentGroupId),
+    };
+  }
+  return content;
+}
 
 export async function deliverOutboundMessage(message: CustomerMessage): Promise<void> {
   const adapter = getChannelAdapter(message.channel_type);
@@ -12,7 +35,11 @@ export async function deliverOutboundMessage(message: CustomerMessage): Promise<
     throw new Error(`No channel adapter for type: ${message.channel_type}`);
   }
 
-  const content = JSON.parse(message.content_json) as unknown;
+  const rawContent = JSON.parse(message.content_json) as unknown;
+  const agentGroupId = message.conversation_id
+    ? (getConversation(message.conversation_id)?.agent_group_id ?? undefined)
+    : undefined;
+  const content = contentForChannelDelivery(rawContent, agentGroupId);
   let files: OutboundFile[] | undefined;
   if (message.files_json) {
     const raw = JSON.parse(message.files_json) as Array<{ filename: string; data_base64: string }>;

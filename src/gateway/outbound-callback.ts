@@ -81,7 +81,19 @@ export async function handleWorkerOutboundCallback(
   const deliveredIds: string[] = [];
 
   const agentOutbound = outbound.filter((o) => o.channel_type === 'agent');
-  const chatOutbound = outbound.filter((o) => o.channel_type !== 'agent');
+  // Specialist A2A sessions must not deliver to user channels — only agent→orchestrator.
+  const chatOutbound = outbound.filter((o) => {
+    if (o.channel_type === 'agent') return false;
+    if (payload.session_id.startsWith('sess-a2a-')) {
+      log.warn('Dropping non-agent outbound from specialist A2A session (not user-facing)', {
+        sessionId: payload.session_id,
+        messageId: o.id,
+        channelType: o.channel_type,
+      });
+      return false;
+    }
+    return true;
+  });
 
   if (agentOutbound.length > 0) {
     try {

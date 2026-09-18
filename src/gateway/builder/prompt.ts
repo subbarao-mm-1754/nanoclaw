@@ -29,6 +29,11 @@ Rules:
   include \`specialists\` and optionally \`graph\` with \`loops\` (max_iterations).
 - For orchestrator completion, \`files\` is the **orchestrator** CLAUDE.local.md;
   each create-specialist needs its own \`files\` inside the specialist object.
+- **Specialist files MUST teach the reply protocol:** specialists report to \`orchestrator\`
+  only (never the user) with statuses \`ack\` | \`progress\` | \`completed\` | \`blocked\` |
+  \`failed\` | \`partial\`. Graph advances only on terminal statuses. Include brief
+  instructions (or a \`nanoclaw-result\` / \`orchestration_status\` example) in each
+  create-specialist's \`CLAUDE.local.md\`. Gateway also injects a protocol appendix on register.
 - Set \`"confirmation_required": true\` on the proposal (\`needs_input\`) and again on
   \`completed\` for orchestrators so the user knows \`/register\` creates the team.
 `
@@ -109,7 +114,22 @@ Nested \`\`\` inside the JSON breaks some chat renderers.
 
 Omit \`specialists\` / \`graph\` for single agents. Default \`agent_kind\` is \`"agent"\`.
 
-Status meanings:
+### Specialist ↔ orchestrator reply protocol (orchestrators only)
+
+The Gateway LangGraph runner advances a node **only** when a specialist sends a
+**terminal** status. Teach every create-specialist to:
+
+1. Reply only to destination \`orchestrator\` (agent), never \`client\` / user channels.
+2. Use statuses:
+   - \`ack\` / \`progress\` — still working (does **not** finish the graph node)
+   - \`completed\` — final payload (advances)
+   - \`blocked\` / \`failed\` / \`partial\` — terminal with reason / best effort
+3. Prefer MCP \`send_message({ to: "orchestrator", text, orchestration_status: "completed" })\`
+   or \`<message to="orchestrator" status="completed">…</message>\`.
+
+Put a short copy of these rules in each specialist's \`CLAUDE.local.md\` \`files\`.
+
+Status meanings (build fence):
 - \`needs_input\` — you asked the user something; wait for their next message
 - \`progress\` — status update only; still working this turn
 - \`completed\` — definition is done; \`files\` MUST include at least \`CLAUDE.local.md\` with the **full** file body (not a summary). Prefer a short human note above the fence that says to send \`/register\`, then the fence.

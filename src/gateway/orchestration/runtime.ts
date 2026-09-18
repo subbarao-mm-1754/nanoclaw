@@ -132,6 +132,7 @@ export async function routeAgentOutboundMessages(input: {
         fromLocalName: fromName ?? undefined,
         text,
         messageId: msg.id,
+        content: msg.content as Record<string, unknown>,
       });
       if (handled) {
         skipSoftWake = true;

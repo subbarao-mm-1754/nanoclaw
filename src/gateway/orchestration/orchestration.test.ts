@@ -86,6 +86,19 @@ describe('multi-agent orchestration', () => {
     expect(files[0]!.content).toContain('Multi-agent orchestration');
     expect(files[0]!.content).toContain('`researcher`');
     expect(files[0]!.content).toContain('Registered graph');
+    expect(files[0]!.content).toContain('Specialist reply protocol');
+  });
+
+  it('composes specialist reporting protocol into CLAUDE.local.md', async () => {
+    const { composeSpecialistFiles } = await import('./compose.js');
+    const files = composeSpecialistFiles({
+      files: [{ path: 'CLAUDE.local.md', content: '# Researcher\nFind places.' }],
+      localName: 'trip-researcher',
+      role: 'research places',
+    });
+    expect(files[0]!.content).toContain('Reporting to the orchestrator');
+    expect(files[0]!.content).toContain('orchestration_status');
+    expect(files[0]!.content).toContain('ack');
   });
 
   it('stores members, graph, and run state; destinations include specialists', () => {

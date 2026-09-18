@@ -534,7 +534,8 @@ function extractNanoclawBuildFence(text: string): string | null {
 }
 
 function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
-  const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+  // Optional attrs: status="…" notify="true|false"
+  const MESSAGE_RE = /<message\s+([^>]*?)>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
@@ -546,9 +547,17 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     if (match.index > lastIndex) {
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
-    const toName = match[1];
+    const attrs = match[1] ?? '';
     const body = match[2].trim();
     lastIndex = MESSAGE_RE.lastIndex;
+
+    const toMatch = attrs.match(/\bto="([^"]+)"/i);
+    const toName = toMatch?.[1];
+    if (!toName) {
+      log(`<message> missing to="…", dropping block`);
+      scratchpadParts.push(`[dropped: missing to] ${body}`);
+      continue;
+    }
 
     const dest = findByName(toName);
     if (!dest) {
@@ -556,7 +565,18 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+
+    const statusMatch = attrs.match(/\bstatus="([^"]+)"/i);
+    const notifyMatch = attrs.match(/\bnotify="([^"]+)"/i);
+    const orchStatus = statusMatch?.[1]?.trim().toLowerCase();
+    const notifyRaw = notifyMatch?.[1]?.trim().toLowerCase();
+    const notify =
+      notifyRaw === 'true' ? true : notifyRaw === 'false' ? false : undefined;
+
+    sendToDestination(dest, body, routing, {
+      orchestrationStatus: orchStatus,
+      notifyOrchestrator: notify,
+    });
     lastDest = dest;
     sent++;
   }
@@ -598,7 +618,12 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   return { sent, hasUnwrapped };
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(
+  dest: DestinationEntry,
+  body: string,
+  routing: RoutingContext,
+  orch?: { orchestrationStatus?: string; notifyOrchestrator?: boolean },
+): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Resolve thread_id per-destination from the most recent inbound message
@@ -606,6 +631,17 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   // different destinations have different thread contexts — using a single
   // routing.threadId would stamp one channel's thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId);
+
+  const content: Record<string, unknown> = { text: body };
+  const allowed = new Set(['ack', 'progress', 'completed', 'blocked', 'failed', 'partial']);
+  if (orch?.orchestrationStatus && allowed.has(orch.orchestrationStatus) && channelType === 'agent') {
+    const meta: Record<string, unknown> = { status: orch.orchestrationStatus };
+    if (typeof orch.notifyOrchestrator === 'boolean') {
+      meta.notify_orchestrator = orch.notifyOrchestrator;
+    }
+    content.orchestration = meta;
+  }
+
   writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
@@ -613,7 +649,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text: body }),
+    content: JSON.stringify(content),
   });
 }
 
