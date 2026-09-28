@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# nanoclaw — lifecycle CLI for gateway + worker services.
+#
+#   nanoclaw service install [--role both|gateway|worker]
+#   nanoclaw start|stop|restart|status
+#   nanoclaw logs [-f] [--gateway|--worker]
+#
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT" ]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+  SCRIPT="$(readlink "$SCRIPT")"
+  [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_ROOT"
+exec pnpm exec tsx setup/services/cli.ts "$@"

@@ -1,25 +1,13 @@
 /**
- * Non-interactive setup driver — the step sequencer for `pnpm run setup:auto`.
+ * Setup driver for the gateway + worker product (`pnpm run setup:auto`).
  *
- * Responsibility: orchestrate the sequence of steps end-to-end and route
- * between them. The runner, spawning, status parsing, spinner, abort, and
- * prompt primitives live in `setup/lib/runner.ts`; theming in
- * `setup/lib/theme.ts`; Telegram's full flow in `setup/channels/telegram.ts`.
+ * Steps: environment → container → onecli → auth → mounts → service →
+ * timezone → verify. Classic host CLI-agent / channel wiring removed —
+ * configure Zoho Cliq (or other channels) via gateway env / API after install.
  *
  * Config via env:
- *   NANOCLAW_DISPLAY_NAME  how the agents address the operator — skips the
- *                          prompt. Defaults to $USER.
- *   NANOCLAW_AGENT_NAME    messaging-channel agent name (consumed by the
- *                          channel flow). The CLI scratch agent is always
- *                          "Terminal Agent".
- *   NANOCLAW_SKIP          comma-separated step names to skip
- *                          (environment|container|onecli|auth|mounts|
- *                           service|cli-agent|timezone|channel|
- *                           verify|first-chat)
- *
- * Timezone is auto-detected after the CLI agent step. UTC resolves are
- * confirmed with the user, and free-text replies fall through to a
- * headless `claude -p` call for IANA-zone resolution.
+ *   NANOCLAW_SKIP  comma-separated steps to skip
+ *                  (environment|container|onecli|auth|mounts|service|timezone|verify)
  */
 import { spawn, spawnSync } from 'child_process';
 import fs from 'fs';
@@ -29,15 +17,6 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
-import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { runDiscordChannel } from './channels/discord.js';
-import { runIMessageChannel } from './channels/imessage.js';
-import { runSignalChannel } from './channels/signal.js';
-import { runSlackChannel } from './channels/slack.js';
-import { runTeamsChannel } from './channels/teams.js';
-import { runTelegramChannel } from './channels/telegram.js';
-import { runWhatsAppChannel } from './channels/whatsapp.js';
-import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
 import { brightSelect } from './lib/bright-select.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
 import {
@@ -48,20 +27,16 @@ import {
 } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
-import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
-import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
+import { ensureAnswer, fail, runQuietChild, runQuietStep } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
+import { brandBody, brandBold, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 
-const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
-
-type ChannelChoice = 'telegram' | 'discord' | 'whatsapp' | 'signal' | 'teams' | 'slack' | 'imessage' | 'other' | 'skip';
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
@@ -314,173 +289,8 @@ async function main(): Promise<void> {
     }
   }
 
-  let displayName: string | undefined;
-  async function resolveDisplayName(): Promise<string> {
-    if (displayName) return displayName;
-    const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-    const existing = detectExistingDisplayName(process.cwd());
-    const fallback = process.env.USER?.trim() || 'Operator';
-    displayName = preset || existing || (await askDisplayName(fallback));
-    return displayName;
-  }
-
-  if (!skip.has('cli-agent') && detectRegisteredGroups(process.cwd())) {
-    skip.add('cli-agent');
-    skip.add('first-chat');
-  }
-
-  if (!skip.has('cli-agent')) {
-    await resolveDisplayName();
-    const res = await runQuietStep(
-      'cli-agent',
-      {
-        running: 'Bringing your assistant online…',
-        done: 'Assistant wired up.',
-      },
-      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', '_ping-test'],
-    );
-    if (!res.ok) {
-      await fail(
-        'cli-agent',
-        "Couldn't bring your assistant online.",
-        `You can retry later with \`pnpm exec tsx scripts/init-cli-agent.ts --display-name "${displayName!}" --agent-name "${CLI_AGENT_NAME}"\`.`,
-      );
-    }
-    if (!skip.has('first-chat')) {
-      p.log.message(
-        brandBody(
-          dimWrap(
-            "Your assistant runs in an isolated sandbox. I'm going to send it a quick test message (ping) and wait for a reply (pong) to confirm it's responding. First startup typically takes 30–60 seconds while the sandbox warms up.",
-            4,
-          ),
-        ),
-      );
-      const ping = await confirmAssistantResponds();
-      if (ping === 'ok') {
-        phEmit('first_chat_ready');
-        const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
-        const cleanupStart = Date.now();
-        const cleanup = await spawnQuiet(
-          'pnpm',
-          ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', '_ping-test'],
-          cleanupRawLog,
-        );
-        setupLog.step(
-          'cleanup-cli-agent',
-          cleanup.ok ? 'success' : 'failed',
-          Date.now() - cleanupStart,
-          { exit_code: cleanup.exitCode },
-          cleanupRawLog,
-        );
-        if (!cleanup.ok) {
-          p.log.warn(
-            brandBody(
-              `Couldn't clean up the test agent — it may still appear in your agent list. See ${cleanupRawLog} for details.`,
-            ),
-          );
-        }
-        const next = ensureAnswer(
-          await brightSelect<'continue' | 'chat'>({
-            message: 'What next?',
-            options: [
-              {
-                value: 'continue',
-                label: 'Continue with setup',
-                hint: 'recommended',
-              },
-              {
-                value: 'chat',
-                label: 'Pause here and chat with your agent from the terminal',
-              },
-            ],
-          }),
-        ) as 'continue' | 'chat';
-        setupLog.userInput('first_chat_choice', next);
-        if (next === 'chat') {
-          const terminalAgentName = `${displayName!}'s Terminal`;
-          const createRes = await runQuietChild(
-            'create-terminal-agent',
-            'pnpm',
-            ['exec', 'tsx', 'scripts/init-cli-agent.ts', '--display-name', displayName!, '--agent-name', terminalAgentName],
-            { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
-          );
-          if (!createRes.ok) {
-            await fail(
-              'create-terminal-agent',
-              `Couldn't create ${terminalAgentName}.`,
-              'You can retry later with `pnpm exec tsx scripts/init-cli-agent.ts`.',
-            );
-          }
-          await runFirstChat();
-        }
-      } else {
-        phEmit('first_chat_failed', { reason: ping });
-        renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
-          stepName: 'cli-agent',
-          msg:
-            ping === 'socket_error'
-              ? "NanoClaw service isn't listening on its CLI socket."
-              : 'No reply from the assistant within 30 seconds.',
-          hint:
-            ping === 'socket_error'
-              ? 'Socket at data/cli.sock did not accept a connection.'
-              : 'Agent container may be failing to start or authenticate.',
-        });
-      }
-    }
-  }
-
   if (!skip.has('timezone')) {
     await runTimezoneStep();
-  }
-
-  // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
-  // Users migrating from v1 run that script before (or instead of) setup.
-
-  let channelChoice: ChannelChoice = 'skip';
-
-  if (!skip.has('channel')) {
-    // Loop so a channel sub-flow can return BACK_TO_CHANNEL_SELECTION on
-    // its first prompt and bounce the user back to the chooser without
-    // restarting setup. Channels not yet wired with the back option just
-    // return void and the loop exits after one pass.
-    let backed = true;
-    while (backed) {
-      backed = false;
-      channelChoice = await askChannelChoice();
-      if (channelChoice !== 'skip' && channelChoice !== 'other') {
-        await resolveDisplayName();
-      }
-      let result: void | typeof BACK_TO_CHANNEL_SELECTION;
-      if (channelChoice === 'telegram') {
-        result = await runTelegramChannel(displayName!);
-      } else if (channelChoice === 'discord') {
-        result = await runDiscordChannel(displayName!);
-      } else if (channelChoice === 'whatsapp') {
-        result = await runWhatsAppChannel(displayName!);
-      } else if (channelChoice === 'signal') {
-        result = await runSignalChannel(displayName!);
-      } else if (channelChoice === 'teams') {
-        result = await runTeamsChannel(displayName!);
-      } else if (channelChoice === 'slack') {
-        result = await runSlackChannel(displayName!);
-      } else if (channelChoice === 'imessage') {
-        result = await runIMessageChannel(displayName!);
-      } else if (channelChoice === 'other') {
-        result = await askOtherChannelName();
-      } else {
-        p.log.info(
-          brandBody(
-            wrapForGutter(
-              'No messaging app for now. You can add one later (like Telegram, Discord, WhatsApp, Teams, Slack, or iMessage).',
-              4,
-            ),
-          ),
-        );
-      }
-      if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
-    }
   }
 
   if (!skip.has('verify')) {
@@ -540,19 +350,17 @@ async function main(): Promise<void> {
   }
 
   const rows: [string, string][] = [
-    ['Chat in the terminal:', 'pnpm run chat hi'],
-    ["See what's happening:", 'tail -f logs/nanoclaw.log'],
-    ['Open Claude Code:', 'claude'],
+    ['Check services:', './bin/nanoclaw status'],
+    ['Follow logs:', './bin/nanoclaw logs -f'],
+    ['Gateway log:', 'tail -f logs/gateway.log'],
   ];
   const labelWidth = Math.max(...rows.map(([l]) => l.length));
   const nextSteps = rows.map(([l, c]) => `${k.cyan(l.padEnd(labelWidth))}  ${c}`).join('\n');
   note(nextSteps, 'Try these');
 
-  // Always-on warning goes before the "check your DMs" directive so the
-  // caveat doesn't land after the user's already looked away at their phone.
   note(
     wrapForGutter(
-      "NanoClaw runs on this machine. It's only reachable while this computer is on and connected to the internet. For always-on availability, run it on a cloud VM — or keep this machine awake.",
+      'NanoClaw gateway and worker run as separate services on this machine (or split hosts later). Keep this computer on, or deploy to always-on VMs.',
       6,
     ),
     'Heads up',
@@ -560,146 +368,7 @@ async function main(): Promise<void> {
 
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
-
-  const dmTarget = channelDmLabel(channelChoice);
-  if (dmTarget) {
-    // Bright framed banner (not dim) — the whole point of the feedback was
-    // that the welcome-message signal was too easy to miss. Use p.note so it
-    // renders with a visible box, cyan-bold the directive line, and put it
-    // as the last thing before outro.
-    note(`${brandBold('→')} ${k.bold(`Check your ${dmTarget} — your assistant is saying hi.`)}`, 'Go say hi');
-    p.outro(k.green("You're set."));
-  } else {
-    p.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
-  }
-}
-
-function channelDmLabel(choice: ChannelChoice): string | null {
-  switch (choice) {
-    case 'telegram':
-      return 'Telegram';
-    case 'discord':
-      return 'Discord DMs';
-    case 'whatsapp':
-      return 'WhatsApp';
-    case 'signal':
-      return 'Signal';
-    case 'teams':
-      return 'Teams';
-    case 'imessage':
-      return 'iMessage';
-    case 'slack':
-      return 'Slack DMs';
-    default:
-      return null;
-  }
-}
-
-// ─── first-chat step ───────────────────────────────────────────────────
-
-/**
- * Round-trip ping against the CLI socket before we ask the user to chat.
- * Renders its own spinner with elapsed time because a cold-start container
- * boot can take 30–60s — the elapsed counter is the difference between
- * "patient" and "is this hung?". Returns the raw result so the caller can
- * branch between the chat loop (ok) and a diagnostic note (anything else).
- */
-async function confirmAssistantResponds(): Promise<PingResult> {
-  const s = p.spinner();
-  const start = Date.now();
-  const label = 'Waking your assistant…';
-  s.start(fitToWidth(label, ' (99m 59s)'));
-  const tick = setInterval(() => {
-    const suffix = ` (${fmtDuration(Date.now() - start)})`;
-    s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
-  }, 1000);
-
-  const result = await pingCliAgent();
-
-  clearInterval(tick);
-  const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result === 'ok') {
-    s.stop(`${k.bold(fitToWidth('Your assistant is ready.', suffix))}${k.dim(suffix)}`);
-  } else {
-    const msg =
-      result === 'socket_error' ? "Couldn't reach the NanoClaw service." : "Your assistant didn't reply in time.";
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`, 1);
-  }
-  return result;
-}
-
-function renderPingFailureNote(result: PingResult): void {
-  const body =
-    result === 'socket_error'
-      ? [
-          wrapForGutter(
-            "The NanoClaw service isn't listening on its local socket. Try restarting it, then chat with `pnpm run chat hi`:",
-            6,
-          ),
-          '',
-          `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
-          `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
-        ].join('\n')
-      : wrapForGutter(
-          'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
-          6,
-        );
-  note(body, 'Skipping the first chat');
-}
-
-/**
- * Chat loop. Each message is piped through `pnpm run chat`, which uses
- * the same Unix-socket path the ping just exercised, so output streams
- * back inline as the agent replies. An empty input ends the loop.
- *
- * The intro note teaches the sandbox mental model — users reported being
- * confused about what the terminal chat *is* (vs the phone channel they'd
- * set up next) and what happens to the agent when they walk away. We
- * explain once, then offer "message or Enter to continue" so the chat is
- * clearly optional.
- */
-async function runFirstChat(): Promise<void> {
-  note(
-    wrapForGutter(
-      [
-        'Your assistant runs in a sandbox on this machine.',
-        'It wakes up when you send a message and goes back to sleep when',
-        "you're not talking — so it isn't burning resources in the background.",
-        'Its memory and environment persist between conversations.',
-      ].join(' '),
-      6,
-    ),
-    'How this works',
-  );
-  let first = true;
-  while (true) {
-    const answer = ensureAnswer(
-      await p.text({
-        message: first
-          ? 'Try a quick hello — or press Enter to continue setup'
-          : 'Another message? Press Enter to continue setup',
-        placeholder: first ? 'e.g. "hi, what can you do?"' : 'press Enter to continue',
-      }),
-    );
-    first = false;
-    const text = ((answer as string | undefined) ?? '').trim();
-    if (!text) return;
-    await sendChatMessage(text);
-  }
-}
-
-function sendChatMessage(message: string): Promise<void> {
-  return new Promise((resolve) => {
-    // `pnpm --silent` suppresses the `> nanoclaw@… chat` preamble so the
-    // agent's reply reads as a clean block under the prompt. Splitting on
-    // whitespace mirrors `pnpm run chat hello world` — chat.ts joins argv
-    // with spaces on the far side.
-    const child = spawn('pnpm', ['--silent', 'run', 'chat', ...message.split(/\s+/)], {
-      stdio: ['ignore', 'inherit', 'inherit'],
-    });
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-  });
+  p.outro(k.green("You're ready — gateway and worker are installed."));
 }
 
 // ─── auth step (select → branch) ────────────────────────────────────────
@@ -1076,90 +745,6 @@ async function runTimezoneStep(): Promise<void> {
 }
 
 // ─── prompts owned by the sequencer ────────────────────────────────────
-
-async function askDisplayName(fallback: string): Promise<string> {
-  const answer = ensureAnswer(
-    await p.text({
-      message: `What should your assistant call ${accentGreen('you')}?`,
-      placeholder: fallback,
-      defaultValue: fallback,
-    }),
-  );
-  const value = (answer as string).trim() || fallback;
-  setupLog.userInput('display_name', value);
-  return value;
-}
-
-async function askChannelChoice(): Promise<ChannelChoice> {
-  const isMac = process.platform === 'darwin';
-  const choice = ensureAnswer(
-    await brightSelect<ChannelChoice>({
-      message: 'Want to chat with your assistant from your phone?',
-      options: [
-        { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
-        { value: 'discord', label: 'Yes, connect Discord' },
-        { value: 'whatsapp', label: 'Yes, connect WhatsApp' },
-        {
-          value: 'signal',
-          label: 'Yes, connect Signal',
-          hint: 'needs signal-cli installed',
-        },
-        {
-          value: 'imessage',
-          label: 'Yes, connect iMessage (experimental)',
-          hint: isMac ? 'local macOS mode' : 'remote Photon only',
-        },
-        {
-          value: 'slack',
-          label: 'Yes, connect Slack (experimental)',
-          hint: 'needs public URL',
-        },
-        { value: 'teams', label: 'Yes, connect Microsoft Teams', hint: 'complex setup' },
-        { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
-        { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
-      ],
-    }),
-  );
-  setupLog.userInput('channel_choice', String(choice));
-  phEmit('channel_chosen', { channel: String(choice) });
-  return choice;
-}
-
-async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELECTION> {
-  const action = ensureAnswer(
-    await brightSelect<'type' | 'back'>({
-      message: 'Which channel would you like to install?',
-      options: [
-        {
-          value: 'type',
-          label: 'Type the channel name',
-          hint: 'e.g. matrix, github, linear, webex',
-        },
-        { value: 'back', label: '← Back to channel selection' },
-      ],
-      initialValue: 'type',
-    }),
-  );
-  if (action === 'back') return BACK_TO_CHANNEL_SELECTION;
-
-  const answer = ensureAnswer(
-    await p.text({
-      message: 'Channel name',
-      placeholder: 'e.g. matrix, github, linear, webex',
-    }),
-  );
-  const name = (answer as string).trim().toLowerCase().replace(/^\/?(add-)?/, '');
-  setupLog.userInput('other_channel', name);
-  phEmit('channel_other_named', { channel: name });
-  p.log.info(
-    brandBody(
-      wrapForGutter(
-        `No bash installer for ${k.bold(name)} — open Claude Code after setup and run ${k.bold(`/add-${name}`)} to install it.`,
-        4,
-      ),
-    ),
-  );
-}
 
 // ─── interactive / env helpers ─────────────────────────────────────────
 

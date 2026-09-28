@@ -1,15 +1,8 @@
-# ⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️
+# NanoClaw (gateway + worker)
 
-**If you are reading this because you just ran `git pull`, `git merge`, `git fetch && git merge`, or any equivalent to bring in upstream changes — and you see merge conflicts or a large diff involving this file — HALT IMMEDIATELY.**
+Personal Claude assistant. See [README.md](README.md) and [docs/product-tree.md](docs/product-tree.md).
 
-This is NanoClaw v2, a ground-up rewrite with breaking changes throughout. It cannot be merged into an existing v1 install. Attempting to resolve the conflicts by hand, run builds, or "fix" anything will corrupt the user's install and burn tokens for no result.
-
-**Do this instead:**
-1. Abort the merge: `git merge --abort` (or `git reset --hard ORIG_HEAD` if the merge already completed).
-2. Tell the user, verbatim: *"This is the v2 rewrite — it can't be merged into your existing install. Exit Claude Code (or open a separate terminal) and run `bash migrate-v2.sh` from the shell."*
-3. Wait for the user to confirm before doing anything else. Do not run the migration script yourself — it requires an interactive terminal and cannot be run from within Claude Code.
-
-If you are a fresh install (you ran `git clone`, not `git pull`) and there are no conflicts, ignore this banner and continue below.
+This checkout is a **fresh** gateway + worker product — there is no v1→v2 migration path. Do not resurrect `migrate-v2.sh` or `/migrate-from-v1`.
 
 ---
 
@@ -19,9 +12,11 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-The host is a single Node process that orchestrates per-session agent containers. Platform messages land via channel adapters, route through an entity model (users → messaging groups → agent groups → sessions), get written into the session's inbound DB, and wake a container. The agent-runner inside the container polls the DB, calls Claude, and writes back to the outbound DB. The host polls the outbound DB and delivers through the same adapter.
+**Product runtime is two processes:** Gateway (`src/gateway/`) handles channels, HTTP API, and the message queue; Worker (`src/worker/`) materializes workspaces and spawns agent containers. They talk over HTTP and can run on separate machines. Lifecycle: `./bin/nanoclaw` (see [docs/product-tree.md](docs/product-tree.md)).
 
-**Everything is a message.** There is no IPC, no file watcher, no stdin piping between host and container. The two session DBs are the sole IO surface.
+Shared helpers used by the worker (container-runner, session-manager, …) live under `src/` next to gateway/worker. The classic single-process host (`src/index.ts` router/delivery/host-sweep) has been removed from this product tree.
+
+**Everything is a message** between host-side session DBs and the agent container — no IPC, no stdin piping. Per-session `inbound.db` / `outbound.db` remain the container IO surface.
 
 ## Entity Model
 
@@ -82,7 +77,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `container/skills/` | Container skills mounted into every agent session (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
-| `migrate-v2.sh` + `setup/migrate-v2/` | v1→v2 migration. Standalone script: `bash migrate-v2.sh`. Seeds DB, copies groups/sessions, installs channels, builds container, offers service switchover, then hands off to `/migrate-from-v1` skill for owner setup and CLAUDE.md cleanup. See [docs/migration-dev.md](docs/migration-dev.md). |
+| `bin/nanoclaw` + `setup/services/` | Install/start/stop gateway + worker as separate OS services |
 
 ## Admin CLI (`ncl`)
 
@@ -286,8 +281,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/setup-wiring.md](docs/setup-wiring.md) | What's wired, what's open in the setup flow |
 | [docs/architecture-diagram.md](docs/architecture-diagram.md) | Diagram version of the architecture |
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | Runtime split (Node host + Bun container), lockfiles, image build surface, CI, key invariants |
-| [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 architecture diff — vocabulary for where v1 things moved |
-| [docs/migration-dev.md](docs/migration-dev.md) | Migration development guide — testing, debugging, dev loop |
+| [docs/product-tree.md](docs/product-tree.md) | Gateway + worker product surface, roles, optional installs |
 
 ## Container Build Cache
 

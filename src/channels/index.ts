@@ -1,9 +1,8 @@
-// Channel self-registration barrel.
-// Each import triggers the channel module's registerChannelAdapter() call.
+// Channel self-registration barrel for the Gateway.
+// Each import triggers registerChannelAdapter().
 //
-// Main ships with one default channel — `cli`, the always-on local-terminal
-// channel. Other channel skills (/add-slack, /add-discord, /add-whatsapp,
-// ...) copy their module from the `channels` branch and append a
-// self-registration import below.
+// Gateway product: Zoho Cliq (env-based single account). Multi-account Cliq
+// also registers from src/gateway/channels/zoho-cliq-multi.ts.
+// Extra channels: install via /add-<channel> skills and append an import here.
 
 import './zoho-cliq.js';

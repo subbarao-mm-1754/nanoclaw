@@ -1,6 +1,8 @@
 /**
  * Setup CLI entry point.
  * Usage: pnpm exec tsx setup/index.ts --step <name> [args...]
+ *
+ * Gateway + worker product steps only (classic host register/cli-agent removed).
  */
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
@@ -13,17 +15,11 @@ const STEPS: Record<
   'set-env': () => import('./set-env.js'),
   environment: () => import('./environment.js'),
   container: () => import('./container.js'),
-  register: () => import('./register.js'),
-  'pair-telegram': () => import('./pair-telegram.js'),
-  groups: () => import('./groups.js'),
-  'whatsapp-auth': () => import('./whatsapp-auth.js'),
-  'signal-auth': () => import('./signal-auth.js'),
   mounts: () => import('./mounts.js'),
   service: () => import('./service.js'),
   verify: () => import('./verify.js'),
   onecli: () => import('./onecli.js'),
   auth: () => import('./auth.js'),
-  'cli-agent': () => import('./cli-agent.js'),
 };
 
 async function main(): Promise<void> {

@@ -35,29 +35,13 @@ export function readEnvKey(key: string, projectRoot?: string): string | null {
   return null;
 }
 
-export function detectExistingDisplayName(projectRoot: string): string | null {
-  const dbPath = path.join(projectRoot, 'data', 'v2.db');
-  if (!fs.existsSync(dbPath)) return null;
-
-  let db: Database.Database | null = null;
-  try {
-    db = new Database(dbPath, { readonly: true });
-    const row = db
-      .prepare(`SELECT display_name FROM users WHERE id = 'cli:local'`)
-      .get() as { display_name: string } | undefined;
-    return row?.display_name?.trim() || null;
-  } catch {
-    return null;
-  } finally {
-    db?.close();
-  }
+export function detectExistingDisplayName(_projectRoot: string): string | null {
+  // Classic host stored the operator as users.id = 'cli:local'. Gateway product
+  // does not use that path — display name comes from env / gateway users.
+  return null;
 }
 
 export function detectRegisteredGroups(projectRoot: string): boolean {
-  if (fs.existsSync(path.join(projectRoot, 'data', 'registered_groups.json'))) {
-    return true;
-  }
-
   const dbPath = path.join(projectRoot, 'data', 'v2.db');
   if (!fs.existsSync(dbPath)) return false;
 

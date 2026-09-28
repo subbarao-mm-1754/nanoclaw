@@ -14,30 +14,23 @@ import Database from 'better-sqlite3';
 import { DATA_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
-import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
-import {
-  getPlatform,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-} from './platform.js';
+import { getServiceManager, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
+import {
+  getLaunchdServiceLabel,
+  getSystemdServiceUnit,
+} from './services/names.js';
+import { resolveRole, rolesToInstall } from './services/roles.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
-  const platform = getPlatform();
   const homeDir = os.homedir();
+  const role = resolveRole();
+  const kinds = rolesToInstall(role);
 
-  log.info('Starting verification');
+  log.info('Starting verification', { role, kinds });
 
-  // 1. Check service status + detect checkout mismatch.
-  //
-  // Why the mismatch matters: the host reads `<projectRoot>/data/v2.db` and
-  // binds `<DATA_DIR>/cli.sock` relative to the project root it was started
-  // from. If the running service is from a sibling checkout (common for
-  // developers with multiple clones), nothing in this checkout is actually
-  // wired up. Surface the mismatch directly so the user knows to point the
-  // service at the right folder.
+  // 1. Check gateway/worker service status + checkout mismatch.
   let service:
     | 'not_found'
     | 'stopped'
@@ -45,74 +38,111 @@ export async function run(_args: string[]): Promise<void> {
     | 'running_other_checkout' = 'not_found';
   let runningFromPath: string | null = null;
   const mgr = getServiceManager();
-
-  const launchdLabel = getLaunchdLabel(projectRoot);
-  const systemdUnit = getSystemdUnit(projectRoot);
+  const kindStates: Record<string, string> = {};
 
   if (mgr === 'launchd') {
     try {
       const output = execSync('launchctl list', { encoding: 'utf-8' });
-      const line = output.split('\n').find((l) => l.includes(launchdLabel));
-      if (line) {
+      let anyFound = false;
+      let allRunning = true;
+      for (const kind of kinds) {
+        const label = getLaunchdServiceLabel(kind, projectRoot);
+        const line = output.split('\n').find((l) => l.includes(label));
+        if (!line) {
+          kindStates[kind] = 'not_found';
+          allRunning = false;
+          continue;
+        }
+        anyFound = true;
         const pidField = line.trim().split(/\s+/)[0];
         if (pidField !== '-' && pidField) {
-          service = 'running';
+          kindStates[kind] = 'running';
           const pid = Number(pidField);
-          if (Number.isInteger(pid) && pid > 0) {
+          if (!runningFromPath && Number.isInteger(pid) && pid > 0) {
             runningFromPath = resolveBinaryScript(pid);
           }
         } else {
-          service = 'stopped';
+          kindStates[kind] = 'stopped';
+          allRunning = false;
         }
       }
+      service = !anyFound ? 'not_found' : allRunning ? 'running' : 'stopped';
     } catch {
       // launchctl not available
     }
   } else if (mgr === 'systemd') {
     const prefix = isRoot() ? 'systemctl' : 'systemctl --user';
-    try {
-      execSync(`${prefix} is-active ${systemdUnit}`, { stdio: 'ignore' });
-      service = 'running';
+    let anyFound = false;
+    let allRunning = true;
+    for (const kind of kinds) {
+      const unit = getSystemdServiceUnit(kind, projectRoot);
       try {
-        const pidStr = execSync(
-          `${prefix} show ${systemdUnit} -p MainPID --value`,
-          { encoding: 'utf-8' },
-        ).trim();
-        const pid = Number(pidStr);
-        if (Number.isInteger(pid) && pid > 0) {
-          runningFromPath = resolveBinaryScript(pid);
+        execSync(`${prefix} is-active ${unit}`, { stdio: 'ignore' });
+        kindStates[kind] = 'running';
+        anyFound = true;
+        if (!runningFromPath) {
+          try {
+            const pidStr = execSync(
+              `${prefix} show ${unit} -p MainPID --value`,
+              { encoding: 'utf-8' },
+            ).trim();
+            const pid = Number(pidStr);
+            if (Number.isInteger(pid) && pid > 0) {
+              runningFromPath = resolveBinaryScript(pid);
+            }
+          } catch {
+            // ignore
+          }
         }
       } catch {
-        // couldn't read MainPID; leave runningFromPath null
-      }
-    } catch {
-      try {
-        const output = execSync(`${prefix} list-unit-files`, {
-          encoding: 'utf-8',
-        });
-        if (output.includes(systemdUnit)) {
-          service = 'stopped';
+        try {
+          const output = execSync(`${prefix} list-unit-files`, {
+            encoding: 'utf-8',
+          });
+          if (output.includes(unit)) {
+            kindStates[kind] = 'stopped';
+            anyFound = true;
+            allRunning = false;
+          } else {
+            kindStates[kind] = 'not_found';
+            allRunning = false;
+          }
+        } catch {
+          kindStates[kind] = 'not_found';
+          allRunning = false;
         }
-      } catch {
-        // systemctl not available
       }
     }
+    service = !anyFound ? 'not_found' : allRunning ? 'running' : 'stopped';
   } else {
-    // Check for nohup PID file
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
-    if (fs.existsSync(pidFile)) {
+    // nohup PID files: gateway.pid / worker.pid
+    let anyFound = false;
+    let allRunning = true;
+    for (const kind of kinds) {
+      const pidFile = path.join(projectRoot, `${kind}.pid`);
+      if (!fs.existsSync(pidFile)) {
+        kindStates[kind] = 'not_found';
+        allRunning = false;
+        continue;
+      }
+      anyFound = true;
       try {
         const raw = fs.readFileSync(pidFile, 'utf-8').trim();
         const pid = Number(raw);
         if (raw && Number.isInteger(pid) && pid > 0) {
           process.kill(pid, 0);
-          service = 'running';
-          runningFromPath = resolveBinaryScript(pid);
+          kindStates[kind] = 'running';
+          if (!runningFromPath) runningFromPath = resolveBinaryScript(pid);
+        } else {
+          kindStates[kind] = 'stopped';
+          allRunning = false;
         }
       } catch {
-        service = 'stopped';
+        kindStates[kind] = 'stopped';
+        allRunning = false;
       }
     }
+    service = !anyFound ? 'not_found' : allRunning ? 'running' : 'stopped';
   }
 
   if (
@@ -123,7 +153,7 @@ export async function run(_args: string[]): Promise<void> {
     service = 'running_other_checkout';
   }
 
-  log.info('Service status', { service, runningFromPath });
+  log.info('Service status', { service, kindStates, runningFromPath });
 
   // 2. Check container runtime
   let containerRuntime = 'none';
@@ -160,6 +190,8 @@ export async function run(_args: string[]): Promise<void> {
     'RESEND_API_KEY',
     'WHATSAPP_ACCESS_TOKEN',
     'IMESSAGE_ENABLED',
+    'ZOHO_CLIQ_CLIENT_ID',
+    'ZOHO_CLIQ_REFRESH_TOKEN',
   ]);
 
   const has = (key: string) => !!(process.env[key] || envVars[key]);
@@ -184,16 +216,18 @@ export async function run(_args: string[]): Promise<void> {
   if (has('RESEND_API_KEY')) channelAuth.resend = 'configured';
   if (has('WHATSAPP_ACCESS_TOKEN')) channelAuth['whatsapp-cloud'] = 'configured';
   if (has('IMESSAGE_ENABLED')) channelAuth.imessage = 'configured';
+  if (has('ZOHO_CLIQ_CLIENT_ID') || has('ZOHO_CLIQ_REFRESH_TOKEN')) {
+    channelAuth['zoho-cliq'] = 'configured';
+  }
 
   const configuredChannels = Object.keys(channelAuth);
 
-  // 5. Check registered groups in v2 central DB (agent_groups + messaging_group_agents)
+  // 5. Agent groups (classic host wiring) and/or gateway workspaces
   let registeredGroups = 0;
   const dbPath = path.join(DATA_DIR, 'v2.db');
   if (fs.existsSync(dbPath)) {
     try {
       const db = new Database(dbPath, { readonly: true });
-      // Count agent groups that have at least one messaging group wired
       const row = db
         .prepare(
           `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
@@ -207,6 +241,21 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
+  let gatewayWorkspaces = 0;
+  const gatewayDbPath = path.join(DATA_DIR, 'gateway.db');
+  if (fs.existsSync(gatewayDbPath)) {
+    try {
+      const gdb = new Database(gatewayDbPath, { readonly: true });
+      const row = gdb
+        .prepare(`SELECT COUNT(*) as count FROM workspaces`)
+        .get() as { count: number };
+      gatewayWorkspaces = row.count;
+      gdb.close();
+    } catch {
+      // schema may differ / empty
+    }
+  }
+
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
   if (
@@ -217,23 +266,26 @@ export async function run(_args: string[]): Promise<void> {
     mountAllowlist = 'configured';
   }
 
-  // Determine overall status. The cli-agent step earlier in setup already
-  // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
     service,
     credentials,
     registeredGroups,
+    gatewayWorkspaces,
   });
 
-  log.info('Verification complete', { status, channelAuth });
+  log.info('Verification complete', { status, channelAuth, kindStates });
 
   emitStatus('VERIFY', {
     SERVICE: service,
+    ROLE: role,
+    KINDS: kinds.join(','),
+    KIND_STATES: JSON.stringify(kindStates),
     CONTAINER_RUNTIME: containerRuntime,
     CREDENTIALS: credentials,
     CONFIGURED_CHANNELS: configuredChannels.join(','),
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,
+    GATEWAY_WORKSPACES: gatewayWorkspaces,
     MOUNT_ALLOWLIST: mountAllowlist,
     STATUS: status,
     LOG: 'logs/setup.log',
@@ -246,10 +298,13 @@ export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
+  gatewayWorkspaces?: number;
 }): 'success' | 'failed' {
+  const hasAgentSurface =
+    input.registeredGroups > 0 || (input.gatewayWorkspaces ?? 0) > 0;
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    input.registeredGroups > 0
+    hasAgentSurface
     ? 'success'
     : 'failed';
 }

@@ -36,12 +36,6 @@ describe('detectRegisteredGroups', () => {
     expect(detectRegisteredGroups(tempDir)).toBe(false);
   });
 
-  it('detects pre-migration registered_groups.json', async () => {
-    const { detectRegisteredGroups } = await import('./environment.js');
-    fs.writeFileSync(path.join(tempDir, 'data', 'registered_groups.json'), '[]');
-    expect(detectRegisteredGroups(tempDir)).toBe(true);
-  });
-
   it('returns false for an empty v2 central DB', async () => {
     const { detectRegisteredGroups } = await import('./environment.js');
     const db = new Database(path.join(tempDir, 'data', 'v2.db'));

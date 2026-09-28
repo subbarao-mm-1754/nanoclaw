@@ -1,9 +1,5 @@
 /**
  * Tests for core per-session messages_in schema maintenance.
- *
- * Task-specific DB tests (insertTask, cancel/pause/resume, updateTask,
- * insertRecurrence) live in `src/modules/scheduling/db.test.ts` with the
- * rest of the scheduling module.
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';

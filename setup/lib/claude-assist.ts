@@ -44,7 +44,7 @@ export interface AssistContext {
  * they appear in fail() calls; values are repo-relative paths.
  */
 export const STEP_FILES: Record<string, string[]> = {
-  bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
+  bootstrap: ['nanoclaw.sh', 'setup/install-node.sh'],
   environment: ['setup/environment.ts'],
   container: [
     'setup/container.ts',
@@ -58,27 +58,9 @@ export const STEP_FILES: Record<string, string[]> = {
     'setup/install-claude.sh',
   ],
   mounts: ['setup/mounts.ts'],
-  service: ['setup/service.ts'],
-  'cli-agent': ['setup/cli-agent.ts', 'scripts/init-cli-agent.ts'],
+  service: ['setup/service.ts', 'setup/services/install.ts'],
   timezone: ['setup/timezone.ts', 'setup/lib/tz-from-claude.ts'],
-  channel: ['setup/auto.ts'],
   verify: ['setup/verify.ts'],
-  // Channel-specific sub-steps:
-  'telegram-install': ['setup/add-telegram.sh', 'setup/channels/telegram.ts'],
-  'telegram-validate': ['setup/channels/telegram.ts'],
-  'pair-telegram': ['setup/pair-telegram.ts', 'setup/channels/telegram.ts'],
-  'discord-install': ['setup/add-discord.sh', 'setup/channels/discord.ts'],
-  'slack-install': ['setup/add-slack.sh', 'setup/channels/slack.ts'],
-  'slack-validate': ['setup/channels/slack.ts'],
-  'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts'],
-  'imessage': ['setup/channels/imessage.ts'],
-  'teams-install': ['setup/add-teams.sh', 'setup/channels/teams.ts'],
-  'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams.ts'],
-  'init-first-agent': [
-    'scripts/init-first-agent.ts',
-    'setup/channels/telegram.ts',
-    'setup/channels/discord.ts',
-  ],
 };
 
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];

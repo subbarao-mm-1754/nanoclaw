@@ -133,7 +133,9 @@ export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<s
 }
 
 export async function findAgentIdByIdentifier(identifier: string): Promise<string | null> {
-  const listed = await runOnecli(['agents', 'list']);
+  // Default list page is small (~20); installs with many preview/draft agents
+  // otherwise miss the real agent and report "still missing after ensureAgent".
+  const listed = await runOnecli(['agents', 'list', '--max', '500']);
   const agents = extractList(listed);
   for (const agent of agents) {
     if (agent.identifier === identifier || agent.id === identifier) {
