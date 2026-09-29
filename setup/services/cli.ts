@@ -22,8 +22,11 @@ Usage:
 
 Roles (also via NANOCLAW_ROLE):
   both     gateway + worker on this machine (default)
-  gateway  channels/API only — set GATEWAY_WORKER_URL to the remote worker
+  gateway  channels/API only — set GATEWAY_WORKER_URL to the remote worke
   worker   containers only — set GATEWAY_PUBLIC_URL so the worker can callback
+
+On start/restart/service install, local OneCLI is ensured first (health check;
+`onecli start` if needed). Remote ONECLI_URL is only probed, not started.
 
 Remote split (different machines):
   Machine A: NANOCLAW_ROLE=gateway GATEWAY_WORKER_URL=http://worker-host:8080

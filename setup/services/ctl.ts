@@ -14,6 +14,7 @@ import {
   type ServiceKind,
 } from './names.js';
 import { resolveRole, rolesToInstall } from './roles.js';
+import { ensureOnecliRunning } from './ensure-onecli.js';
 
 export type CtlAction = 'start' | 'stop' | 'restart' | 'status';
 
@@ -166,6 +167,10 @@ export function runCtl(action: CtlAction, roleArg?: string): number {
   const platform = getPlatform();
 
   console.log(`NanoClaw ${action} (role=${role}, kinds=${kinds.join('+')})`);
+
+  if (action === 'start' || action === 'restart') {
+    ensureOnecliRunning(projectRoot);
+  }
 
   if (platform === 'macos') {
     return ctlLaunchd(action, kinds, projectRoot);

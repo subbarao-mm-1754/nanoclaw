@@ -1,8 +1,11 @@
 /**
  * Step: container — Build container image and verify with test run.
- * Replaces 03-setup-container.sh
+ * Linux/WSL: Podman via docker CLI shim (setup/install-docker.sh).
+ * macOS: Docker Desktop if already installed, otherwise Colima (never installs Desktop).
  */
 import { execSync, spawnSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { setTimeout as sleep } from 'timers/promises';
 
@@ -27,21 +30,109 @@ function dockerRunning(): boolean {
 }
 
 /**
- * Try to start Docker if it's installed but idle. Poll up to 60s for the
- * daemon to come up — but bail immediately if the socket is reachable and
- * only blocked by a group-permission error, since that won't resolve by
- * waiting (the caller handles the sg re-exec for that case).
+ * Try to start the container runtime if installed but idle. Poll up to 60s.
+ * Bail immediately on group-permission errors for Docker Engine (caller may
+ * re-exec under `sg docker`). On Linux+Podman, prefer the user socket.
  */
+function preferPodmanOnLinux(): boolean {
+  return getPlatform() === 'linux' && commandExists('podman');
+}
+
+function macosDockerDesktopInstalled(): boolean {
+  return (
+    fs.existsSync('/Applications/Docker.app') ||
+    fs.existsSync(path.join(os.homedir(), 'Applications', 'Docker.app'))
+  );
+}
+
+/** Colima is the macOS default when Docker Desktop is not installed. */
+function preferColimaOnMac(): boolean {
+  return getPlatform() === 'macos' && commandExists('colima') && !macosDockerDesktopInstalled();
+}
+
+function macosEngineLabel(): string {
+  if (macosDockerDesktopInstalled()) return 'docker-desktop';
+  if (commandExists('colima')) return 'colima';
+  return 'docker';
+}
+
+/** Point DOCKER_HOST at the rootless Podman user socket when present. */
+function usePodmanUserSocket(): void {
+  if (process.env.DOCKER_HOST) return;
+  try {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    if (uid == null) return;
+    const sock = `/run/user/${uid}/podman/podman.sock`;
+    if (fs.existsSync(sock)) {
+      process.env.DOCKER_HOST = `unix://${sock}`;
+      log.info('Using Podman user socket', { DOCKER_HOST: process.env.DOCKER_HOST });
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function startMacosRuntime(): void {
+  if (macosDockerDesktopInstalled()) {
+    log.info('Starting Docker Desktop');
+    execSync('open -a Docker', { stdio: 'ignore' });
+    return;
+  }
+  if (commandExists('colima')) {
+    const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
+    const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
+    if (status.status === 0 && /is running/i.test(out)) {
+      log.info('Colima already running');
+      return;
+    }
+    // Blocks until the VM is ready (first start can take several minutes).
+    log.info('Starting Colima');
+    execSync('colima start', {
+      stdio: 'inherit',
+      timeout: 300_000,
+    });
+    return;
+  }
+  // Last resort — user may have Desktop without the usual app path.
+  log.info('Starting Docker Desktop (fallback)');
+  execSync('open -a Docker', { stdio: 'ignore' });
+}
+
 async function tryStartDocker(): Promise<DockerStatus> {
   const platform = getPlatform();
-  log.info('Docker not running — attempting to start', { platform });
+  log.info('Container runtime not running — attempting to start', { platform });
 
   try {
     if (platform === 'macos') {
-      execSync('open -a Docker', { stdio: 'ignore' });
+      startMacosRuntime();
+      // Colima start already waits for readiness; still poll briefly for Desktop.
+      if (preferColimaOnMac() && dockerStatus() === 'ok') {
+        log.info('Container runtime is up');
+        return 'ok';
+      }
     } else if (platform === 'linux') {
-      // Inherit stdio so sudo can prompt for a password if needed.
-      execSync('sudo systemctl start docker', { stdio: 'inherit' });
+      // Linux default is Podman (+ docker CLI shim). Start sockets first;
+      // fall back to Docker Engine for older installs that still use it.
+      if (preferPodmanOnLinux()) {
+        try {
+          execSync('systemctl --user enable --now podman.socket', {
+            stdio: 'ignore',
+          });
+        } catch (err) {
+          log.warn('systemctl --user start podman.socket failed', { err });
+        }
+        try {
+          execSync('sudo -n systemctl enable --now podman.socket', {
+            stdio: 'ignore',
+          });
+        } catch {
+          // system socket optional on pure rootless setups / no passwordless sudo
+        }
+        usePodmanUserSocket();
+      } else {
+        // Inherit stdio so sudo can prompt for a password if needed.
+        execSync('sudo systemctl start docker', { stdio: 'inherit' });
+      }
     } else {
       return 'other';
     }
@@ -50,19 +141,28 @@ async function tryStartDocker(): Promise<DockerStatus> {
     return 'other';
   }
 
-  for (let i = 0; i < 30; i++) {
+  // Docker Desktop / Podman: poll up to 60s. Colima already blocked in start.
+  const polls = preferColimaOnMac() ? 15 : 30;
+  for (let i = 0; i < polls; i++) {
     await sleep(2000);
     const s = dockerStatus();
     if (s === 'ok') {
-      log.info('Docker is up');
+      log.info('Container runtime is up');
       return 'ok';
     }
     if (s === 'no-permission') {
-      log.info('Docker daemon is up but socket is not accessible (group membership)');
+      if (preferPodmanOnLinux()) {
+        usePodmanUserSocket();
+        if (dockerStatus() === 'ok') {
+          log.info('Container runtime is up via Podman user socket');
+          return 'ok';
+        }
+      }
+      log.info('Container runtime is up but socket is not accessible (group membership)');
       return 'no-permission';
     }
   }
-  log.warn('Docker did not become ready within 60s');
+  log.warn('Container runtime did not become ready within timeout');
   return 'no-daemon';
 }
 
@@ -99,7 +199,13 @@ export async function run(args: string[]): Promise<void> {
   }
 
   if (!commandExists('docker')) {
-    log.info('Docker not found — running setup/install-docker.sh');
+    log.info(
+      getPlatform() === 'linux'
+        ? 'Container runtime not found — running setup/install-docker.sh (Podman on Linux)'
+        : getPlatform() === 'macos'
+          ? 'Container runtime not found — running setup/install-docker.sh (Docker Desktop if present, else Colima)'
+          : 'Docker not found — running setup/install-docker.sh',
+    );
     try {
       execSync('bash setup/install-docker.sh', { cwd: projectRoot, stdio: 'inherit' });
     } catch (err) {
@@ -120,21 +226,25 @@ export async function run(args: string[]): Promise<void> {
     process.exit(2);
   }
 
+  if (preferPodmanOnLinux()) {
+    usePodmanUserSocket();
+  }
+
   {
     let status = dockerStatus();
     if (status !== 'ok') {
       status = await tryStartDocker();
     }
 
-    // Socket is unreachable due to group perms — current shell's supplementary
-    // groups are fixed at login, so `usermod -aG docker` doesn't affect us
-    // until next login. Ensure the user is in the docker group (install-docker.sh
-    // does this on fresh installs, but skips when Docker is already present),
-    // then re-exec under `sg docker` so the child picks up docker as its
-    // primary group and can talk to /var/run/docker.sock without a logout.
-    if (status === 'no-permission' && getPlatform() === 'linux' && commandExists('sg')) {
-      // Ensure the current user is in the docker group — without this,
-      // sg will ask for the (typically unset) group password and fail.
+    // Docker Engine only: socket unreachable due to group perms — current
+    // shell's supplementary groups are fixed at login. Re-exec under
+    // `sg docker`. Skip for Podman (rootless user socket; no docker group).
+    if (
+      status === 'no-permission' &&
+      getPlatform() === 'linux' &&
+      !preferPodmanOnLinux() &&
+      commandExists('sg')
+    ) {
       const inGroup = spawnSync('id', ['-nG'], { encoding: 'utf-8' });
       if (!(inGroup.stdout ?? '').split(/\s+/).includes('docker')) {
         log.info('Adding current user to docker group');
@@ -162,6 +272,11 @@ export async function run(args: string[]): Promise<void> {
         TEST_OK: false,
         STATUS: 'failed',
         ERROR: error,
+        ...(preferPodmanOnLinux()
+          ? { ENGINE: 'podman' }
+          : getPlatform() === 'macos'
+            ? { ENGINE: macosEngineLabel() }
+            : {}),
         LOG: 'logs/setup.log',
       });
       process.exit(2);
@@ -175,7 +290,6 @@ export async function run(args: string[]): Promise<void> {
   // Keeps /setup and ./container/build.sh in sync — both read the same source.
   const buildArgs: string[] = [];
   try {
-    const fs = await import('fs');
     const envPath = path.join(projectRoot, '.env');
     if (fs.existsSync(envPath)) {
       const match = fs.readFileSync(envPath, 'utf-8').match(/^INSTALL_CJK_FONTS=(.+)$/m);
@@ -237,6 +351,11 @@ export async function run(args: string[]): Promise<void> {
     BUILD_OK: buildOk,
     TEST_OK: testOk,
     STATUS: status,
+    ...(preferPodmanOnLinux()
+      ? { ENGINE: 'podman' }
+      : getPlatform() === 'macos'
+        ? { ENGINE: macosEngineLabel() }
+        : {}),
     LOG: 'logs/setup.log',
   });
 

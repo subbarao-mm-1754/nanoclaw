@@ -4,6 +4,9 @@ This document is the contract for NanoClaw's end-to-end scripted setup
 (`bash nanoclaw.sh` → `pnpm run setup:auto`). Read it before adding a new
 step, fixing a regression, or changing how output is rendered.
 
+For **what gets installed on macOS vs Linux** and what stays optional
+(skills / env), see [setup-install.md](setup-install.md).
+
 ## The three output levels
 
 Every setup step produces output at **three distinct levels**. They have

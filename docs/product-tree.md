@@ -17,14 +17,19 @@ Lifecycle:
 ./bin/nanoclaw logs -f
 ```
 
+`start` / `restart` / `service install` ensure **local OneCLI** is up first
+(`ONECLI_URL` health check; `onecli start` if needed). If OneCLI is already
+running, that step is a no-op. A remote `ONECLI_URL` is only checked, not started.
+See [setup-install.md](setup-install.md).
+
 ## Core (keep)
 
 - `src/gateway/` — gateway process
 - `src/worker/` — worker process
 - Shared runtime used by worker/gateway: `container-runner`, `container-runtime`, `container-config`, `session-manager`, `db/`, `channels/` (registry + adapters you enable), `config`, `log`, `group-init`, `claude-md-compose`, …
-- `container/agent-runner/` — agent inside Docker
-- OneCLI (or `/use-native-credential-proxy`) — credentials
-- Docker / Node / pnpm
+- `container/agent-runner/` — agent inside the container runtime
+- OneCLI (or `/use-native-credential-proxy`) — credentials (OneCLI Compose stack includes its own Postgres container)
+- Container runtime + Node + pnpm — see [setup-install.md](setup-install.md) for OS-specific packages (macOS: Desktop or Colima; Linux/WSL2: Podman)
 - `setup/services/` + `bin/nanoclaw` — install & start/stop
 - Channel you use today: Zoho Cliq (`src/channels/zoho-cliq.ts`, gateway multi-account)
 
@@ -33,12 +38,14 @@ Lifecycle:
 | Capability | How |
 |------------|-----|
 | Extra messaging channels | `/add-<channel>` skills (Discord, Slack, Telegram, …) |
-| Knowledge DB (Postgres) | Set `KNOWLEDGE_DATABASE_URL` + Postgres |
+| Knowledge DB (Postgres) | **Not installed by setup.** Set `KNOWLEDGE_DATABASE_URL` (or `DATABASE_URL`) on the gateway to your own Postgres. Required for `knowledge_*` tools. Separate from OneCLI’s Postgres — see [setup-install.md](setup-install.md#agent-knowledge-store-knowledge_database_url) |
 | Live browser streaming | `LIVE_BROWSER_ENABLED=true` |
 | Multi-agent LangGraph orchestration | On by default; disable with `MULTI_AGENT_ORCHESTRATION_ENABLED=false` |
 | Ollama / OpenCode / Codex providers | Provider skills |
 | Mount allowlist tooling | `/manage-mounts` |
 | Apple Container | `/convert-to-apple-container` |
+
+Full default-vs-optional install matrix: [setup-install.md](setup-install.md).
 
 ## Not part of this product surface
 

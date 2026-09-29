@@ -817,15 +817,17 @@ function runInheritScript(cmd: string, args: string[]): Promise<number> {
 }
 
 /**
- * After installing Docker, this process's supplementary groups are still
- * frozen from login — subsequent steps that talk to /var/run/docker.sock
- * (onecli install, service start, …) fail with EACCES even though the
- * daemon is up. Detect that and re-exec the whole driver under `sg docker`
- * so the rest of the run inherits the docker group without a re-login.
+ * After installing Docker Engine, this process's supplementary groups are
+ * still frozen from login — subsequent steps that talk to
+ * /var/run/docker.sock fail with EACCES. Re-exec under `sg docker`.
+ *
+ * Skipped when Podman is present (Linux default): rootless uses the user
+ * socket, not the docker group.
  */
 function maybeReexecUnderSg(): void {
   if (process.env.NANOCLAW_REEXEC_SG === '1') return;
   if (process.platform !== 'linux') return;
+  if (spawnSync('which', ['podman'], { stdio: 'ignore' }).status === 0) return;
   const info = spawnSync('docker', ['info'], { encoding: 'utf-8' });
   if (info.status === 0) return;
   const err = `${info.stderr ?? ''}\n${info.stdout ?? ''}`;

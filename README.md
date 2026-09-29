@@ -31,7 +31,7 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
+`nanoclaw.sh` walks you from a fresh machine to a running gateway + worker. It installs Node, pnpm, and the OS container runtime if missing (macOS: Docker Desktop if present, else Colima; Linux/WSL2: Podman), registers your Anthropic credential with OneCLI, builds the agent container image, and starts services. Channel adapters and extra tools are optional skills. If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke. See [docs/setup-install.md](docs/setup-install.md).
 
 This product tree is **gateway + worker** (separate services). See [docs/product-tree.md](docs/product-tree.md) for install/start/stop and split-machine roles.
 
@@ -110,8 +110,12 @@ Skills we'd like to see:
 
 - macOS or Linux (Windows via WSL2)
 - Node.js 20+ and pnpm 10+ (the installer will install both if missing)
-- [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
+- A container runtime the installer can use or install:
+  - **macOS:** existing [Docker Desktop](https://docker.com/products/docker-desktop) if present; otherwise [Colima](https://github.com/abiosoft/colima) + Docker CLI (setup installs Colima — not Desktop)
+  - **Linux / WSL2:** [Podman](https://podman.io/) + `podman-docker` CLI shim (not Docker Engine)
 - [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
+
+Full OS install matrix (what setup installs vs optional skills): [docs/setup-install.md](docs/setup-install.md).
 
 ## Architecture
 
@@ -140,13 +144,13 @@ Key files:
 
 ## FAQ
 
-**Why Docker?**
+**Why containers?**
 
-Docker provides cross-platform support (macOS, Linux and Windows via WSL2) and a mature ecosystem. On macOS, you can optionally switch to Apple Container via `/convert-to-apple-container` for a lighter-weight native runtime. For additional isolation, [Docker Sandboxes](docs/docker-sandboxes.md) run each container inside a micro VM.
+Agents run in isolated Linux containers. The host uses a Docker-compatible CLI: Colima or Docker Desktop on macOS, Podman (with a `docker` shim) on Linux/WSL2. On macOS you can optionally switch to Apple Container via `/convert-to-apple-container`. For additional isolation, [Docker Sandboxes](docs/docker-sandboxes.md) run each container inside a micro VM. See [docs/setup-install.md](docs/setup-install.md).
 
 **Can I run this on Linux or Windows?**
 
-Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via WSL2). Just run `bash nanoclaw.sh`.
+Yes. Linux and Windows (via WSL2) use Podman by default; macOS uses Docker Desktop if already installed, otherwise Colima. Run `bash nanoclaw.sh`.
 
 **Is this secure?**
 

@@ -28,6 +28,7 @@ import {
 } from './names.js';
 import { resolveRole, rolesToInstall, type NanoclawRole } from './roles.js';
 import { buildLaunchdPlist, buildSystemdTarget, buildSystemdUnit } from './templates.js';
+import { ensureOnecliRunning } from './ensure-onecli.js';
 
 export type InstallResult = {
   role: NanoclawRole;
@@ -440,6 +441,7 @@ export function installServices(roleArg?: string): InstallResult {
   ensureBuilt(projectRoot);
   fs.mkdirSync(path.join(projectRoot, 'logs'), { recursive: true });
   unloadLegacyClassicHost(projectRoot, platform);
+  ensureOnecliRunning(projectRoot);
 
   if (platform === 'macos') {
     return installLaunchd(projectRoot, nodePath, homeDir, kinds);
