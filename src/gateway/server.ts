@@ -1,9 +1,12 @@
 import http from 'http';
 
 import {
+  CHATBOT_UI_ENABLED,
+  CHATBOT_UI_PATH,
   GATEWAY_AUTH_TOKEN,
   GATEWAY_HOST,
   GATEWAY_PORT,
+  GATEWAY_PUBLIC_URL,
   WORKER_AUTH_TOKEN,
   WORKER_MAX_BODY_BYTES,
 } from '../config.js';
@@ -27,6 +30,10 @@ import {
   startEdit,
 } from './builder/service.js';
 import { handleWorkerOutboundCallback } from './outbound-callback.js';
+import { beginHttpDelivery, endHttpDelivery } from './http-channel.js';
+import { routeChannelInbound } from './channel-router.js';
+import { ensureUserForChannelSender } from './store/channel-identities.js';
+import { issueChatTicket, redeemChatTicket } from './store/chat-tickets.js';
 import type { WorkerOutboundCallbackPayload, WorkerProcessMessageResponse } from '../worker/types.js';
 import { isMultipartRequest as isOutboundMultipartRequest } from '../worker/outbound-multipart.js';
 import {
@@ -68,7 +75,7 @@ import { listWorkspaces, registerWorkspace, getWorkspace } from './store/workspa
 import { enqueueInboundMessage } from './store/messages.js';
 import { getOrCreateConversation } from './store/conversations.js';
 import { getHttpResponse, listHttpResponses } from './store/http-responses.js';
-import { AuthError, createSession, createUser, deleteSession, getSession, loginUser } from './store/users.js';
+import { AuthError, createSession, createUser, deleteSession, getSession, getUserById, loginUser } from './store/users.js';
 import {
   BrowserConnectError,
   confirmBrowserConnect,
@@ -499,18 +506,83 @@ async function handleInjectInbound(req: http.IncomingMessage, res: http.ServerRe
     throw new Error('content must be an object');
   }
 
-  const conversation = getOrCreateConversation({
-    channel_type: channelType,
-    platform_id: platformId,
-    thread_id: threadId,
-    display_name: typeof body.display_name === 'string' ? body.display_name : undefined,
-    workspace_id: typeof body.workspace_id === 'string' ? body.workspace_id : undefined,
-  });
-
   const messageId =
     typeof body.id === 'string' && body.id.trim() !== ''
       ? body.id
       : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const senderDisplayName =
+    typeof body.sender_display_name === 'string' ? body.sender_display_name : undefined;
+  const senderId =
+    typeof body.sender_id === 'string' && body.sender_id.trim() !== ''
+      ? body.sender_id.trim()
+      : platformId;
+
+  // Same slash-command / builder routing as Cliq (channel-manager path).
+  beginHttpDelivery({
+    inboundId: messageId,
+    conversationId: `http-cmd-${messageId}`,
+    workerJobId: `http-cmd-${messageId}`,
+  });
+  let routed;
+  try {
+    routed = await routeChannelInbound({
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      content,
+      sender_display_name: senderDisplayName,
+    });
+  } finally {
+    endHttpDelivery();
+  }
+
+  if (routed.kind === 'builder') {
+    jsonResponse(res, 202, {
+      message: { id: messageId, status: 'completed', kind: 'chat' },
+      conversation: null,
+      routed: { kind: 'builder', action: routed.action },
+    });
+    return;
+  }
+
+  const routedContent = routed.content ?? content;
+
+  let workspaceId =
+    typeof body.workspace_id === 'string' ? body.workspace_id : undefined;
+  if (!workspaceId) {
+    let userId: string | undefined;
+    if (routedContent && typeof routedContent === 'object') {
+      const gatewayUserId = (routedContent as Record<string, unknown>).gatewayUserId;
+      if (typeof gatewayUserId === 'string' && gatewayUserId.trim()) {
+        const owner = getUserById(gatewayUserId.trim());
+        if (owner) userId = owner.id;
+      }
+    }
+    if (!userId) {
+      try {
+        userId = ensureUserForChannelSender({
+          channel_type: channelType,
+          sender_id: senderId,
+          display_name: senderDisplayName,
+        }).id;
+      } catch {
+        userId = undefined;
+      }
+    }
+    if (userId) {
+      const agents = listUserAgents(userId);
+      workspaceId = agents[0]?.workspace_id;
+    }
+  }
+
+  const conversation = getOrCreateConversation({
+    channel_type: channelType,
+    platform_id: platformId,
+    thread_id: threadId,
+    display_name: senderDisplayName,
+    workspace_id: workspaceId,
+  });
 
   const message = enqueueInboundMessage(
     {
@@ -519,15 +591,198 @@ async function handleInjectInbound(req: http.IncomingMessage, res: http.ServerRe
       platform_id: platformId,
       thread_id: threadId,
       kind: typeof body.kind === 'string' ? body.kind : 'chat',
-      content,
+      content: routedContent,
       timestamp: typeof body.timestamp === 'string' ? body.timestamp : new Date().toISOString(),
-      sender_id: typeof body.sender_id === 'string' ? body.sender_id : platformId,
-      sender_display_name: typeof body.sender_display_name === 'string' ? body.sender_display_name : undefined,
+      sender_id: senderId,
+      sender_display_name: senderDisplayName,
     },
     conversation.id,
   );
 
   jsonResponse(res, 202, { message, conversation });
+}
+
+function studioChatPageBase(req: http.IncomingMessage): string {
+  const host = req.headers.host?.trim();
+  if (host) {
+    const xfProto = req.headers['x-forwarded-proto'];
+    const proto =
+      typeof xfProto === 'string' && xfProto.split(',')[0]?.trim()
+        ? xfProto.split(',')[0]!.trim()
+        : 'http';
+    return `${proto}://${host}`;
+  }
+  return GATEWAY_PUBLIC_URL.replace(/\/$/, '');
+}
+
+async function handleIssueChatTicket(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const user = requireUserSession(req);
+  if (!CHATBOT_UI_ENABLED) {
+    jsonResponse(res, 400, { error: 'Browser chat is not enabled (set CHATBOT_UI_ENABLED=true)' });
+    return;
+  }
+  const issued = issueChatTicket(user);
+  const base = studioChatPageBase(req);
+  // Prefer hash so the ticket is less likely to hit server/proxy logs.
+  const chatUrl = `${base}${CHATBOT_UI_PATH}#ticket=${encodeURIComponent(issued.ticket)}`;
+  jsonResponse(res, 200, {
+    ticket: issued.ticket,
+    expires_at: issued.expires_at,
+    sender_id: issued.sender_id,
+    chat_url: chatUrl,
+  });
+}
+
+async function handleRedeemChatTicket(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const ticket = typeof body.ticket === 'string' ? body.ticket.trim() : '';
+  if (!ticket) {
+    jsonResponse(res, 400, { error: 'ticket is required' });
+    return;
+  }
+  const redeemed = redeemChatTicket(ticket);
+  if (!redeemed) {
+    jsonResponse(res, 401, { error: 'Invalid or expired chat ticket' });
+    return;
+  }
+  jsonResponse(res, 200, redeemed);
+}
+
+const STUDIO_CHAT_POLL_MS = 1500;
+const STUDIO_CHAT_TIMEOUT_MS = 600_000;
+
+function httpOutboundToText(outbound: unknown): string {
+  if (!Array.isArray(outbound) || outbound.length === 0) return '';
+  const parts: string[] = [];
+  for (const item of outbound) {
+    if (!item || typeof item !== 'object') continue;
+    const c = (item as { content?: unknown }).content;
+    if (typeof c === 'string') parts.push(c);
+    else if (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string') {
+      parts.push((c as { text: string }).text);
+    }
+  }
+  return parts.filter(Boolean).join('\n\n') || '(empty agent reply)';
+}
+
+async function waitForHttpReply(inboundId: string): Promise<string> {
+  const deadline = Date.now() + STUDIO_CHAT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const stored = getHttpResponse(inboundId);
+    if (stored) {
+      return httpOutboundToText(stored.outbound);
+    }
+    await new Promise((r) => setTimeout(r, STUDIO_CHAT_POLL_MS));
+  }
+  throw new Error(`timed out waiting for agent reply after ${STUDIO_CHAT_TIMEOUT_MS}ms`);
+}
+
+/** Same-origin browser chat: ticket identity + HTTP channel inject + poll. */
+async function handleStudioChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!CHATBOT_UI_ENABLED) {
+    jsonResponse(res, 400, { error: 'Browser chat is not enabled (set CHATBOT_UI_ENABLED=true)' });
+    return;
+  }
+
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const text = typeof body.text === 'string' ? body.text.trim() : '';
+  if (!text) {
+    jsonResponse(res, 400, { error: 'text is required' });
+    return;
+  }
+
+  const ticket = typeof body.ticket === 'string' ? body.ticket.trim() : '';
+  if (!ticket) {
+    jsonResponse(res, 401, {
+      error: 'Open chat from Agent Studio so commands use your account',
+    });
+    return;
+  }
+
+  const identity = redeemChatTicket(ticket);
+  if (!identity) {
+    jsonResponse(res, 401, { error: 'Invalid or expired chat ticket — open chat again from Studio' });
+    return;
+  }
+
+  const messageId = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const content: Record<string, unknown> = {
+    text,
+    senderId: identity.sender_id,
+    sender: identity.display_name,
+    gatewayUserId: identity.user_id,
+  };
+
+  beginHttpDelivery({
+    inboundId: messageId,
+    conversationId: `http-cmd-${messageId}`,
+    workerJobId: `http-cmd-${messageId}`,
+  });
+  let routed;
+  try {
+    routed = await routeChannelInbound({
+      channel_type: 'http',
+      platform_id: identity.platform_id,
+      thread_id: null,
+      content,
+      sender_display_name: identity.display_name,
+    });
+  } finally {
+    endHttpDelivery();
+  }
+
+  const immediate = getHttpResponse(messageId);
+  if (immediate) {
+    jsonResponse(res, 200, { reply: httpOutboundToText(immediate.outbound) });
+    return;
+  }
+
+  if (routed.kind === 'builder') {
+    jsonResponse(res, 200, {
+      reply: `(${routed.action ?? 'builder'})`,
+    });
+    return;
+  }
+
+  const routedContent = routed.content ?? content;
+  let workspaceId: string | undefined;
+  const owner = getUserById(identity.user_id);
+  if (owner) {
+    const agents = listUserAgents(owner.id);
+    workspaceId = agents[0]?.workspace_id;
+  }
+
+  const conversation = getOrCreateConversation({
+    channel_type: 'http',
+    platform_id: identity.platform_id,
+    thread_id: null,
+    display_name: identity.display_name,
+    workspace_id: workspaceId,
+  });
+
+  enqueueInboundMessage(
+    {
+      id: messageId,
+      channel_type: 'http',
+      platform_id: identity.platform_id,
+      thread_id: null,
+      kind: 'chat',
+      content: routedContent,
+      timestamp: new Date().toISOString(),
+      sender_id: identity.sender_id,
+      sender_display_name: identity.display_name,
+    },
+    conversation.id,
+  );
+
+  try {
+    const reply = await waitForHttpReply(messageId);
+    jsonResponse(res, 200, { reply });
+  } catch (err) {
+    jsonResponse(res, 504, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function handleGetMessageResponse(res: http.ServerResponse, inboundId: string): void {
@@ -1173,8 +1428,45 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
     return;
   }
 
-  if (pathname.startsWith('/assets/') || pathname === '/') {
-    if (req.method === 'GET' && serveStatic(req, res, pathname)) return;
+  // Public Studio probe — UI hides "Open chat" when chatbot_ui_url is empty.
+  if (req.method === 'GET' && pathname === '/v1/studio/config') {
+    jsonResponse(res, 200, {
+      chatbot_ui_url: CHATBOT_UI_ENABLED ? CHATBOT_UI_PATH : null,
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/studio/chat-ticket') {
+    try {
+      await handleIssueChatTicket(req, res);
+    } catch (err) {
+      if (err instanceof AuthError) {
+        jsonResponse(res, err.status, { error: err.message });
+        return;
+      }
+      throw err;
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/studio/chat-ticket/redeem') {
+    await handleRedeemChatTicket(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/v1/studio/chat') {
+    await handleStudioChat(req, res);
+    return;
+  }
+
+  if (
+    pathname.startsWith('/assets/') ||
+    pathname === '/' ||
+    pathname === '/chat' ||
+    pathname === '/chat.html'
+  ) {
+    const staticPath = pathname === '/chat' ? '/chat.html' : pathname;
+    if (req.method === 'GET' && serveStatic(req, res, staticPath)) return;
     if (req.method === 'GET' && pathname === '/') {
       if (serveStatic(req, res, '/index.html')) return;
     }

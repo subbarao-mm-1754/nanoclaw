@@ -8,6 +8,8 @@ let editingWorkspaceId = null;
 let editingContainerConfig = null;
 /** From GET /v1/live-browser/enabled — hides Live browser UI when false. */
 let liveBrowserEnabled = false;
+/** From GET /v1/studio/config — Open chat link when Chatbot UI sidecar is configured. */
+let chatbotUiUrl = null;
 let liveBrowserWs = null;
 let liveBrowserWorkspaceId = null;
 let liveBrowserInputEnabled = false;
@@ -916,7 +918,7 @@ async function saveAgent() {
 }
 
 async function bootstrap() {
-  await refreshLiveBrowserFlag();
+  await Promise.all([refreshLiveBrowserFlag(), refreshStudioConfig()]);
   const token = getToken();
   if (!token) {
     setView('auth');
@@ -1005,6 +1007,8 @@ $('logout-btn').addEventListener('click', async () => {
   setView('auth');
 });
 
+$('open-chat-link').addEventListener('click', (ev) => void openStudioChat(ev));
+
 $('new-agent-btn').addEventListener('click', () => {
   resetEditor();
   setView('editor');
@@ -1061,6 +1065,45 @@ async function refreshLiveBrowserFlag() {
     liveBrowserEnabled = Boolean(data.enabled);
   } catch {
     liveBrowserEnabled = false;
+  }
+}
+
+async function refreshStudioConfig() {
+  try {
+    const data = await fetch('/v1/studio/config').then((r) => r.json());
+    const url = typeof data.chatbot_ui_url === 'string' ? data.chatbot_ui_url.trim() : '';
+    chatbotUiUrl = url || null;
+  } catch {
+    chatbotUiUrl = null;
+  }
+  const link = $('open-chat-link');
+  if (!link) return;
+  if (chatbotUiUrl) {
+    link.href = chatbotUiUrl;
+    link.removeAttribute('target'); // we open via ticket handler
+    show(link);
+  } else {
+    link.removeAttribute('href');
+    hide(link);
+  }
+}
+
+async function openStudioChat(ev) {
+  if (ev) ev.preventDefault();
+  if (!chatbotUiUrl) return;
+  const token = getToken();
+  if (!token) {
+    alert('Sign in to Agent Studio first, then open chat.');
+    return;
+  }
+  try {
+    const data = await api('/v1/studio/chat-ticket', { method: 'POST', body: '{}' });
+    const url = typeof data.chat_url === 'string' && data.chat_url.trim()
+      ? data.chat_url.trim()
+      : `${chatbotUiUrl.replace(/\/$/, '')}/#ticket=${encodeURIComponent(data.ticket)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  } catch (err) {
+    alert(err instanceof Error ? err.message : String(err));
   }
 }
 

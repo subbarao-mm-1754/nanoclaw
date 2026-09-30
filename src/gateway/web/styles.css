@@ -46,12 +46,23 @@ header h1 {
   font-weight: 600;
 }
 
+header .header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 header .user-bar {
   display: flex;
   align-items: center;
   gap: 1rem;
   font-size: 0.9rem;
   color: var(--muted);
+}
+
+header #open-chat-link {
+  text-decoration: none;
+  white-space: nowrap;
 }
 
 main {

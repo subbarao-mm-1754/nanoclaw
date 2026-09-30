@@ -26,7 +26,10 @@ Roles (also via NANOCLAW_ROLE):
   worker   containers only — set GATEWAY_PUBLIC_URL so the worker can callback
 
 On start/restart/service install, local OneCLI is ensured first (health check;
-`onecli start` if needed). Remote ONECLI_URL is only probed, not started.
+onecli start if needed). Remote ONECLI_URL is only probed, not started.
+
+When CHATBOT_UI_ENABLED=true, the gateway serves browser chat at /chat
+(Agent Studio → Open chat). No extra process.
 
 Remote split (different machines):
   Machine A: NANOCLAW_ROLE=gateway GATEWAY_WORKER_URL=http://worker-host:8080

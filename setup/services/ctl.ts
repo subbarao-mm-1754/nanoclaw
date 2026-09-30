@@ -172,17 +172,21 @@ export function runCtl(action: CtlAction, roleArg?: string): number {
     ensureOnecliRunning(projectRoot);
   }
 
+  let failed = 0;
   if (platform === 'macos') {
-    return ctlLaunchd(action, kinds, projectRoot);
-  }
-  if (platform === 'linux') {
+    failed = ctlLaunchd(action, kinds, projectRoot);
+  } else if (platform === 'linux') {
     if (getServiceManager() === 'systemd') {
-      return ctlSystemd(action, kinds, projectRoot);
+      failed = ctlSystemd(action, kinds, projectRoot);
+    } else {
+      failed = ctlNohup(action, kinds, projectRoot);
     }
-    return ctlNohup(action, kinds, projectRoot);
+  } else {
+    console.error(`Unsupported platform: ${platform}`);
+    return 1;
   }
-  console.error(`Unsupported platform: ${platform}`);
-  return 1;
+
+  return failed;
 }
 
 export function showLogs(kind: ServiceKind | 'all', follow: boolean): number {

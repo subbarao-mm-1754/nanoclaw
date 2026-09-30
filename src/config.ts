@@ -28,6 +28,8 @@ const envConfig = readEnvFile([
   'WORKER_BUILD_TURN_MAX_MS',
   'WORKER_OUTBOUND_FILE_MAX_BYTES',
   'WORKER_JOB_TIMEOUT_MS',
+  'CHATBOT_UI_ENABLED',
+  'CHATBOT_UI_URL',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -175,6 +177,26 @@ export const GATEWAY_SKIP_CHANNELS: string[] = (() => {
   if (raw.trim() === '') return [];
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 })();
+
+/**
+ * In-gateway browser chat at /chat (Agent Studio → Open chat).
+ * Set CHATBOT_UI_ENABLED=true. Legacy: any non-empty CHATBOT_UI_URL also enables.
+ */
+export const CHATBOT_UI_ENABLED = (() => {
+  const explicit =
+    process.env.CHATBOT_UI_ENABLED ?? envConfig.CHATBOT_UI_ENABLED ?? '';
+  if (explicit === 'true') return true;
+  if (explicit === 'false') return false;
+  const legacyUrl = (
+    process.env.CHATBOT_UI_URL ||
+    envConfig.CHATBOT_UI_URL ||
+    ''
+  ).trim();
+  return legacyUrl.length > 0;
+})();
+
+/** Path served by the gateway when browser chat is enabled. */
+export const CHATBOT_UI_PATH = '/chat';
 
 /**
  * Postgres URL for durable per-agent knowledge (markdown/text searchable store).
