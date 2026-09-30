@@ -6,8 +6,8 @@ node_modules/
 # Build output
 dist/
 
-# Local data & auth
-store/
+# Local data & auth (repo-root store/ only — not src/gateway/store/)
+/store/
 data/
 logs/
 
@@ -20,10 +20,11 @@ groups/*
 **/.claude-shared.md
 **/.claude-fragments/
 
-# Secrets
+# Secrets — ignore env variants by default; allow tracked templates / shared .env
 *.keys.json
-.env
 .env*
+!.env.example
+!.env
 
 # Temp files
 .tmp-*
