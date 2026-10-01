@@ -1,0 +1,6 @@
+# Force LF for shell scripts (WSL/Linux/macOS). Avoids `set: Illegal option -`
+# and `$'\r': command not found` when checked out on Windows.
+*.sh text eol=lf
+*.bash text eol=lf
+bin/zclaw text eol=lf
+zclaw.sh text eol=lf
