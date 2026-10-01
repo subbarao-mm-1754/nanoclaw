@@ -9,8 +9,6 @@
 <p align="center">
   <a href="https://nanoclaw.dev">nanoclaw.dev</a>&nbsp; • &nbsp;
   <a href="https://docs.nanoclaw.dev">docs</a>&nbsp; • &nbsp;
-  <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
-  <a href="README_ja.md">日本語</a>&nbsp; • &nbsp;
   <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
@@ -28,10 +26,10 @@ NanoClaw provides that same core functionality, but in a codebase small enough t
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
-bash nanoclaw.sh
+bash zclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a running gateway + worker. It installs Node, pnpm, and the OS container runtime if missing (macOS: Docker Desktop if present, else Colima; Linux/WSL2: Podman), registers your Anthropic credential with OneCLI, builds the agent container image, and starts services. Channel adapters and extra tools are optional skills. If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke. See [docs/setup-install.md](docs/setup-install.md).
+`zclaw.sh` walks you from a fresh machine to a running gateway + worker. It installs Node, pnpm, and the OS container runtime if missing (macOS: Docker Desktop if present, else Colima; Linux/WSL2: Podman), registers your Anthropic credential with OneCLI, builds the agent container image, and starts services. Channel adapters and extra tools are optional skills. If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke. See [docs/setup-install.md](docs/setup-install.md).
 
 This product tree is **gateway + worker** (separate services). See [docs/product-tree.md](docs/product-tree.md) for install/start/stop and split-machine roles.
 
@@ -150,7 +148,7 @@ Agents run in isolated Linux containers. The host uses a Docker-compatible CLI: 
 
 **Can I run this on Linux or Windows?**
 
-Yes. Linux and Windows (via WSL2) use Podman by default; macOS uses Docker Desktop if already installed, otherwise Colima. Run `bash nanoclaw.sh`.
+Yes. Linux and Windows (via WSL2) use Podman by default; macOS uses Docker Desktop if already installed, otherwise Colima. Run `bash zclaw.sh`.
 
 **Is this secure?**
 
@@ -177,7 +175,7 @@ Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?"
 
 **Why isn't the setup working for me?**
 
-If a step fails, `nanoclaw.sh` hands off to Claude Code to diagnose and resume. If that doesn't resolve it, run `claude`, then `/debug`. If Claude identifies an issue likely to affect other users, open a PR against the relevant setup step or skill.
+If a step fails, `zclaw.sh` hands off to Claude Code to diagnose and resume. If that doesn't resolve it, run `claude`, then `/debug`. If Claude identifies an issue likely to affect other users, open a PR against the relevant setup step or skill.
 
 **What changes will be accepted into the codebase?**
 

@@ -12,9 +12,9 @@ They communicate over HTTP (`GATEWAY_WORKER_URL` / `GATEWAY_PUBLIC_URL`) so they
 Lifecycle:
 
 ```bash
-./bin/nanoclaw service install --role both   # or gateway | worker
-./bin/nanoclaw start|stop|restart|status
-./bin/nanoclaw logs -f
+./bin/zclaw service install --role both   # or gateway | worker
+./bin/zclaw start|stop|restart|status
+./bin/zclaw logs -f
 ```
 
 `start` / `restart` / `service install` ensure **local OneCLI** is up first
@@ -30,7 +30,7 @@ See [setup-install.md](setup-install.md).
 - `container/agent-runner/` — agent inside the container runtime
 - OneCLI (or `/use-native-credential-proxy`) — credentials (OneCLI Compose stack includes its own Postgres container)
 - Container runtime + Node + pnpm — see [setup-install.md](setup-install.md) for OS-specific packages (macOS: Desktop or Colima; Linux/WSL2: Podman)
-- `setup/services/` + `bin/nanoclaw` — install & start/stop
+- `setup/services/` + `bin/zclaw` — install & start/stop
 - Channel you use today: Zoho Cliq (`src/channels/zoho-cliq.ts`, gateway multi-account)
 
 ## Optional (install when needed — do not treat as default product)
@@ -53,7 +53,7 @@ Full default-vs-optional install matrix: [setup-install.md](setup-install.md).
 | Item | Notes |
 |------|--------|
 | Classic single-process host (`src/index.ts`, router, host delivery, host-sweep) | **Removed** — gateway + worker replace it |
-| Host `ncl` / `scripts/chat.ts` / CLI-agent setup | **Removed** — use `./bin/nanoclaw` + gateway APIs |
+| Host `ncl` / `scripts/chat.ts` / CLI-agent setup | **Removed** — use `./bin/zclaw` + gateway APIs |
 | Classic channel setup drivers (`setup/channels/*`, `init-first-agent`) | **Removed** — install adapters via skills / `setup/add-zoho-cliq.sh` as needed |
 | Classic host modules (approvals/permissions/scheduling/self-mod host wiring) | **Removed** — not on the gateway/worker path |
 | Upstream channel install scripts you don’t use | Optional; Zoho helpers kept under `setup/add-zoho-cliq.sh` |
@@ -70,7 +70,7 @@ export GATEWAY_PORT=8090
 export GATEWAY_WORKER_URL=http://<worker-host>:8080
 export GATEWAY_AUTH_TOKEN=<shared-secret>
 export WORKER_AUTH_TOKEN=<shared-secret>
-./bin/nanoclaw service install --role gateway
+./bin/zclaw service install --role gateway
 ```
 
 **Worker host**
@@ -82,7 +82,7 @@ export WORKER_PORT=8080
 export GATEWAY_PUBLIC_URL=http://<gateway-host>:8090
 export WORKER_AUTH_TOKEN=<shared-secret>
 export GATEWAY_AUTH_TOKEN=<shared-secret>
-./bin/nanoclaw service install --role worker
+./bin/zclaw service install --role worker
 ```
 
 Worker needs Docker + agent image build on that machine. Gateway needs channel credentials / OneCLI as configured.

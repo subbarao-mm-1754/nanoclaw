@@ -242,7 +242,7 @@ Run from your NanoClaw project root:
 
 - macOS (launchd): `launchctl kickstart -k gui/$(id -u)/"$(. setup/lib/install-slug.sh && launchd_label)"`
 - Linux (systemd): `systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`
-- WSL/manual: stop and re-run `bash start-nanoclaw.sh`
+- WSL/manual: stop and re-run `bash start-zclaw.sh`
 
 ## Phase 5: Verify
 

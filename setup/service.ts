@@ -15,15 +15,13 @@ import fs from 'fs';
 import { log } from '../src/log.js';
 import { installServices } from './services/install.js';
 
-/**
- * Symlink bin/nanoclaw into ~/.local/bin.
- */
+/** Symlink bin/zclaw into ~/.local/bin. */
 function installCliSymlinks(projectRoot: string, homeDir: string): void {
   const targetDir = path.join(homeDir, '.local', 'bin');
   fs.mkdirSync(targetDir, { recursive: true });
 
-  const source = path.join(projectRoot, 'bin', 'nanoclaw');
-  const target = path.join(targetDir, 'nanoclaw');
+  const source = path.join(projectRoot, 'bin', 'zclaw');
+  const target = path.join(targetDir, 'zclaw');
   if (!fs.existsSync(source)) return;
   try {
     try {
@@ -31,7 +29,7 @@ function installCliSymlinks(projectRoot: string, homeDir: string): void {
       if (stat.isSymbolicLink()) {
         fs.unlinkSync(target);
       } else {
-        log.warn('~/.local/bin/nanoclaw exists and is not a symlink — skipping', {
+        log.warn('~/.local/bin/zclaw exists and is not a symlink — skipping', {
           target,
         });
         return;
@@ -41,9 +39,9 @@ function installCliSymlinks(projectRoot: string, homeDir: string): void {
       if (err.code !== 'ENOENT') throw err;
     }
     fs.symlinkSync(source, target);
-    log.info('Installed nanoclaw CLI symlink', { target, source });
+    log.info('Installed zclaw CLI symlink', { target, source });
   } catch (err) {
-    log.warn('Could not install nanoclaw CLI symlink (non-fatal)', { err });
+    log.warn('Could not install zclaw CLI symlink (non-fatal)', { err });
   }
 }
 

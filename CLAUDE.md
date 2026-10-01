@@ -12,7 +12,7 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-**Product runtime is two processes:** Gateway (`src/gateway/`) handles channels, HTTP API, and the message queue; Worker (`src/worker/`) materializes workspaces and spawns agent containers. They talk over HTTP and can run on separate machines. Lifecycle: `./bin/nanoclaw` (see [docs/product-tree.md](docs/product-tree.md)).
+**Product runtime is two processes:** Gateway (`src/gateway/`) handles channels, HTTP API, and the message queue; Worker (`src/worker/`) materializes workspaces and spawns agent containers. They talk over HTTP and can run on separate machines. Lifecycle: `./bin/zclaw` (see [docs/product-tree.md](docs/product-tree.md)).
 
 Shared helpers used by the worker (container-runner, session-manager, …) live under `src/` next to gateway/worker. The classic single-process host (`src/index.ts` router/delivery/host-sweep) has been removed from this product tree.
 
@@ -77,7 +77,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `container/skills/` | Container skills mounted into every agent session (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
-| `bin/nanoclaw` + `setup/services/` | Install/start/stop gateway + worker as separate OS services |
+| `bin/zclaw` + `setup/services/` | Install/start/stop gateway + worker as separate OS services |
 
 ## Admin CLI (`ncl`)
 
@@ -237,14 +237,14 @@ Container typecheck is a separate tsconfig — if you edit `container/agent-runn
 
 Service management:
 ```bash
-# macOS (launchd)
-launchctl load   ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+# Prefer the lifecycle CLI (gateway + worker):
+./bin/zclaw start|stop|restart|status
 
-# Linux (systemd)
-systemctl --user start|stop|restart nanoclaw
+# macOS (legacy single-process template, if used)
+launchctl load   ~/Library/LaunchAgents/com.zclaw.plist
+launchctl unload ~/Library/LaunchAgents/com.zclaw.plist
 ```
+
 
 ## Troubleshooting
 
@@ -312,8 +312,7 @@ grep -q '^INSTALL_CJK_FONTS=' .env && sed -i.bak 's/^INSTALL_CJK_FONTS=.*/INSTAL
 
 # Rebuild and restart so new sessions pick up the new image
 ./container/build.sh
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
-# systemctl --user restart nanoclaw                # Linux
+./bin/zclaw restart
 ```
 
 `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through as a Docker build-arg. Without CJK fonts, Chromium-rendered screenshots and PDFs containing CJK text show tofu (empty rectangles) instead of characters.

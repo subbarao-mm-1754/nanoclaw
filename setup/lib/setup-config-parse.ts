@@ -146,7 +146,7 @@ export function applyToEnv(
 
 export function printHelp(stream: NodeJS.WritableStream = process.stdout): void {
   const lines: string[] = [];
-  lines.push('Usage: bash nanoclaw.sh [flags...]');
+  lines.push('Usage: bash zclaw.sh [flags...]');
   lines.push('');
   lines.push('Flags:');
   const width = Math.max(...CONFIG.map((e) => flagFor(e).length));

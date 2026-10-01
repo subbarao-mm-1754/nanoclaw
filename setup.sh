@@ -7,11 +7,11 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Where verbose bootstrap logs go. nanoclaw.sh captures setup.sh's stdout to
+# Where verbose bootstrap logs go. zclaw.sh captures setup.sh's stdout to
 # the per-step raw log, but legacy code in this script + install-node.sh
 # also calls `log` which writes to a file. Route those to the raw log so
 # they don't contaminate the progression log (logs/setup.log).
-# Default: write to the raw bootstrap log if nanoclaw.sh pointed us there,
+# Default: write to the raw bootstrap log if zclaw.sh pointed us there,
 # else fall back to a dedicated bootstrap log (keeps standalone `bash
 # setup.sh` invocations working).
 LOG_FILE="${NANOCLAW_BOOTSTRAP_LOG:-${PROJECT_ROOT}/logs/bootstrap.log}"

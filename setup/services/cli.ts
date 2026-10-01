@@ -1,10 +1,10 @@
 /**
- * `nanoclaw` lifecycle CLI — install / start / stop / restart / status / logs.
+ * `zclaw` lifecycle CLI — install / start / stop / restart / status / logs.
  *
  * Usage:
- *   nanoclaw service install [--role both|gateway|worker]
- *   nanoclaw start|stop|restart|status [--role ...]
- *   nanoclaw logs [--gateway|--worker|--all] [-f]
+ *   zclaw service install [--role both|gateway|worker]
+ *   zclaw start|stop|restart|status [--role ...]
+ *   zclaw logs [--gateway|--worker|--all] [-f]
  */
 import { installServices } from './install.js';
 import { runCtl, showLogs, type CtlAction } from './ctl.js';
@@ -12,13 +12,13 @@ import { resolveRole } from './roles.js';
 import type { ServiceKind } from './names.js';
 
 function printHelp(): void {
-  console.log(`nanoclaw — gateway + worker lifecycle
+  console.log(`zclaw — gateway + worker lifecycle
 
 Usage:
-  nanoclaw service install [--role both|gateway|worker]
-  nanoclaw start|stop|restart|status [--role both|gateway|worker]
-  nanoclaw logs [--gateway|--worker] [-f]
-  nanoclaw help
+  zclaw service install [--role both|gateway|worker]
+  zclaw start|stop|restart|status [--role both|gateway|worker]
+  zclaw logs [--gateway|--worker] [-f]
+  zclaw help
 
 Roles (also via NANOCLAW_ROLE):
   both     gateway + worker on this machine (default)
@@ -68,7 +68,7 @@ function main(): void {
       for (const l of result.labels) console.log(`  - ${l}`);
       process.exit(0);
     }
-    console.error('Unknown service subcommand. Try: nanoclaw service install');
+    console.error('Unknown service subcommand. Try: zclaw service install');
     process.exit(1);
   }
 

@@ -350,8 +350,8 @@ async function main(): Promise<void> {
   }
 
   const rows: [string, string][] = [
-    ['Check services:', './bin/nanoclaw status'],
-    ['Follow logs:', './bin/nanoclaw logs -f'],
+    ['Check services:', './bin/zclaw status'],
+    ['Follow logs:', './bin/zclaw logs -f'],
     ['Gateway log:', 'tail -f logs/gateway.log'],
   ];
   const labelWidth = Math.max(...rows.map(([l]) => l.length));
@@ -435,7 +435,7 @@ async function runAuthStep(): Promise<void> {
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
     p.log.warn(
       brandBody(
-        'Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.',
+        'Claude sign-in skipped. Re-run setup or run `bash zclaw.sh` to finish later.',
       ),
     );
     return;
@@ -863,7 +863,7 @@ function printIntro(): void {
 }
 
 /**
- * Bootstrap (nanoclaw.sh) normally initializes logs/setup.log and writes
+ * Bootstrap (zclaw.sh) normally initializes logs/setup.log and writes
  * the bootstrap entry before we even boot. If someone runs `pnpm run
  * setup:auto` directly, start a fresh progression log here so we don't
  * append to a stale one from a previous run.

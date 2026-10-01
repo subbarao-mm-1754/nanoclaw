@@ -1,6 +1,6 @@
 # Setup install matrix (what gets installed where)
 
-This document describes what `bash nanoclaw.sh` / `pnpm run setup:auto` installs on each host OS, and what remains **optional** (skills / env flags). Source of truth for the container runtime installer is `setup/install-docker.sh`.
+This document describes what `bash zclaw.sh` / `pnpm run setup:auto` installs on each host OS, and what remains **optional** (skills / env flags). Source of truth for the container runtime installer is `setup/install-docker.sh`.
 
 Windows is supported via **WSL2** (treat as Linux below).
 
@@ -10,7 +10,7 @@ Windows is supported via **WSL2** (treat as Linux below).
 
 | Component | macOS | Linux / WSL2 | Notes |
 |-----------|--------|--------------|--------|
-| **Homebrew** | Installed if missing (prompted in `nanoclaw.sh`) | — | Needed for Node / Colima / Docker CLI formulae |
+| **Homebrew** | Installed if missing (prompted in `zclaw.sh`) | — | Needed for Node / Colima / Docker CLI formulae |
 | **Node.js 20+** | Installed if missing | Installed if missing | `setup/install-node.sh` |
 | **pnpm** + `node_modules` | Yes | Yes | `setup.sh` / `pnpm install --frozen-lockfile` |
 | **Container runtime** | See [macOS runtime](#macos-container-runtime) | See [Linux runtime](#linux-wsl2-container-runtime) | Worker spawns agent containers via `docker` CLI |
@@ -19,8 +19,8 @@ Windows is supported via **WSL2** (treat as Linux below).
 | **OneCLI Postgres** | Compose container | Compose container | Pulled/started by OneCLI installer — not host `apt`/`brew` Postgres |
 | **Anthropic credential** | Registered in OneCLI | Registered in OneCLI | `setup/auth.ts` |
 | **Mount allowlist** | Written if missing | Written if missing | Often empty at first |
-| **Gateway + worker OS services** | launchd | systemd (or nohup fallback) | `./bin/nanoclaw service install` |
-| **`nanoclaw` CLI symlink** | `~/.local/bin/nanoclaw` | `~/.local/bin/nanoclaw` | Lifecycle: start/stop/status/logs |
+| **Gateway + worker OS services** | launchd | systemd (or nohup fallback) | `./bin/zclaw service install` |
+| **`zclaw` CLI symlink** | `~/.local/bin/zclaw` | `~/.local/bin/zclaw` | Lifecycle: start/stop/status/logs |
 
 On **`nanoclaw start` / `restart` / `service install`**, local OneCLI is
 ensured first: if `ONECLI_URL` already responds healthy → skip; else run
@@ -70,7 +70,7 @@ Default local install runs the upstream OneCLI installer (Docker Compose based).
 
 Also installs the **`onecli` CLI** (often under `~/.local/bin`) and writes `ONECLI_URL` into `.env`.
 
-After setup, **`./bin/nanoclaw start`** (and `restart` / `service install`) will health-check that URL and run `onecli start` when the local gateway is down.
+After setup, **`./bin/zclaw start`** (and `restart` / `service install`) will health-check that URL and run `onecli start` when the local gateway is down.
 
 **Exceptions:**
 
@@ -86,7 +86,7 @@ Container MCP tools such as `knowledge_save` / `knowledge_search` / `knowledge_g
 | Fact | Detail |
 |------|--------|
 | **Required for knowledge tools** | Yes — a Postgres connection string must be configured |
-| **Installed by `nanoclaw.sh`?** | **No** — setup does not provision a knowledge Postgres |
+| **Installed by `zclaw.sh`?** | **No** — setup does not provision a knowledge Postgres |
 | **OneCLI’s Postgres** | Used only by the OneCLI vault (`onecli-postgres-1`). **Do not** point knowledge at it unless you intentionally share that DB (not recommended) |
 | **Env var** | `KNOWLEDGE_DATABASE_URL` (preferred), or fallback `DATABASE_URL` |
 | **Enable flag** | `KNOWLEDGE_ENABLED` — defaults to on when a URL is set; set `false` to force-disable |
@@ -160,11 +160,11 @@ See also [product-tree.md](product-tree.md) for gateway/worker vs optional produ
 
 | Path | Role |
 |------|------|
-| `nanoclaw.sh` | Entry: preflight + bootstrap + `setup:auto` |
+| `zclaw.sh` | Entry: preflight + bootstrap + `setup:auto` |
 | `setup.sh` / `setup/install-node.sh` | Node + pnpm + deps |
 | `setup/install-docker.sh` | OS-specific container runtime |
 | `setup/container.ts` | Start runtime + build agent image |
 | `setup/onecli.ts` | OneCLI gateway/CLI |
 | `setup/auth.ts` | Credential registration |
 | `setup/service.ts` / `setup/services/install.ts` | Gateway + worker OS services |
-| `bin/nanoclaw` | Post-install lifecycle CLI |
+| `bin/zclaw` | Post-install lifecycle CLI |

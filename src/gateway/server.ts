@@ -648,11 +648,8 @@ async function handleRedeemChatTicket(req: http.IncomingMessage, res: http.Serve
   jsonResponse(res, 200, redeemed);
 }
 
-const STUDIO_CHAT_POLL_MS = 1500;
-const STUDIO_CHAT_TIMEOUT_MS = 600_000;
-
-function httpOutboundToText(outbound: unknown): string {
-  if (!Array.isArray(outbound) || outbound.length === 0) return '';
+function httpOutboundToReplies(outbound: unknown): string[] {
+  if (!Array.isArray(outbound) || outbound.length === 0) return [];
   const parts: string[] = [];
   for (const item of outbound) {
     if (!item || typeof item !== 'object') continue;
@@ -662,22 +659,23 @@ function httpOutboundToText(outbound: unknown): string {
       parts.push((c as { text: string }).text);
     }
   }
-  return parts.filter(Boolean).join('\n\n') || '(empty agent reply)';
+  return parts.filter(Boolean);
 }
 
-async function waitForHttpReply(inboundId: string): Promise<string> {
-  const deadline = Date.now() + STUDIO_CHAT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const stored = getHttpResponse(inboundId);
-    if (stored) {
-      return httpOutboundToText(stored.outbound);
-    }
-    await new Promise((r) => setTimeout(r, STUDIO_CHAT_POLL_MS));
-  }
-  throw new Error(`timed out waiting for agent reply after ${STUDIO_CHAT_TIMEOUT_MS}ms`);
+function httpOutboundToText(outbound: unknown): string {
+  const parts = httpOutboundToReplies(outbound);
+  return parts.length > 0 ? parts.join('\n\n') : '(empty agent reply)';
 }
 
-/** Same-origin browser chat: ticket identity + HTTP channel inject + poll. */
+function studioChatTicketFromReq(req: http.IncomingMessage, url: URL, bodyTicket?: string): string {
+  const header = req.headers['x-nanoclaw-chat-ticket'];
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  const q = url.searchParams.get('ticket');
+  if (q?.trim()) return q.trim();
+  return typeof bodyTicket === 'string' ? bodyTicket.trim() : '';
+}
+
+/** Same-origin browser chat: enqueue immediately; client polls for the reply. */
 async function handleStudioChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!CHATBOT_UI_ENABLED) {
     jsonResponse(res, 400, { error: 'Browser chat is not enabled (set CHATBOT_UI_ENABLED=true)' });
@@ -691,7 +689,7 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     return;
   }
 
-  const ticket = typeof body.ticket === 'string' ? body.ticket.trim() : '';
+  const ticket = studioChatTicketFromReq(req, new URL(req.url ?? '/', 'http://localhost'), body.ticket as string);
   if (!ticket) {
     jsonResponse(res, 401, {
       error: 'Open chat from Agent Studio so commands use your account',
@@ -733,13 +731,23 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
 
   const immediate = getHttpResponse(messageId);
   if (immediate) {
-    jsonResponse(res, 200, { reply: httpOutboundToText(immediate.outbound) });
+    const replies = httpOutboundToReplies(immediate.outbound);
+    jsonResponse(res, 200, {
+      inbound_id: messageId,
+      status: 'completed',
+      replies: replies.length > 0 ? replies : [httpOutboundToText(immediate.outbound)],
+      reply: httpOutboundToText(immediate.outbound),
+    });
     return;
   }
 
   if (routed.kind === 'builder') {
+    const reply = `(${routed.action ?? 'builder'})`;
     jsonResponse(res, 200, {
-      reply: `(${routed.action ?? 'builder'})`,
+      inbound_id: messageId,
+      status: 'completed',
+      replies: [reply],
+      reply,
     });
     return;
   }
@@ -775,14 +783,66 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     conversation.id,
   );
 
-  try {
-    const reply = await waitForHttpReply(messageId);
-    jsonResponse(res, 200, { reply });
-  } catch (err) {
-    jsonResponse(res, 504, {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  // Return immediately so the UI can accept the next message while the agent works.
+  jsonResponse(res, 202, { inbound_id: messageId, status: 'pending' });
+}
+
+function handleStudioChatStatus(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  url: URL,
+  inboundId: string,
+): void {
+  if (!CHATBOT_UI_ENABLED) {
+    jsonResponse(res, 400, { error: 'Browser chat is not enabled (set CHATBOT_UI_ENABLED=true)' });
+    return;
   }
+
+  const ticket = studioChatTicketFromReq(req, url);
+  if (!ticket) {
+    jsonResponse(res, 401, { error: 'ticket is required' });
+    return;
+  }
+  const identity = redeemChatTicket(ticket);
+  if (!identity) {
+    jsonResponse(res, 401, { error: 'Invalid or expired chat ticket' });
+    return;
+  }
+
+  const stored = getHttpResponse(inboundId);
+  if (stored) {
+    const replies = httpOutboundToReplies(stored.outbound);
+    jsonResponse(res, 200, {
+      status: 'completed',
+      inbound_id: inboundId,
+      replies: replies.length > 0 ? replies : [httpOutboundToText(stored.outbound)],
+      reply: httpOutboundToText(stored.outbound),
+    });
+    return;
+  }
+
+  const inbound = getMessage(inboundId);
+  if (!inbound || inbound.direction !== 'inbound') {
+    jsonResponse(res, 404, { error: 'Message not found' });
+    return;
+  }
+  if (inbound.sender_id !== identity.sender_id) {
+    jsonResponse(res, 403, { error: 'Forbidden' });
+    return;
+  }
+  if (inbound.status === 'failed') {
+    jsonResponse(res, 200, {
+      status: 'failed',
+      inbound_id: inboundId,
+      error: inbound.error ?? 'Processing failed',
+    });
+    return;
+  }
+
+  jsonResponse(res, 200, {
+    status: inbound.status === 'processing' ? 'processing' : 'pending',
+    inbound_id: inboundId,
+  });
 }
 
 function handleGetMessageResponse(res: http.ServerResponse, inboundId: string): void {
@@ -1457,6 +1517,14 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
   if (req.method === 'POST' && pathname === '/v1/studio/chat') {
     await handleStudioChat(req, res);
     return;
+  }
+
+  {
+    const chatStatusMatch = pathname.match(/^\/v1\/studio\/chat\/([^/]+)$/);
+    if (req.method === 'GET' && chatStatusMatch) {
+      handleStudioChatStatus(req, res, url, decodeURIComponent(chatStatusMatch[1]!));
+      return;
+    }
   }
 
   if (

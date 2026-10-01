@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# nanoclaw — lifecycle CLI for gateway + worker services.
+# zclaw — lifecycle CLI for gateway + worker services.
 #
-#   nanoclaw service install [--role both|gateway|worker]
-#   nanoclaw start|stop|restart|status
-#   nanoclaw logs [-f] [--gateway|--worker]
+#   zclaw service install [--role both|gateway|worker]
+#   zclaw start|stop|restart|status
+#   zclaw logs [-f] [--gateway|--worker]
 #
 
 set -euo pipefail

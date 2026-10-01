@@ -134,7 +134,7 @@ Run from your NanoClaw project root:
 
 - macOS: `launchctl kickstart -k gui/$(id -u)/"$(. setup/lib/install-slug.sh && launchd_label)"`
 - Linux: `systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`
-- WSL/manual: stop and re-run `bash start-nanoclaw.sh`
+- WSL/manual: stop and re-run `bash start-zclaw.sh`
 
 2. Check logs for successful proxy startup:
 

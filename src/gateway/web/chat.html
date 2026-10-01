@@ -3,9 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>NanoClaw Chat</title>
+    <title>ZClaw Chat</title>
     <style>
-      :root {
+      :root,
+      [data-theme="dark"] {
         --bg: #0f1419;
         --surface: #1a2332;
         --border: #2a3544;
@@ -14,6 +15,32 @@
         --accent: #3d8bfd;
         --user: #243044;
         --agent: #1e2a38;
+        --error-bg: #3a1f24;
+        --error-border: #6b3038;
+        --error-text: #ffb4b4;
+        --warn-bg: #3a3218;
+        --warn-text: #f0d78c;
+        --warn-border: #5a4a20;
+        --link: #7eb6ff;
+        color-scheme: dark;
+      }
+      [data-theme="light"] {
+        --bg: #f4f6f9;
+        --surface: #ffffff;
+        --border: #d5dbe5;
+        --text: #1a2332;
+        --muted: #5c6b7e;
+        --accent: #2563eb;
+        --user: #e8eef8;
+        --agent: #f0f3f7;
+        --error-bg: #fde8ea;
+        --error-border: #f0b4ba;
+        --error-text: #9b1c2e;
+        --warn-bg: #fff6db;
+        --warn-text: #7a5b00;
+        --warn-border: #e6d39a;
+        --link: #1d4ed8;
+        color-scheme: light;
       }
       * { box-sizing: border-box; }
       body {
@@ -30,12 +57,34 @@
         border-bottom: 1px solid var(--border);
         background: var(--surface);
         display: flex;
-        align-items: baseline;
+        align-items: center;
         gap: 0.75rem;
         flex-wrap: wrap;
       }
       header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
-      header span { color: var(--muted); font-size: 0.85rem; }
+      header .meta { color: var(--muted); font-size: 0.85rem; flex: 1; min-width: 8rem; }
+      .theme-toggle {
+        display: inline-flex;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+        background: var(--bg);
+      }
+      .theme-toggle button {
+        border: 0;
+        border-radius: 0;
+        padding: 0.35rem 0.65rem;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .theme-toggle button[aria-pressed="true"] {
+        background: var(--accent);
+        color: #fff;
+      }
       #log {
         flex: 1;
         overflow-y: auto;
@@ -54,7 +103,12 @@
       }
       .msg.user { align-self: flex-end; background: var(--user); border: 1px solid var(--border); }
       .msg.agent { align-self: flex-start; background: var(--agent); border: 1px solid var(--border); }
-      .msg.error { align-self: stretch; background: #3a1f24; border: 1px solid #6b3038; color: #ffb4b4; }
+      .msg.error {
+        align-self: stretch;
+        background: var(--error-bg);
+        border: 1px solid var(--error-border);
+        color: var(--error-text);
+      }
       .msg .role {
         display: block;
         font-size: 0.7rem;
@@ -62,6 +116,38 @@
         letter-spacing: 0.04em;
         color: var(--muted);
         margin-bottom: 0.35rem;
+      }
+      .msg a {
+        color: var(--link);
+        text-decoration: underline;
+        word-break: break-all;
+      }
+      .msg a:hover { opacity: 0.9; }
+      .msg strong { font-weight: 700; }
+      .msg em { font-style: italic; }
+      .msg del { text-decoration: line-through; opacity: 0.85; }
+      .msg code {
+        font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+        font-size: 0.9em;
+        padding: 0.1em 0.35em;
+        border-radius: 4px;
+        background: color-mix(in srgb, var(--border) 55%, transparent);
+        border: 1px solid var(--border);
+      }
+      .msg pre {
+        margin: 0.4rem 0 0;
+        padding: 0.65rem 0.75rem;
+        border-radius: 8px;
+        overflow-x: auto;
+        background: color-mix(in srgb, var(--border) 40%, var(--bg));
+        border: 1px solid var(--border);
+        white-space: pre-wrap;
+      }
+      .msg pre code {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        font-size: 0.85em;
       }
       form {
         display: flex;
@@ -83,7 +169,7 @@
         font: inherit;
       }
       textarea:focus { outline: 1px solid var(--accent); }
-      button {
+      #send {
         border: 0;
         border-radius: 8px;
         padding: 0 1.1rem;
@@ -93,23 +179,28 @@
         font-weight: 600;
         cursor: pointer;
       }
-      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      #send:disabled { opacity: 0.5; cursor: not-allowed; }
       .empty { margin: auto; color: var(--muted); text-align: center; }
       .warn {
         margin: 0;
         padding: 0.5rem 1.25rem;
-        background: #3a3218;
-        color: #f0d78c;
+        background: var(--warn-bg);
+        color: var(--warn-text);
         font-size: 0.85rem;
-        border-bottom: 1px solid #5a4a20;
+        border-bottom: 1px solid var(--warn-border);
       }
       .warn.hidden { display: none; }
     </style>
   </head>
   <body>
     <header>
-      <h1>NanoClaw</h1>
-      <span id="who">Gateway chat</span>
+      <h1>ZClaw</h1>
+      <span class="meta" id="who">Gateway chat</span>
+      <div class="theme-toggle" role="group" aria-label="Theme">
+        <button type="button" data-theme-choice="system" title="System">Auto</button>
+        <button type="button" data-theme-choice="light" title="Light">Light</button>
+        <button type="button" data-theme-choice="dark" title="Dark">Dark</button>
+      </div>
     </header>
     <p id="ticket-warn" class="warn hidden">
       Open this page from Agent Studio → <strong>Open chat</strong> so commands like /agents use your account.
@@ -123,13 +214,53 @@
     </form>
     <script>
       const TICKET_KEY = 'nc_chat_ticket';
+      const THEME_KEY = 'nc_chat_theme';
       const log = document.getElementById('log');
       const empty = document.getElementById('empty');
       const form = document.getElementById('form');
       const input = document.getElementById('input');
-      const send = document.getElementById('send');
       const who = document.getElementById('who');
       const ticketWarn = document.getElementById('ticket-warn');
+      const themeButtons = document.querySelectorAll('[data-theme-choice]');
+
+      // http(s) URLs and www. hosts (trailing punctuation stripped from the match).
+      const URL_RE = /\b((?:https?:\/\/|www\.)[^\s<]+[^\s<.,;:!?'")\]])/gi;
+      const NAMED_COLORS = new Set([
+        'red', 'orange', 'amber', 'yellow', 'green', 'teal', 'cyan', 'blue',
+        'indigo', 'purple', 'pink', 'brown', 'gray', 'grey', 'black', 'white',
+        'crimson', 'coral', 'gold', 'lime', 'navy', 'olive', 'magenta', 'violet',
+        'tomato', 'salmon', 'seagreen', 'skyblue', 'steelblue', 'slategray',
+      ]);
+
+      function sanitizeColor(raw) {
+        const c = String(raw || '').trim().toLowerCase();
+        if (/^#[0-9a-f]{3}([0-9a-f]{3})?$/.test(c)) return c;
+        if (/^rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)$/.test(c)) return c;
+        if (NAMED_COLORS.has(c)) return c;
+        return null;
+      }
+
+      function resolveTheme(choice) {
+        if (choice === 'light' || choice === 'dark') return choice;
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+
+      function applyTheme(choice) {
+        const next = choice === 'light' || choice === 'dark' || choice === 'system' ? choice : 'system';
+        localStorage.setItem(THEME_KEY, next);
+        document.documentElement.setAttribute('data-theme', resolveTheme(next));
+        for (const btn of themeButtons) {
+          btn.setAttribute('aria-pressed', btn.dataset.themeChoice === next ? 'true' : 'false');
+        }
+      }
+
+      applyTheme(localStorage.getItem(THEME_KEY) || 'system');
+      window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+        if ((localStorage.getItem(THEME_KEY) || 'system') === 'system') applyTheme('system');
+      });
+      for (const btn of themeButtons) {
+        btn.addEventListener('click', () => applyTheme(btn.dataset.themeChoice));
+      }
 
       function readTicketFromUrl() {
         const hash = new URLSearchParams((location.hash || '').replace(/^#/, ''));
@@ -150,6 +281,102 @@
         ticketWarn.classList.remove('hidden');
       }
 
+      function appendLinkedText(parent, text) {
+        let last = 0;
+        URL_RE.lastIndex = 0;
+        let match;
+        while ((match = URL_RE.exec(text)) !== null) {
+          if (match.index > last) {
+            parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+          }
+          const raw = match[1];
+          const href = raw.toLowerCase().startsWith('www.') ? 'https://' + raw : raw;
+          const a = document.createElement('a');
+          a.href = href;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = raw;
+          parent.appendChild(a);
+          last = match.index + raw.length;
+        }
+        if (last < text.length) {
+          parent.appendChild(document.createTextNode(text.slice(last)));
+        }
+      }
+
+      /**
+       * Safe rich text: markdown **bold** *italic* ***both*** ~~strike~~ `code`
+       * ```fenced```, [label](url), bare URLs, and color spans:
+       * [color=red]text[/color] or [color=#e11]text[/color]
+       */
+      function appendRichText(parent, text) {
+        // Fenced code blocks first (pass-through, no nested formatting).
+        const fenceRe = /```[\w-]*\n?([\s\S]*?)```/g;
+        let last = 0;
+        let m;
+        while ((m = fenceRe.exec(text)) !== null) {
+          if (m.index > last) appendInlineRich(parent, text.slice(last, m.index));
+          const pre = document.createElement('pre');
+          const code = document.createElement('code');
+          code.textContent = m[1].replace(/\n$/, '');
+          pre.appendChild(code);
+          parent.appendChild(pre);
+          last = m.index + m[0].length;
+        }
+        if (last < text.length) appendInlineRich(parent, text.slice(last));
+      }
+
+      function appendInlineRich(parent, text) {
+        // Order: color tags, md links, code, bold-italic, bold, italic, strike, urls.
+        const tokenRe =
+          /\[color=([^\]]+)\]([\s\S]*?)\[\/color\]|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|`([^`]+)`|\*\*\*([^*]+)\*\*\*|\*\*([^*]+)\*\*|\*([^*]+)\*|___([^_]+)___|__([^_]+)__|_([^_]+)_|~~([^~]+)~~/g;
+        let last = 0;
+        let m;
+        while ((m = tokenRe.exec(text)) !== null) {
+          if (m.index > last) appendLinkedText(parent, text.slice(last, m.index));
+
+          if (m[1] != null && m[2] != null) {
+            const color = sanitizeColor(m[1]);
+            const span = document.createElement('span');
+            if (color) span.style.color = color;
+            appendInlineRich(span, m[2]);
+            parent.appendChild(span);
+          } else if (m[3] != null && m[4] != null) {
+            const a = document.createElement('a');
+            a.href = m[4];
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            appendInlineRich(a, m[3]);
+            parent.appendChild(a);
+          } else if (m[5] != null) {
+            const code = document.createElement('code');
+            code.textContent = m[5];
+            parent.appendChild(code);
+          } else if (m[6] != null || m[9] != null) {
+            const el = document.createElement('strong');
+            const em = document.createElement('em');
+            appendInlineRich(em, m[6] ?? m[9]);
+            el.appendChild(em);
+            parent.appendChild(el);
+          } else if (m[7] != null || m[10] != null) {
+            const el = document.createElement('strong');
+            appendInlineRich(el, m[7] ?? m[10]);
+            parent.appendChild(el);
+          } else if (m[8] != null || m[11] != null) {
+            const el = document.createElement('em');
+            appendInlineRich(el, m[8] ?? m[11]);
+            parent.appendChild(el);
+          } else if (m[12] != null) {
+            const el = document.createElement('del');
+            appendInlineRich(el, m[12]);
+            parent.appendChild(el);
+          }
+
+          last = m.index + m[0].length;
+        }
+        if (last < text.length) appendLinkedText(parent, text.slice(last));
+      }
+
       function addMsg(role, text) {
         if (empty) empty.remove();
         const el = document.createElement('div');
@@ -158,38 +385,82 @@
         label.className = 'role';
         label.textContent = role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Agent';
         el.appendChild(label);
-        el.appendChild(document.createTextNode(text));
+        appendRichText(el, text);
         log.appendChild(el);
         log.scrollTop = log.scrollHeight;
       }
 
-      form.addEventListener('submit', async (ev) => {
+      function showAgentReplies(data) {
+        const replies = Array.isArray(data.replies)
+          ? data.replies.filter((r) => typeof r === 'string' && r.trim())
+          : typeof data.reply === 'string' && data.reply.trim()
+            ? [data.reply]
+            : [];
+        if (replies.length === 0) {
+          addMsg('error', 'Empty agent reply');
+          return;
+        }
+        for (const reply of replies) addMsg('agent', reply);
+      }
+
+      async function pollReplies(inboundId, ticket) {
+        const deadline = Date.now() + 600000;
+        while (Date.now() < deadline) {
+          const res = await fetch(
+            '/v1/studio/chat/' + encodeURIComponent(inboundId) +
+              '?ticket=' + encodeURIComponent(ticket),
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data?.error || 'Poll failed (' + res.status + ')');
+          }
+          if (data.status === 'completed') {
+            showAgentReplies(data);
+            return;
+          }
+          if (data.status === 'failed') {
+            throw new Error(data.error || 'Processing failed');
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        throw new Error('Timed out waiting for agent reply');
+      }
+
+      form.addEventListener('submit', (ev) => {
         ev.preventDefault();
         const text = input.value.trim();
         if (!text) return;
         input.value = '';
         addMsg('user', text);
-        send.disabled = true;
-        try {
-          const t = sessionStorage.getItem(TICKET_KEY) || '';
-          const res = await fetch('/v1/studio/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, ticket: t || undefined }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            throw new Error(data?.error || 'Request failed (' + res.status + ')');
+        input.focus();
+
+        const t = sessionStorage.getItem(TICKET_KEY) || '';
+
+        void (async () => {
+          try {
+            const res = await fetch('/v1/studio/chat', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(t ? { 'X-NanoClaw-Chat-Ticket': t } : {}),
+              },
+              body: JSON.stringify({ text, ticket: t || undefined }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              throw new Error(data?.error || 'Request failed (' + res.status + ')');
+            }
+            if (data.status === 'completed' || typeof data.reply === 'string') {
+              showAgentReplies(data);
+              return;
+            }
+            const inboundId = typeof data.inbound_id === 'string' ? data.inbound_id : '';
+            if (!inboundId) throw new Error('No inbound_id from gateway');
+            await pollReplies(inboundId, t);
+          } catch (err) {
+            addMsg('error', err instanceof Error ? err.message : String(err));
           }
-          const reply = typeof data.reply === 'string' ? data.reply : '';
-          if (!reply) throw new Error('Empty agent reply');
-          addMsg('agent', reply);
-        } catch (err) {
-          addMsg('error', err instanceof Error ? err.message : String(err));
-        } finally {
-          send.disabled = false;
-          input.focus();
-        }
+        })();
       });
 
       input.addEventListener('keydown', (ev) => {

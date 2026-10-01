@@ -44,7 +44,7 @@ function ctlLaunchd(action: CtlAction, kinds: ServiceKind[], projectRoot: string
     const plist = launchdPlistPath(kind, projectRoot);
     const label = getLaunchdServiceLabel(kind, projectRoot);
     if (!fs.existsSync(plist)) {
-      console.error(`[${kind}] plist missing — run: nanoclaw service install`);
+      console.error(`[${kind}] plist missing — run: zclaw service install`);
       failed++;
       continue;
     }
@@ -148,7 +148,7 @@ function ctlNohup(action: CtlAction, kinds: ServiceKind[], projectRoot: string):
 
     if (action === 'start' || action === 'restart') {
       if (!fs.existsSync(wrapper)) {
-        console.error(`[${kind}] missing ${wrapper} — run: nanoclaw service install`);
+        console.error(`[${kind}] missing ${wrapper} — run: zclaw service install`);
         failed++;
         continue;
       }
@@ -166,7 +166,7 @@ export function runCtl(action: CtlAction, roleArg?: string): number {
   const kinds = rolesToInstall(role);
   const platform = getPlatform();
 
-  console.log(`NanoClaw ${action} (role=${role}, kinds=${kinds.join('+')})`);
+  console.log(`ZClaw ${action} (role=${role}, kinds=${kinds.join('+')})`);
 
   if (action === 'start' || action === 'restart') {
     ensureOnecliRunning(projectRoot);

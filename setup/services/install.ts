@@ -393,7 +393,7 @@ function installNohup(
   }
 
   if (kinds.length === 2) {
-    const allPath = path.join(projectRoot, 'start-nanoclaw.sh');
+    const allPath = path.join(projectRoot, 'start-zclaw.sh');
     const body = [
       '#!/bin/bash',
       'set -euo pipefail',
