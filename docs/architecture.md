@@ -1,5 +1,10 @@
 # NanoClaw Architecture (Draft)
 
+> **Partially superseded.** Product runtime is **gateway + worker** — see
+> [product-tree.md](product-tree.md) and [CLAUDE.md](../CLAUDE.md).
+> Sections below that describe a single host process (`src/index.ts`, router,
+> delivery, host-sweep, classic central DB) are historical.
+
 ## Core Idea
 
 Each agent session has a mounted SQLite DB. The DB is the one and only IO mechanism between host and container. No IPC files, no stdin piping. Two tables: messages_in (host → agent-runner) and messages_out (agent-runner → host). Everything is a message.

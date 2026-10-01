@@ -42,17 +42,15 @@ export function detectExistingDisplayName(_projectRoot: string): string | null {
 }
 
 export function detectRegisteredGroups(projectRoot: string): boolean {
-  const dbPath = path.join(projectRoot, 'data', 'v2.db');
+  // Gateway product: workspaces live in data/gateway.db (not classic data/v2.db).
+  const dbPath = path.join(projectRoot, 'data', 'gateway.db');
   if (!fs.existsSync(dbPath)) return false;
 
   let db: Database.Database | null = null;
   try {
     db = new Database(dbPath, { readonly: true });
     const row = db
-      .prepare(
-        `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
-         JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
-      )
+      .prepare(`SELECT COUNT(*) as count FROM gateway_workspaces`)
       .get() as { count: number };
     return row.count > 0;
   } catch {

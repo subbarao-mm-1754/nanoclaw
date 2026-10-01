@@ -1,5 +1,9 @@
 # NanoClaw Specification
 
+> **Historical draft.** Prefer [product-tree.md](product-tree.md) for the
+> gateway+worker product surface. Sections that cite `src/index.ts` as the
+> orchestrator describe the removed classic host.
+
 A personal Claude assistant with multi-channel support, persistent memory per conversation, scheduled tasks, and container-isolated agent execution.
 
 ---

@@ -222,34 +222,18 @@ export async function run(_args: string[]): Promise<void> {
 
   const configuredChannels = Object.keys(channelAuth);
 
-  // 5. Agent groups (classic host wiring) and/or gateway workspaces
+  // 5. Gateway workspaces (gateway+worker product)
   let registeredGroups = 0;
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  if (fs.existsSync(dbPath)) {
-    try {
-      const db = new Database(dbPath, { readonly: true });
-      const row = db
-        .prepare(
-          `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
-           JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
-        )
-        .get() as { count: number };
-      registeredGroups = row.count;
-      db.close();
-    } catch {
-      // Table might not exist (DB not migrated yet)
-    }
-  }
-
   let gatewayWorkspaces = 0;
   const gatewayDbPath = path.join(DATA_DIR, 'gateway.db');
   if (fs.existsSync(gatewayDbPath)) {
     try {
       const gdb = new Database(gatewayDbPath, { readonly: true });
       const row = gdb
-        .prepare(`SELECT COUNT(*) as count FROM workspaces`)
+        .prepare(`SELECT COUNT(*) as count FROM gateway_workspaces`)
         .get() as { count: number };
       gatewayWorkspaces = row.count;
+      registeredGroups = row.count; // alias for legacy verify status field
       gdb.close();
     } catch {
       // schema may differ / empty

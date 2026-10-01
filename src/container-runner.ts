@@ -3,7 +3,7 @@
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
  */
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -11,27 +11,18 @@ import { OneCLI } from '@onecli-sh/sdk';
 
 import {
   CONTAINER_IMAGE,
-  CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
-  DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
   WORKER_SKIP_ONECLI,
 } from './config.js';
-import { materializeContainerJson, type ContainerConfig } from './container-config.js';
-import { getContainerConfig } from './db/container-configs.js';
-import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
+import type { ContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
-import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { getAgentGroup } from './db/agent-groups.js';
-import { getDb, hasTable } from './db/connection.js';
-import { initGroupFilesystem, ensureClaudeSharedFilesystem } from './group-init.js';
-import { stopTypingRefresh } from './modules/typing/index.js';
+import { ensureClaudeSharedFilesystem } from './group-init.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
-import { syncSkillSymlinks } from './skill-symlinks.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -45,7 +36,6 @@ import {
   markContainerRunning,
   markContainerStopped,
   sessionDir,
-  writeSessionRouting,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -75,10 +65,8 @@ export interface WorkerSpawnContext {
 }
 
 export interface BuildMountOptions {
-  groupDir?: string;
-  claudeSharedDir?: string;
-  /** Skip initGroupFilesystem / composeGroupClaudeMd — workspace already materialized. */
-  materialized?: boolean;
+  groupDir: string;
+  claudeSharedDir: string;
 }
 
 const containerStopWaiters = new Map<string, Array<() => void>>();
@@ -146,15 +134,14 @@ export function isContainerRunning(sessionId: string): boolean {
  * Wake up a container for a session. If already running or mid-spawn, no-op
  * (the in-flight wake promise is reused).
  *
- * The container runs the v2 agent-runner which polls the session DB.
+ * Requires a worker spawn context (materialized workspace + container config).
+ * The container runs the agent-runner which polls the session DB.
  *
  * Contract: never throws. Returns `true` on successful spawn, `false` on
- * transient spawn failure (e.g. OneCLI gateway unreachable). Callers don't
- * need to wrap — the inbound row stays pending and host-sweep retries on
- * its next tick. Callers that care (e.g. the router's typing indicator)
- * can branch on the boolean.
+ * transient spawn failure (e.g. OneCLI gateway unreachable). The worker
+ * leaves the inbound row pending and can retry on the next job.
  */
-export function wakeContainer(session: Session, spawnContext?: WorkerSpawnContext): Promise<boolean> {
+export function wakeContainer(session: Session, spawnContext: WorkerSpawnContext): Promise<boolean> {
   if (activeContainers.has(session.id)) {
     log.debug('Container already running', { sessionId: session.id });
     return Promise.resolve(true);
@@ -167,7 +154,7 @@ export function wakeContainer(session: Session, spawnContext?: WorkerSpawnContex
   const promise = spawnContainer(session, spawnContext)
     .then(() => true)
     .catch((err) => {
-      log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      log.warn('wakeContainer failed — worker can retry', { sessionId: session.id, err });
       return false;
     })
     .finally(() => {
@@ -177,34 +164,15 @@ export function wakeContainer(session: Session, spawnContext?: WorkerSpawnContex
   return promise;
 }
 
-async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContext): Promise<void> {
-  const agentGroup = spawnContext?.agentGroup ?? getAgentGroup(session.agent_group_id);
-  if (!agentGroup) {
-    log.error('Agent group not found', { agentGroupId: session.agent_group_id });
-    return;
-  }
-
-  if (!spawnContext) {
-    if (hasTable(getDb(), 'agent_destinations')) {
-      const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
-      writeDestinations(agentGroup.id, session.id);
-    }
-    writeSessionRouting(agentGroup.id, session.id);
-  }
-
-  const containerConfig =
-    spawnContext?.containerConfig ??
-    materializeContainerJson(agentGroup.id);
+async function spawnContainer(session: Session, spawnContext: WorkerSpawnContext): Promise<void> {
+  const { agentGroup, containerConfig } = spawnContext;
 
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mountOptions: BuildMountOptions | undefined = spawnContext
-    ? {
-        groupDir: spawnContext.groupDir,
-        claudeSharedDir: spawnContext.claudeSharedDir,
-        materialized: true,
-      }
-    : undefined;
+  const mountOptions: BuildMountOptions = {
+    groupDir: spawnContext.groupDir,
+    claudeSharedDir: spawnContext.claudeSharedDir,
+  };
 
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution, mountOptions);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
@@ -217,7 +185,7 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
     provider,
     contribution,
     agentIdentifier,
-    Boolean(spawnContext),
+    true,
   );
 
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
@@ -228,20 +196,18 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
     image: imageTag,
   });
 
-  // Clear any orphan heartbeat from a previous container instance — the
-  // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
-  // (host-sweep.ts line 87). Without this, the stale mtime can trigger an
-  // immediate kill before the new container touches the file itself.
+  // Clear any orphan heartbeat from a previous container instance so a stale
+  // mtime cannot look like an active agent to health checks.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  let container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   if (liveBrowser) {
     const { registerLiveBrowserEndpoint, unregisterLiveBrowserEndpoint } =
       await import('./modules/live-browser/container-hooks.js');
     registerLiveBrowserEndpoint({
       sessionId: session.id,
-      workspaceId: spawnContext?.workspaceId ?? null,
+      workspaceId: spawnContext.workspaceId ?? null,
       agentGroupId: agentGroup.id,
       containerName,
       containerPort: liveBrowser.containerPort,
@@ -271,18 +237,12 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
     }
   });
 
-  // stdout is unused in v2 (all IO is via session DB)
+  // stdout is unused (all IO is via session DB)
   container.stdout?.on('data', () => {});
-
-  // No host-side idle timeout. Stale/stuck detection is driven by the host
-  // sweep reading heartbeat mtime + processing_ack claim age + container_state
-  // (see src/host-sweep.ts). This avoids killing long-running legitimate work
-  // on a wall-clock timer.
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
     notifyContainerStopped(session.id);
     if (code !== 0 && code !== null) {
       const detail = stderrBuf.trim().slice(0, 2000);
@@ -301,7 +261,6 @@ async function spawnContainer(session: Session, spawnContext?: WorkerSpawnContex
   container.on('error', (err) => {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
     notifyContainerStopped(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
@@ -362,21 +321,13 @@ function buildMounts(
   session: Session,
   containerConfig: ContainerConfig,
   providerContribution: ProviderContainerContribution,
-  mountOptions?: BuildMountOptions,
+  mountOptions: BuildMountOptions,
 ): VolumeMount[] {
   const projectRoot = process.cwd();
-  const materialized = mountOptions?.materialized === true;
-  const groupDir = mountOptions?.groupDir ?? path.resolve(GROUPS_DIR, agentGroup.folder);
-  const claudeDir =
-    mountOptions?.claudeSharedDir ?? path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
+  const groupDir = mountOptions.groupDir;
+  const claudeDir = mountOptions.claudeSharedDir;
 
-  if (!materialized) {
-    initGroupFilesystem(agentGroup);
-    syncSkillSymlinks(claudeDir, containerConfig);
-    composeGroupClaudeMd(agentGroup);
-  } else {
-    ensureClaudeSharedFilesystem(claudeDir);
-  }
+  ensureClaudeSharedFilesystem(claudeDir);
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
@@ -472,8 +423,7 @@ async function buildContainerArgs(
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection. Treated as
   // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
+  // The worker leaves the inbound message pending and can retry.
   if (agentIdentifier && !(workerSpawn && WORKER_SKIP_ONECLI)) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
@@ -533,54 +483,4 @@ async function buildContainerArgs(
   args.push('-c', 'exec bun run /app/src/index.ts');
 
   return { args, liveBrowser };
-}
-
-/** Build a per-agent-group Docker image with custom packages. */
-export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
-  const agentGroup = getAgentGroup(agentGroupId);
-  if (!agentGroup) throw new Error('Agent group not found');
-
-  const configRow = getContainerConfig(agentGroup.id);
-  if (!configRow) throw new Error('Container config not found');
-  const aptPackages = JSON.parse(configRow.packages_apt) as string[];
-  const npmPackages = JSON.parse(configRow.packages_npm) as string[];
-  if (aptPackages.length === 0 && npmPackages.length === 0) {
-    throw new Error('No packages to install. Use install_packages first.');
-  }
-
-  let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
-  if (aptPackages.length > 0) {
-    dockerfile += `RUN apt-get update && apt-get install -y ${aptPackages.join(' ')} && rm -rf /var/lib/apt/lists/*\n`;
-  }
-  if (npmPackages.length > 0) {
-    // pnpm skips build scripts unless packages are allowlisted. Append each
-    // to /root/.npmrc (base image sets it up for agent-browser) so packages
-    // with postinstall — e.g. playwright, puppeteer, native addons — don't
-    // install silently broken.
-    const allowlist = npmPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
-    dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
-  }
-  dockerfile += 'USER node\n';
-
-  const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
-
-  log.info('Building per-agent-group image', { agentGroupId, imageTag, apt: aptPackages, npm: npmPackages });
-
-  // Write Dockerfile to temp file and build
-  const tmpDockerfile = path.join(DATA_DIR, `Dockerfile.${agentGroupId}`);
-  fs.writeFileSync(tmpDockerfile, dockerfile);
-  try {
-    execSync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
-      cwd: DATA_DIR,
-      stdio: 'pipe',
-      timeout: 900_000,
-    });
-  } finally {
-    fs.unlinkSync(tmpDockerfile);
-  }
-
-  // Store the image tag in the DB
-  updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
-
-  log.info('Per-agent-group image built', { agentGroupId, imageTag });
 }

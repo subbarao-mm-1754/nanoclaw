@@ -19,7 +19,7 @@
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
 
-NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Claude agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+NanoClaw provides that same core functionality, but in a codebase small enough to understand: a gateway, a worker, and agent containers. Claude agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ This product tree is **gateway + worker** (separate services). See [docs/product
 
 ## Philosophy
 
-**Small enough to understand.** One process, a few source files and no microservices. If you want to understand the full NanoClaw codebase, just ask Claude Code to walk you through it.
+**Small enough to understand.** Two processes (gateway + worker) and a clear container boundary — not a microservice sprawl. If you want to understand the full product surface, start at [docs/product-tree.md](docs/product-tree.md).
 
 **Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
 
@@ -118,27 +118,25 @@ Full OS install matrix (what setup installs vs optional skills): [docs/setup-ins
 ## Architecture
 
 ```
-messaging apps → host process (router) → inbound.db → container (Bun, Claude Agent SDK) → outbound.db → host process (delivery) → messaging apps
+messaging apps → gateway (channels, queue) → worker (materialize + spawn) → container (Bun, Claude Agent SDK)
+                 ↑________________ outbound collector + delivery ________________↑
 ```
 
-A single Node host orchestrates per-session agent containers. When a message arrives, the host routes it via the entity model (user → messaging group → agent group → session), writes it to the session's `inbound.db`, and wakes the container. The agent-runner inside the container polls `inbound.db`, runs Claude, and writes responses to `outbound.db`. The host polls `outbound.db` and delivers back through the channel adapter.
+The **gateway** receives channel messages, stores them in `gateway.db`, and asks the **worker** to process them. The worker materializes a workspace, writes `inbound.db`, and wakes a container. The agent-runner polls `inbound.db`, runs Claude, and writes `outbound.db`. The worker collects outbound messages; the gateway delivers them (and routes LangGraph agent-to-agent traffic when multi-agent is enabled).
 
-Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping. Channels and alternative providers self-register at startup; trunk ships the registry and the Chat SDK bridge, while the adapters themselves are skill-installed per fork.
+Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping.
 
-For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
+Product surface and optional features: [docs/product-tree.md](docs/product-tree.md). Broader writeup: [docs/architecture.md](docs/architecture.md).
 
 Key files:
-- `src/index.ts` — entry point: DB init, channel adapters, delivery polls, sweep
-- `src/router.ts` — inbound routing: messaging group → agent group → session → `inbound.db`
-- `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
-- `src/host-sweep.ts` — 60s sweep: stale detection, due-message wake, recurrence
-- `src/session-manager.ts` — resolves sessions, opens `inbound.db` / `outbound.db`
-- `src/container-runner.ts` — spawns per-agent-group containers, OneCLI credential injection
-- `src/db/` — central DB (users, roles, agent groups, messaging groups, wiring, migrations)
-- `src/channels/` — channel adapter infra (adapters installed via `/add-<channel>` skills)
-- `src/providers/` — host-side provider config (`claude` baked in; others via skills)
-- `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
-- `groups/<folder>/` — per-agent-group filesystem (`CLAUDE.md`, skills, container config)
+- `src/gateway/` — channels, HTTP API, queue, builder, orchestration
+- `src/worker/` — workspace materialization, container spawn, outbound collection
+- `src/session-manager.ts` — session folders + `inbound.db` / `outbound.db`
+- `src/container-runner.ts` — container spawn from worker context, OneCLI injection
+- `src/channels/` — channel adapter infra (Zoho Cliq shipped; others via skills)
+- `src/providers/` — provider container-config (`claude` baked in; others via skills)
+- `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, providers
+- `bin/zclaw` — install/start/stop gateway + worker
 
 ## FAQ
 

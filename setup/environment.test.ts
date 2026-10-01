@@ -36,37 +36,20 @@ describe('detectRegisteredGroups', () => {
     expect(detectRegisteredGroups(tempDir)).toBe(false);
   });
 
-  it('returns false for an empty v2 central DB', async () => {
+  it('returns false for an empty gateway DB', async () => {
     const { detectRegisteredGroups } = await import('./environment.js');
-    const db = new Database(path.join(tempDir, 'data', 'v2.db'));
-    db.exec(`
-      CREATE TABLE agent_groups (id TEXT PRIMARY KEY);
-      CREATE TABLE messaging_group_agents (
-        id TEXT PRIMARY KEY,
-        messaging_group_id TEXT NOT NULL,
-        agent_group_id TEXT NOT NULL
-      );
-    `);
+    const db = new Database(path.join(tempDir, 'data', 'gateway.db'));
+    db.exec(`CREATE TABLE gateway_workspaces (id TEXT PRIMARY KEY);`);
     db.close();
 
     expect(detectRegisteredGroups(tempDir)).toBe(false);
   });
 
-  it('detects wired agent groups in the v2 central DB', async () => {
+  it('detects workspaces in gateway.db', async () => {
     const { detectRegisteredGroups } = await import('./environment.js');
-    const db = new Database(path.join(tempDir, 'data', 'v2.db'));
-    db.exec(`
-      CREATE TABLE agent_groups (id TEXT PRIMARY KEY);
-      CREATE TABLE messaging_group_agents (
-        id TEXT PRIMARY KEY,
-        messaging_group_id TEXT NOT NULL,
-        agent_group_id TEXT NOT NULL
-      );
-    `);
-    db.prepare('INSERT INTO agent_groups (id) VALUES (?)').run('ag-1');
-    db.prepare(
-      'INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id) VALUES (?, ?, ?)',
-    ).run('mga-1', 'mg-1', 'ag-1');
+    const db = new Database(path.join(tempDir, 'data', 'gateway.db'));
+    db.exec(`CREATE TABLE gateway_workspaces (id TEXT PRIMARY KEY);`);
+    db.prepare('INSERT INTO gateway_workspaces (id) VALUES (?)').run('ws-1');
     db.close();
 
     expect(detectRegisteredGroups(tempDir)).toBe(true);

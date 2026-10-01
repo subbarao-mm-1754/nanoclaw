@@ -53,7 +53,9 @@ Full default-vs-optional install matrix: [setup-install.md](setup-install.md).
 | Item | Notes |
 |------|--------|
 | Classic single-process host (`src/index.ts`, router, host delivery, host-sweep) | **Removed** — gateway + worker replace it |
-| Host `ncl` / `scripts/chat.ts` / CLI-agent setup | **Removed** — use `./bin/zclaw` + gateway APIs |
+| Host `ncl` / `scripts/chat.ts` / CLI-agent setup | **Removed** — use `./bin/zclaw` + gateway APIs / Studio |
+| Classic `src/modules/agent-to-agent` (central `agent_destinations`) | **Removed** — LangGraph uses gateway A2A (`src/gateway/orchestration/`) |
+| Classic typing-refresh module (`src/modules/typing`) | **Removed** — no host router/delivery to drive it |
 | Classic channel setup drivers (`setup/channels/*`, `init-first-agent`) | **Removed** — install adapters via skills / `setup/add-zoho-cliq.sh` as needed |
 | Classic host modules (approvals/permissions/scheduling/self-mod host wiring) | **Removed** — not on the gateway/worker path |
 | Upstream channel install scripts you don’t use | Optional; Zoho helpers kept under `setup/add-zoho-cliq.sh` |

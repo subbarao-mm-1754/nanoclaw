@@ -33,11 +33,12 @@ If they choose to keep, skip to Phase 5 (Verify). If they choose to reconfigure,
 ### Check for native credential proxy
 
 ```bash
-grep "credential-proxy" src/index.ts 2>/dev/null
+# Classic host checked src/index.ts — this product uses gateway+worker.
+ls src/credential-proxy.ts 2>/dev/null
+grep -R "credential-proxy\|startCredentialProxy" src/gateway src/worker src/container-runner.ts 2>/dev/null | head
 ```
 
-If `startCredentialProxy` is imported, the native credential proxy skill is active. Tell the user: "You're currently using the native credential proxy (`.env`-based). This skill will switch you to OneCLI's Agent Vault, which adds per-agent policies and rate limits. Your `.env` credentials will be migrated to the vault."
-
+If a native credential proxy is wired into the gateway/worker spawn path, tell the user they are on `.env`-based proxy mode. This skill will switch them to OneCLI's Agent Vault.
 Use AskUserQuestion:
 1. **Continue** — description: "Switch to OneCLI Agent Vault."
 2. **Cancel** — description: "Keep the native credential proxy."

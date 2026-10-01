@@ -9,7 +9,7 @@
  *     `container.json`)
  *   - per-group agent memory (`CLAUDE.local.md`, auto-loaded by Claude Code)
  *
- * Runs on every spawn from `container-runner.buildMounts()`. Deterministic —
+ * Runs from the worker materializer (`composeGroupClaudeMdAt`). Deterministic —
  * same inputs produce the same CLAUDE.md, and stale fragments are pruned.
  *
  * See `docs/claude-md-composition.md` for the full design.
@@ -17,11 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
-import { getContainerConfig } from './db/container-configs.js';
-import { log } from './log.js';
-import type { AgentGroup } from './types.js';
 
 // Symlink targets are container paths — dangling on host (hence the readlink
 // dance instead of existsSync), valid inside the container via RO mounts.
@@ -35,20 +31,6 @@ const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mc
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
 
-/**
- * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
- * fragments, and MCP server fragments declared in `container.json`. Creates
- * an empty `CLAUDE.local.md` if missing.
- */
-export function composeGroupClaudeMd(group: AgentGroup): void {
-  const configRow = getContainerConfig(group.id);
-  composeGroupClaudeMdAt({
-    groupDir: path.resolve(GROUPS_DIR, group.folder),
-    mcpServers: configRow ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>) : {},
-    cliScope: configRow?.cli_scope ?? 'group',
-  });
-}
-
 export interface ComposeClaudeMdOptions {
   groupDir: string;
   mcpServers?: Record<string, McpServerConfig>;
@@ -57,7 +39,7 @@ export interface ComposeClaudeMdOptions {
 
 /** Compose CLAUDE.md under an arbitrary group directory (worker temp workspace). */
 export function composeGroupClaudeMdAt(options: ComposeClaudeMdOptions): void {
-  const { groupDir, mcpServers = {}, cliScope = 'group' } = options;
+  const { groupDir, mcpServers = {} } = options;
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
   }
@@ -87,7 +69,7 @@ export function composeGroupClaudeMdAt(options: ComposeClaudeMdOptions): void {
     }
   }
 
-  const cliDisabled = cliScope === 'disabled';
+  const cliDisabled = true; // host ncl removed — never compose cli.instructions.md
   const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
@@ -138,58 +120,6 @@ export function composeGroupClaudeMdAt(options: ComposeClaudeMdOptions): void {
   }
 }
 
-/**
- * One-time cutover from the `groups/global/CLAUDE.md` + `.claude-global.md`
- * pattern. Idempotent — safe to run on every host startup.
- *
- * For each group dir:
- *   - remove `.claude-global.md` symlink if present
- *   - rename `CLAUDE.md` → `CLAUDE.local.md` (only if `CLAUDE.local.md`
- *     doesn't already exist — preserves pre-cutover content as per-group
- *     memory; after the first spawn regenerates `CLAUDE.md`, this branch
- *     is skipped because `CLAUDE.local.md` now exists)
- *
- * Globally:
- *   - delete `groups/global/` (content already in `container/CLAUDE.md`)
- */
-export function migrateGroupsToClaudeLocal(): void {
-  if (!fs.existsSync(GROUPS_DIR)) return;
-
-  const actions: string[] = [];
-
-  for (const entry of fs.readdirSync(GROUPS_DIR, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (entry.name === 'global') continue;
-
-    const groupDir = path.join(GROUPS_DIR, entry.name);
-
-    const oldGlobalLink = path.join(groupDir, '.claude-global.md');
-    try {
-      fs.lstatSync(oldGlobalLink);
-      fs.unlinkSync(oldGlobalLink);
-      actions.push(`${entry.name}/.claude-global.md removed`);
-    } catch {
-      /* already gone */
-    }
-
-    const claudeMd = path.join(groupDir, 'CLAUDE.md');
-    const claudeLocal = path.join(groupDir, 'CLAUDE.local.md');
-    if (fs.existsSync(claudeMd) && !fs.existsSync(claudeLocal)) {
-      fs.renameSync(claudeMd, claudeLocal);
-      actions.push(`${entry.name}/CLAUDE.md → CLAUDE.local.md`);
-    }
-  }
-
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    fs.rmSync(globalDir, { recursive: true, force: true });
-    actions.push('groups/global/ removed');
-  }
-
-  if (actions.length > 0) {
-    log.info('Migrated groups to CLAUDE.local.md model', { actions });
-  }
-}
 
 function syncSymlink(linkPath: string, target: string): void {
   let currentTarget: string | null = null;

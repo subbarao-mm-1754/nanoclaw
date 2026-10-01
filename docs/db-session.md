@@ -1,8 +1,12 @@
 # NanoClaw — Per-Session DB Schema
 
-Reference for the two SQLite files each session owns: `inbound.db` (host writes, container reads) and `outbound.db` (container writes, host reads). Start with [db.md](db.md) for the three-DB overview, the single-writer rule, and the cross-mount visibility constraints.
+> Still current for gateway+worker. Host/worker writes `inbound.db`; container
+> writes `outbound.db`. Classic central `v2.db` is unrelated and removed —
+> see [product-tree.md](product-tree.md).
 
-Schemas live in `src/db/schema.ts` as the `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` constants. Both files are created by `ensureSchema()` in `src/session-manager.ts` when a new session folder is provisioned.
+Reference for the two SQLite files each session owns: `inbound.db` (host/worker writes, container reads) and `outbound.db` (container writes, host/worker reads).
+
+Schemas live in `src/db/schema.ts` as the `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` constants. Both files are created by `ensureSchema()` / `ensureSessionWorkspace()` in `src/session-manager.ts`.
 
 ---
 

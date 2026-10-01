@@ -5,35 +5,31 @@ description: Debug container agent issues. Use when things aren't working, conta
 
 # NanoClaw Container Debugging
 
-This guide covers debugging the containerized agent execution system.
+> **Product:** gateway (`src/gateway/`) + worker (`src/worker/`). Lifecycle: `./bin/zclaw`. See [docs/product-tree.md](../../docs/product-tree.md). Classic host (`src/index.ts`, router, delivery, host-sweep) is removed.
 
 ## Architecture Overview
 
 ```
-Host (macOS)                          Container (Linux VM)
-─────────────────────────────────────────────────────────────
-src/container-runner.ts               container/agent-runner/
-    │                                      │
-    │ spawns container                      │ runs Claude Agent SDK
-    │ with volume mounts                   │ with MCP servers
-    │                                      │
-    ├── data/env/env ──────────────> /workspace/env-dir/env
-    ├── groups/{folder} ───────────> /workspace/group
-    ├── data/ipc/{folder} ────────> /workspace/ipc
-    ├── data/sessions/{folder}/.claude/ ──> /home/node/.claude/ (isolated per-group)
-    └── (main only) project root ──> /workspace/project
+Channel → Gateway (queue / gateway.db)
+            ↓ HTTP
+         Worker (materialize workspace, spawn container)
+            ↓ mounts inbound.db / outbound.db
+         Container agent-runner (Bun + Claude Agent SDK)
+            ↑ outbound collector
+         Gateway delivers reply / LangGraph A2A
 ```
 
-**Important:** The container runs as user `node` with `HOME=/home/node`. Session files must be mounted to `/home/node/.claude/` (not `/root/.claude/`) for session resumption to work.
+**Important:** The container runs as user `node` with `HOME=/home/node`. Claude state is under the worker's materialized `.claude-shared` mount.
 
 ## Log Locations
 
 | Log | Location | Content |
 |-----|----------|---------|
-| **Main app logs** | `logs/nanoclaw.log` | Host-side WhatsApp, routing, container spawning |
-| **Main app errors** | `logs/nanoclaw.error.log` | Host-side errors |
-| **Container run logs** | `groups/{folder}/logs/container-*.log` | Per-run: input, mounts, stderr, stdout |
-| **Claude sessions** | `~/.claude/projects/` | Claude Code session history |
+| **Service logs** | `./bin/zclaw logs` / `logs/` | Gateway + worker |
+| **Setup logs** | `logs/setup.log`, `logs/setup-steps/*.log` | Install steps |
+| **Session DBs** | worker session dirs | `inbound.db` / `outbound.db` |
+
+Container stdout/stderr is lost after exit (`--rm`).
 
 ## Enabling Debug Logging
 

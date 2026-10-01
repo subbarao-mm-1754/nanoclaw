@@ -1,16 +1,18 @@
-// ── Central DB entities ──
+// ── Shared types (gateway+worker) ──
+// AgentGroup / Session shapes are still used by the worker spawn path.
+// Classic central-DB row types below are retained only as type documentation;
+// there is no live `data/v2.db` / `src/db/connection.ts` in this product.
 
 export interface AgentGroup {
   id: string;
   name: string;
   folder: string;
-  /** @deprecated Use container_configs.provider instead. */
+  /** Optional provider hint carried on spawn context. */
   agent_provider: string | null;
   created_at: string;
 }
 
-/** Per-agent-group container runtime config. Source of truth in the DB;
- *  materialized to `groups/<folder>/container.json` at spawn time. */
+/** @deprecated Classic central-DB container_configs row — not used at runtime. */
 export interface ContainerConfigRow {
   agent_group_id: string;
   provider: string | null;

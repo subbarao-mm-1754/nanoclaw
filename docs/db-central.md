@@ -1,8 +1,11 @@
 # NanoClaw — Central DB Schema
 
-Complete reference for `data/v2.db`, the host-owned admin-plane database. Start with [db.md](db.md) for the three-DB overview, the map, and the cross-mount rules.
+> **Historical / classic host.** This document describes `data/v2.db` and
+> `src/db/migrations/`, which are **not** part of the gateway+worker product.
+> Runtime identity lives in `data/gateway.db` (`src/gateway/db/`).
+> See [product-tree.md](product-tree.md).
 
-Access layer: `src/db/`. Authoritative schema reference: `src/db/schema.ts` (comments only — actual creation runs via migrations in `src/db/migrations/`).
+Complete reference for classic `data/v2.db` (removed from this product tree).
 
 ---
 

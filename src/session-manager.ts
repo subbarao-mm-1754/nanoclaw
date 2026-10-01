@@ -18,15 +18,6 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
-import { getMessagingGroup } from './db/messaging-groups.js';
-import { isDbInitialized } from './db/connection.js';
-import {
-  createSession,
-  findSessionByAgentGroup,
-  findSessionForAgent,
-  getSession,
-  updateSession,
-} from './db/sessions.js';
 import {
   ensureSchema,
   openInboundDb as openInboundDbRaw,
@@ -72,70 +63,6 @@ export function heartbeatPath(agentGroupId: string, sessionId: string): string {
 }
 
 /**
- * @deprecated Use inboundDbPath / outboundDbPath instead.
- * Kept temporarily for test compatibility during migration.
- */
-export function sessionDbPath(agentGroupId: string, sessionId: string): string {
-  return inboundDbPath(agentGroupId, sessionId);
-}
-
-function generateId(): string {
-  return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/**
- * Find or create a session for a messaging group + thread.
- *
- * Session modes:
- * - 'shared': one session per messaging group (ignores threadId)
- * - 'per-thread': one session per (messaging group, thread)
- * - 'agent-shared': one session per agent group — all messaging groups
- *   wired with this mode share a single session (e.g. GitHub + Slack)
- */
-export function resolveSession(
-  agentGroupId: string,
-  messagingGroupId: string | null,
-  threadId: string | null,
-  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
-): { session: Session; created: boolean } {
-  // agent-shared: single session per agent group, regardless of messaging group
-  if (sessionMode === 'agent-shared') {
-    const existing = findSessionByAgentGroup(agentGroupId);
-    if (existing) {
-      return { session: existing, created: false };
-    }
-  } else if (messagingGroupId) {
-    const lookupThreadId = sessionMode === 'shared' ? null : threadId;
-    // Scope lookup by agent_group_id so fan-out to multiple agents in the
-    // same chat doesn't accidentally deliver to the wrong agent's session.
-    const existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
-    if (existing) {
-      return { session: existing, created: false };
-    }
-  }
-
-  const id = generateId();
-  const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
-  const session: Session = {
-    id,
-    agent_group_id: agentGroupId,
-    messaging_group_id: messagingGroupId,
-    thread_id: lookupThreadId,
-    agent_provider: null,
-    status: 'active',
-    container_status: 'stopped',
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
-
-  createSession(session);
-  initSessionFolder(agentGroupId, id);
-  log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
-
-  return { session, created: true };
-}
-
-/**
  * Ensure a session workspace exists (inbound.db + outbound.db). Used by the
  * worker when the gateway supplies session ids — no central DB session row.
  */
@@ -151,47 +78,6 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 
   ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
-}
-
-/**
- * Write the default reply routing for a session into its inbound.db.
- *
- * The container reads this as the default (channel_type, platform_id, thread_id)
- * for outbound messages when the agent doesn't specify an explicit destination.
- * Derived from session.messaging_group_id → messaging_groups row + session.thread_id.
- *
- * Called on every container wake alongside the agent-to-agent module's
- * writeDestinations() (when installed) so the latest routing is always in
- * place, including after admin rewiring.
- */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
-  const dbPath = inboundDbPath(agentGroupId, sessionId);
-  if (!fs.existsSync(dbPath)) return;
-
-  const session = getSession(sessionId);
-  if (!session) return;
-
-  let channelType: string | null = null;
-  let platformId: string | null = null;
-  if (session.messaging_group_id) {
-    const mg = getMessagingGroup(session.messaging_group_id);
-    if (mg) {
-      channelType = mg.channel_type;
-      platformId = mg.platform_id;
-    }
-  }
-
-  const db = openInboundDb(agentGroupId, sessionId);
-  try {
-    upsertSessionRouting(db, {
-      channel_type: channelType,
-      platform_id: platformId,
-      thread_id: session.thread_id,
-    });
-  } finally {
-    db.close();
-  }
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
 }
 
 /** Write default reply routing from an explicit delivery address (worker / gateway path). */
@@ -352,9 +238,6 @@ export function writeSessionMessage(
     db.close();
   }
 
-  if (isDbInitialized()) {
-    updateSession(sessionId, { last_active: new Date().toISOString() });
-  }
 }
 
 /** Count pending rows in a session's inbound.db (host read-only). */
@@ -674,20 +557,11 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
   }
 }
 
-/** Mark a container as running for a session. */
-export function markContainerRunning(sessionId: string): void {
-  if (!isDbInitialized()) return;
-  updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
-}
+/** No-op — classic central session rows were removed; worker tracks containers in memory. */
+export function markContainerRunning(_sessionId: string): void {}
 
-/** Mark a container as idle for a session. */
-export function markContainerIdle(sessionId: string): void {
-  if (!isDbInitialized()) return;
-  updateSession(sessionId, { container_status: 'idle' });
-}
+/** No-op — classic central session rows were removed. */
+export function markContainerIdle(_sessionId: string): void {}
 
-/** Mark a container as stopped for a session. */
-export function markContainerStopped(sessionId: string): void {
-  if (!isDbInitialized()) return;
-  updateSession(sessionId, { container_status: 'stopped' });
-}
+/** No-op — classic central session rows were removed. */
+export function markContainerStopped(_sessionId: string): void {}

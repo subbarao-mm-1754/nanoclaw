@@ -5,19 +5,20 @@ description: Replace OneCLI gateway with the built-in credential proxy. For user
 
 # Use Native Credential Proxy
 
+> **Product note:** This checkout is **gateway + worker** (`docs/product-tree.md`). There is no `src/index.ts` classic host. Apply credential-proxy changes to `src/container-runner.ts` / worker spawn and gateway config — not a removed host entrypoint. Prefer OneCLI (`/init-onecli`) unless the user explicitly wants `.env`-only proxying.
+
 This skill replaces the OneCLI gateway with NanoClaw's built-in credential proxy. Containers get credentials injected via a local HTTP proxy that reads from `.env` — no external services needed.
 
 ## Phase 1: Pre-flight
 
 ### Check if already applied
 
-Check if `src/credential-proxy.ts` is imported in `src/index.ts`:
-
 ```bash
-grep "credential-proxy" src/index.ts
+ls src/credential-proxy.ts 2>/dev/null
+grep -R "credential-proxy\|startCredentialProxy\|CREDENTIAL_PROXY" src/ --include='*.ts' | head
 ```
 
-If it shows an import for `startCredentialProxy`, the native proxy is already active. Skip to Phase 3 (Setup).
+If the proxy module exists and is imported from the worker/container spawn path, skip to Phase 3 (Setup).
 
 ### Check if OneCLI is active
 

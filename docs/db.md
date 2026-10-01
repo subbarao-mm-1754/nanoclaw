@@ -1,11 +1,14 @@
 # NanoClaw Database Architecture — Overview
 
-Orientation for the data model: the three databases, how they fit together, and the invariants that hold across them. For table-level schemas, follow the links below.
+> **Partially superseded.** This product uses **gateway.db** + per-session
+> `inbound.db`/`outbound.db`. Classic central `data/v2.db` is removed.
+> Canonical product map: [product-tree.md](product-tree.md).
 
-- **[db-central.md](db-central.md)** — every table in `data/v2.db` (identity, wiring, approvals, Chat SDK state) plus the migration system.
-- **[db-session.md](db-session.md)** — the per-session `inbound.db` + `outbound.db` pair, seq parity, and session folder layout.
+Orientation for the data model. Session schemas remain accurate; central-DB
+sections below are historical.
 
-Related: [architecture.md](architecture.md) for the high-level design; [api-details.md](api-details.md) for inbound/outbound message content shapes; [isolation-model.md](isolation-model.md) for channel-to-agent wiring modes.
+- **[db-central.md](db-central.md)** — historical classic `data/v2.db` (removed)
+- **[db-session.md](db-session.md)** — per-session `inbound.db` + `outbound.db` (still current)
 
 ---
 
