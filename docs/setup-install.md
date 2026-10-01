@@ -133,6 +133,12 @@ Trunk ships channel **infra**; adapters are added with `/add-<name>` skills, for
 | `/add-dashboard`, `/add-macos-statusbar` | Monitoring / macOS UI |
 | `/claw` | CLI to talk to agent containers |
 
+### Gateway browser chat (env)
+
+| Config | Purpose |
+|--------|---------|
+| `CHATBOT_UI_ENABLED=true` | Gateway serves browser chat at `/chat` (same process as Agent Studio). Studio shows **Open chat** with a short-lived user ticket. Unset/false = disabled. |
+
 ### Runtime / credential alternatives
 
 | Skill / config | Purpose |

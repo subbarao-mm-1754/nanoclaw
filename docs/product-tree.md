@@ -40,6 +40,7 @@ See [setup-install.md](setup-install.md).
 | Extra messaging channels | `/add-<channel>` skills (Discord, Slack, Telegram, …) |
 | Knowledge DB (Postgres) | **Not installed by setup.** Set `KNOWLEDGE_DATABASE_URL` (or `DATABASE_URL`) on the gateway to your own Postgres. Required for `knowledge_*` tools. Separate from OneCLI’s Postgres — see [setup-install.md](setup-install.md#agent-knowledge-store-knowledge_database_url) |
 | Live browser streaming | `LIVE_BROWSER_ENABLED=true` |
+| Browser chat UI | Set `CHATBOT_UI_ENABLED=true` — gateway serves `/chat`; Studio **Open chat** with user ticket |
 | Multi-agent LangGraph orchestration | On by default; disable with `MULTI_AGENT_ORCHESTRATION_ENABLED=false` |
 | Ollama / OpenCode / Codex providers | Provider skills |
 | Mount allowlist tooling | `/manage-mounts` |
