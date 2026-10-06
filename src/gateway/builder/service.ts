@@ -1,3 +1,4 @@
+import { outboundContentToDisplayText } from '../../channels/ask-question.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { generateId } from '../auth.js';
 import { createAgent, updateAgent } from '../agent-service.js';
@@ -231,8 +232,7 @@ export async function handleBuilderOutboundStream(payload: {
     const existing = listBuildMessages(job.id).find((m) => m.id === out.id);
     if (existing) continue;
 
-    const rawText =
-      typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
+    const rawText = outboundContentToDisplayText(out.content ?? {});
     const stripped = stripBuildFence(rawText) || rawText;
     const displayText = isTest ? `${prefix}\n${stripped}`.trim() : stripped;
 
@@ -1516,8 +1516,7 @@ async function handlePreviewTestCallback(
   // Leftover rows not yet pushed by the continuous collector.
   for (const out of outbound) {
     if (streamedIds.has(out.id)) continue;
-    const rawText =
-      typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
+    const rawText = outboundContentToDisplayText(out.content ?? {});
     const displayText = `${prefix}\n${rawText}`.trim();
     insertBuildMessage({
       id: out.id,
@@ -1594,8 +1593,7 @@ export async function handleBuilderRunCallback(
   for (let i = 0; i < outbound.length; i++) {
     const out = outbound[i]!;
     if (streamedIds.has(out.id)) continue;
-    const rawText =
-      typeof out.content?.text === 'string' ? out.content.text : JSON.stringify(out.content ?? {});
+    const rawText = outboundContentToDisplayText(out.content ?? {});
     const displayText = stripBuildFence(rawText) || rawText;
     outboundTexts.push(rawText);
     const isLast = i === outbound.length - 1;

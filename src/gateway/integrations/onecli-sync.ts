@@ -1,27 +1,16 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-import { OneCLI } from '@onecli-sh/sdk';
-
-import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { log } from '../../log.js';
+import { ensureAgentV1 } from '../../onecli-v1.js';
 
 const execFileAsync = promisify(execFile);
-
-let onecliClient: OneCLI | null = null;
-
-function getOnecliClient(): OneCLI {
-  if (!onecliClient) {
-    onecliClient = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
-  }
-  return onecliClient;
-}
 
 export async function ensureOnecliAgent(input: {
   name: string;
   identifier: string;
 }): Promise<void> {
-  await getOnecliClient().ensureAgent({
+  await ensureAgentV1({
     name: input.name,
     identifier: input.identifier,
   });

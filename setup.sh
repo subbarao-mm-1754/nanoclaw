@@ -85,46 +85,43 @@ install_deps() {
   # is invisible but corepack still blocks on stdin. Auto-accept.
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-  # Preferred path: enable corepack so `pnpm` shim lands on PATH.
-  if command -v corepack >/dev/null 2>&1; then
-    log "Enabling corepack"
-    corepack enable >> "$LOG_FILE" 2>&1 || true
+  # Never let corepack/npm write shims into /usr/bin (NodeSource/apt Node).
+  # That path is root-owned: `corepack enable` then fails with
+  # EACCES … symlink … -> '/usr/bin/pnpm'. Keep installs in ~/.local.
+  local local_bin="${HOME}/.local/bin"
+  mkdir -p "$local_bin"
+  export PATH="${local_bin}:$PATH"
+  export COREPACK_HOME="${COREPACK_HOME:-${HOME}/.local/share/corepack}"
+  mkdir -p "$COREPACK_HOME"
 
-    # On Linux/WSL with system-wide Node (e.g. apt-installed to /usr/bin),
-    # corepack needs root to symlink /usr/bin/pnpm. macOS Homebrew installs
-    # land in a user-writable prefix, and a sudo retry there would create
-    # root-owned shims inside /opt/homebrew that later break brew — so the
-    # retry is Linux-only.
-    if ! command -v pnpm >/dev/null 2>&1 && [ "$PLATFORM" = "linux" ] \
-        && command -v sudo >/dev/null 2>&1; then
-      log "pnpm not on PATH after corepack enable — retrying with sudo"
-      sudo corepack enable >> "$LOG_FILE" 2>&1 || true
-    fi
+  local pinned
+  pinned=$(grep -E '"packageManager"' "$PROJECT_ROOT/package.json" 2>/dev/null \
+    | head -1 \
+    | sed -E 's/.*"pnpm@([^"]+)".*/\1/')
+  [ -z "$pinned" ] && pinned="latest"
+
+  if command -v corepack >/dev/null 2>&1; then
+    log "Enabling corepack shims in ${local_bin}"
+    corepack enable --install-directory "$local_bin" >> "$LOG_FILE" 2>&1 || true
+    hash -r 2>/dev/null || true
+    log "Preparing pnpm@${pinned} via corepack"
+    corepack prepare "pnpm@${pinned}" --activate >> "$LOG_FILE" 2>&1 || true
+    hash -r 2>/dev/null || true
   else
     log "corepack not available — will fall back to npm-install pnpm"
   fi
 
   # Fallback: some Node installs (older nvm, node@22 keg-only, minimal
-  # distro packages) don't include corepack. Install pnpm directly at the
-  # version pinned via package.json's `packageManager` field.
+  # distro packages) don't include corepack. Install pnpm into ~/.local
+  # so we never need sudo npm -g against /usr.
   if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-    local pinned
-    pinned=$(grep -E '"packageManager"' "$PROJECT_ROOT/package.json" 2>/dev/null \
-      | head -1 \
-      | sed -E 's/.*"pnpm@([^"]+)".*/\1/')
-    [ -z "$pinned" ] && pinned="latest"
-    log "Installing pnpm@${pinned} via npm"
-    npm install -g "pnpm@${pinned}" >> "$LOG_FILE" 2>&1 \
-      || ([ "$PLATFORM" = "linux" ] && command -v sudo >/dev/null 2>&1 \
-            && sudo npm install -g "pnpm@${pinned}" >> "$LOG_FILE" 2>&1) \
-      || true
+    log "Installing pnpm@${pinned} via npm --prefix ${HOME}/.local"
+    npm install -g --prefix "$HOME/.local" "pnpm@${pinned}" >> "$LOG_FILE" 2>&1 || true
+    hash -r 2>/dev/null || true
   fi
 
-  # `npm install -g` writes to npm's global prefix, which isn't always on the
-  # shell PATH — common on macOS where the user has `npm config set prefix
-  # ~/.npm-global` to avoid sudo, or on Linux where /usr/local/bin isn't in
-  # PATH. Discover the prefix and prepend its bin dir so `command -v pnpm`
-  # sees the new install.
+  # `npm install -g` without --prefix writes to npm's global prefix, which
+  # isn't always on PATH. Discover it as a last resort.
   if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     local npm_prefix
     npm_prefix=$(npm config get prefix 2>/dev/null)

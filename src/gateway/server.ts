@@ -30,6 +30,7 @@ import {
   startEdit,
 } from './builder/service.js';
 import { handleWorkerOutboundCallback } from './outbound-callback.js';
+import { outboundContentToDisplayText } from '../channels/ask-question.js';
 import { beginHttpDelivery, endHttpDelivery } from './http-channel.js';
 import { routeChannelInbound } from './channel-router.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
@@ -87,6 +88,7 @@ import {
 import { AgentAccessError } from './store/agent-files.js';
 import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { listUserAgents } from './store/agent-select.js';
+import { getActiveBuildJobForUser } from './store/builds.js';
 import {
   getActiveRunSummary,
   getOrchestrationOverview,
@@ -616,12 +618,15 @@ function studioChatPageBase(req: http.IncomingMessage): string {
 }
 
 async function handleIssueChatTicket(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const user = requireUserSession(req);
+  const token = bearerToken(req);
+  if (!token) throw new AuthError('Authentication required', 401);
+  const session = getSession(token);
+  if (!session) throw new AuthError('Invalid or expired session', 401);
   if (!CHATBOT_UI_ENABLED) {
     jsonResponse(res, 400, { error: 'Browser chat is not enabled (set CHATBOT_UI_ENABLED=true)' });
     return;
   }
-  const issued = issueChatTicket(user);
+  const issued = issueChatTicket(session.user, session.token);
   const base = studioChatPageBase(req);
   // Prefer hash so the ticket is less likely to hit server/proxy logs.
   const chatUrl = `${base}${CHATBOT_UI_PATH}#ticket=${encodeURIComponent(issued.ticket)}`;
@@ -654,12 +659,10 @@ function httpOutboundToReplies(outbound: unknown): string[] {
   for (const item of outbound) {
     if (!item || typeof item !== 'object') continue;
     const c = (item as { content?: unknown }).content;
-    if (typeof c === 'string') parts.push(c);
-    else if (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string') {
-      parts.push((c as { text: string }).text);
-    }
+    const text = outboundContentToDisplayText(c);
+    if (text.trim()) parts.push(text);
   }
-  return parts.filter(Boolean);
+  return parts;
 }
 
 function httpOutboundToText(outbound: unknown): string {
@@ -699,7 +702,7 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
 
   const identity = redeemChatTicket(ticket);
   if (!identity) {
-    jsonResponse(res, 401, { error: 'Invalid or expired chat ticket — open chat again from Studio' });
+    jsonResponse(res, 401, { error: 'Invalid or expired chat ticket — sign in to Agent Studio and open chat again' });
     return;
   }
 
@@ -721,12 +724,18 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     routed = await routeChannelInbound({
       channel_type: 'http',
       platform_id: identity.platform_id,
-      thread_id: null,
+      thread_id: messageId,
       content,
       sender_display_name: identity.display_name,
     });
   } finally {
     endHttpDelivery();
+  }
+
+  const BUILDER_WAIT_ACTIONS = new Set(['started', 'edit', 'test', 'continued']);
+  if (routed.kind === 'builder' && BUILDER_WAIT_ACTIONS.has(routed.action ?? '')) {
+    jsonResponse(res, 202, { inbound_id: messageId, status: 'pending' });
+    return;
   }
 
   const immediate = getHttpResponse(messageId);
@@ -810,6 +819,17 @@ function handleStudioChatStatus(
   }
 
   const stored = getHttpResponse(inboundId);
+  const activeBuild = getActiveBuildJobForUser(identity.user_id);
+  if (stored && activeBuild?.delivery_thread_id === inboundId) {
+    const replies = httpOutboundToReplies(stored.outbound);
+    jsonResponse(res, 200, {
+      status: 'processing',
+      inbound_id: inboundId,
+      replies: replies.length > 0 ? replies : [httpOutboundToText(stored.outbound)],
+      reply: httpOutboundToText(stored.outbound),
+    });
+    return;
+  }
   if (stored) {
     const replies = httpOutboundToReplies(stored.outbound);
     jsonResponse(res, 200, {

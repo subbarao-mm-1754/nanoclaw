@@ -125,8 +125,11 @@ probe_onecli_status() {
   if [[ -z "$url" ]]; then
     echo "installed_not_healthy"; return
   fi
-  if command_exists curl \
-     && curl -fsS --max-time 2 "${url}/api/health" >/dev/null 2>&1; then
+  if command_exists curl && {
+       curl -fsS --max-time 2 "${url}/v1/health" >/dev/null 2>&1 \
+       || curl -fsS --max-time 2 "${url}/api/health" >/dev/null 2>&1 \
+       || curl -fsS --max-time 2 "http://127.0.0.1:10256/v1/health" >/dev/null 2>&1
+     }; then
     echo "healthy"
   else
     echo "installed_not_healthy"

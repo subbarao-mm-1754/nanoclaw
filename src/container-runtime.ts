@@ -20,6 +20,35 @@ export function hostGatewayArgs(): string[] {
   return [];
 }
 
+let _podman: boolean | null = null;
+
+/** True when `docker` is the Podman shim (Linux rootless). */
+export function isPodmanRuntime(): boolean {
+  if (_podman != null) return _podman;
+  try {
+    const out = execSync(`${CONTAINER_RUNTIME_BIN} version`, {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    _podman = /podman/i.test(out);
+  } catch {
+    _podman = false;
+  }
+  return _podman;
+}
+
+/**
+ * Podman rootless maps the host user to uid 0 inside the container, while the
+ * image runs as `node` (1000). Bind-mounted outbound.db then looks root-owned
+ * and SQLite fails with "attempt to write a readonly database".
+ * `--userns=keep-id` keeps host uid 1000 as 1000 in the container.
+ */
+export function containerUserNamespaceArgs(): string[] {
+  if (os.platform() !== 'linux' || !isPodmanRuntime()) return [];
+  return ['--userns=keep-id'];
+}
+
 /** Returns CLI args for a readonly bind mount. */
 export function readonlyMountArgs(hostPath: string, containerPath: string): string[] {
   return ['-v', `${hostPath}:${containerPath}:ro`];

@@ -315,6 +315,17 @@ export function initGatewaySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_gateway_sessions_user
       ON gateway_sessions(user_id);
 
+    CREATE TABLE IF NOT EXISTS studio_chat_tickets (
+      ticket_hash   TEXT PRIMARY KEY,
+      user_id       TEXT NOT NULL REFERENCES gateway_users(id) ON DELETE CASCADE,
+      session_token TEXT NOT NULL REFERENCES gateway_sessions(token) ON DELETE CASCADE,
+      display_name  TEXT NOT NULL,
+      created_at    TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_studio_chat_tickets_session
+      ON studio_chat_tickets(session_token);
+
     CREATE TABLE IF NOT EXISTS channel_connections (
       channel_type  TEXT PRIMARY KEY,
       display_name  TEXT,

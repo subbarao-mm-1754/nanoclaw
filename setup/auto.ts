@@ -27,7 +27,7 @@ import {
 } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
-import { pollHealth } from './onecli.js';
+import { detectReusableLocalOnecli, pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
@@ -144,7 +144,7 @@ async function main(): Promise<void> {
       await fail(
         'container',
         "Couldn't build the sandbox.",
-        'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+        'The sandbox needs internet to download Linux packages. Check that this machine can reach the internet, then run bash zclaw.sh again.',
       );
     }
     maybeReexecUnderSg();
@@ -201,7 +201,7 @@ async function main(): Promise<void> {
       // rebind the listener and knock any other app using that gateway
       // offline — confirm with the user before doing that.
       const existing = detectExistingOnecli();
-      let reuse = false;
+      let onecliArgs: string[] = [];
       if (existing) {
         const choice = ensureAnswer(
           await brightSelect({
@@ -215,24 +215,30 @@ async function main(): Promise<void> {
               {
                 value: 'fresh',
                 label: 'Install a fresh instance for NanoClaw',
-                hint: 'reinstalls onecli; other apps may need to reconnect',
+                hint: 'wipes ~/.onecli + containers, then installs clean',
               },
             ],
           }),
         ) as 'reuse' | 'fresh';
         setupLog.userInput('onecli_choice', choice);
-        reuse = choice === 'reuse';
+        onecliArgs = choice === 'reuse' ? ['--reuse'] : ['--fresh'];
       }
 
-      const res = await runQuietStep(
+      // Windowed (like container build): OneCLI can take several minutes
+      // pulling images; a quiet spinner looks hung.
+      const res = await runWindowedStep(
         'onecli',
         {
-          running: reuse
-            ? 'Hooking up to your existing OneCLI…'
-            : "Setting up OneCLI, your agent's vault…",
+          running:
+            onecliArgs[0] === '--reuse'
+              ? 'Hooking up to your existing OneCLI…'
+              : onecliArgs[0] === '--fresh'
+                ? 'Installing a fresh OneCLI vault…'
+                : "Setting up OneCLI, your agent's vault…",
           done: 'OneCLI vault ready.',
+          failed: "Couldn't set up OneCLI.",
         },
-        reuse ? ['--reuse'] : [],
+        onecliArgs,
       );
       if (!res.ok) {
         const err = res.terminal?.fields.ERROR;
@@ -775,38 +781,7 @@ function anthropicSecretExists(): boolean {
  * any other app already using that gateway).
  */
 function detectExistingOnecli(): { version: string; apiHost: string } | null {
-  try {
-    const ver = spawnSync('onecli', ['version'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (ver.status !== 0) return null;
-    const version = (ver.stdout ?? '').trim();
-    if (!version) return null;
-
-    const host = spawnSync('onecli', ['config', 'get', 'api-host'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    if (host.status !== 0) return null;
-    const raw = (host.stdout ?? '').trim();
-    if (!raw) return null;
-
-    // onecli 1.3+ emits JSON by default. Older versions would print raw text.
-    try {
-      const parsed = JSON.parse(raw) as { data?: unknown; value?: unknown };
-      const val = parsed.data ?? parsed.value;
-      if (typeof val === 'string' && val.trim()) {
-        return { version, apiHost: val.trim() };
-      }
-    } catch {
-      // not JSON — try to extract a URL directly
-    }
-    const m = raw.match(/https?:\/\/[\w.\-]+(?::\d+)?/);
-    return m ? { version, apiHost: m[0] } : null;
-  } catch {
-    return null;
-  }
+  return detectReusableLocalOnecli();
 }
 
 function runInheritScript(cmd: string, args: string[]): Promise<number> {

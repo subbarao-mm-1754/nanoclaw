@@ -1,24 +1,26 @@
 /**
- * Short-lived Studio → gateway /chat tickets.
- * Issued while signed into Agent Studio; redeemed by POST /v1/studio/chat.
+ * Studio → gateway /chat tickets.
+ * Valid for the lifetime of the Agent Studio login that issued them.
  */
 import { createHash, randomBytes } from 'crypto';
 
+import { getGatewayDb } from '../db/connection.js';
 import { linkChannelIdentity } from './channel-identities.js';
 import type { GatewayUser } from '../types.js';
-
-const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface ChatTicketRecord {
   userId: string;
   displayName: string;
+  sessionToken: string;
   expiresAt: number;
 }
 
-const tickets = new Map<string, ChatTicketRecord>();
-
 function hashTicket(ticket: string): string {
   return createHash('sha256').update(ticket).digest('hex');
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
 }
 
 export function studioSenderId(userId: string): string {
@@ -27,17 +29,22 @@ export function studioSenderId(userId: string): string {
 
 export function issueChatTicket(
   user: GatewayUser,
-  ttlMs = DEFAULT_TTL_MS,
+  sessionToken: string,
 ): { ticket: string; expires_at: string; sender_id: string } {
-  const ticket = randomBytes(24).toString('base64url');
-  const expiresAt = Date.now() + ttlMs;
-  tickets.set(hashTicket(ticket), {
-    userId: user.id,
-    displayName: user.display_name,
-    expiresAt,
-  });
+  const db = getGatewayDb();
+  const session = db
+    .prepare('SELECT token, expires_at FROM gateway_sessions WHERE token = ?')
+    .get(sessionToken) as { token: string; expires_at: string } | undefined;
+  if (!session || Date.parse(session.expires_at) <= Date.now()) {
+    throw new Error('Studio session is not valid');
+  }
 
-  // Ensure /agents and friends resolve this HTTP sender to the Studio user.
+  const ticket = randomBytes(24).toString('base64url');
+  db.prepare(
+    `INSERT INTO studio_chat_tickets (ticket_hash, user_id, session_token, display_name, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(hashTicket(ticket), user.id, sessionToken, user.display_name, nowIso());
+
   linkChannelIdentity({
     user_id: user.id,
     channel_type: 'http',
@@ -47,23 +54,39 @@ export function issueChatTicket(
 
   return {
     ticket,
-    expires_at: new Date(expiresAt).toISOString(),
+    expires_at: session.expires_at,
     sender_id: studioSenderId(user.id),
   };
 }
 
 export function peekChatTicket(ticket: string): ChatTicketRecord | null {
   const key = hashTicket(ticket.trim());
-  const row = tickets.get(key);
+  const db = getGatewayDb();
+  const row = db
+    .prepare(
+      `SELECT t.user_id, t.display_name, t.session_token, s.expires_at
+       FROM studio_chat_tickets t
+       JOIN gateway_sessions s ON s.token = t.session_token
+       WHERE t.ticket_hash = ?`,
+    )
+    .get(key) as
+    | { user_id: string; display_name: string; session_token: string; expires_at: string }
+    | undefined;
   if (!row) return null;
-  if (row.expiresAt <= Date.now()) {
-    tickets.delete(key);
+  const expiresAt = Date.parse(row.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    db.prepare('DELETE FROM studio_chat_tickets WHERE ticket_hash = ?').run(key);
     return null;
   }
-  return row;
+  return {
+    userId: row.user_id,
+    displayName: row.display_name,
+    sessionToken: row.session_token,
+    expiresAt,
+  };
 }
 
-/** Redeem without consuming — valid for the full TTL (reconnect-friendly). */
+/** Redeem without consuming — valid while the Studio session is logged in. */
 export function redeemChatTicket(ticket: string): {
   user_id: string;
   display_name: string;
@@ -83,11 +106,10 @@ export function redeemChatTicket(ticket: string): {
     user_id: row.userId,
     display_name: row.displayName,
     sender_id: senderId,
-    // Per-user conversation binding (same as Cliq chat isolation).
     platform_id: senderId,
   };
 }
 
 export function resetChatTicketsForTests(): void {
-  tickets.clear();
+  getGatewayDb().prepare('DELETE FROM studio_chat_tickets').run();
 }

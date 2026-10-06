@@ -214,6 +214,7 @@
     </form>
     <script>
       const TICKET_KEY = 'nc_chat_ticket';
+      const ticketStore = window.localStorage;
       const THEME_KEY = 'nc_chat_theme';
       const log = document.getElementById('log');
       const empty = document.getElementById('empty');
@@ -267,10 +268,10 @@
         const query = new URLSearchParams(location.search);
         const ticket = (hash.get('ticket') || query.get('ticket') || '').trim();
         if (ticket) {
-          sessionStorage.setItem(TICKET_KEY, ticket);
+          ticketStore.setItem(TICKET_KEY, ticket);
           history.replaceState(null, '', location.pathname);
         }
-        return sessionStorage.getItem(TICKET_KEY) || '';
+        return ticketStore.getItem(TICKET_KEY) || '';
       }
 
       const ticket = readTicketFromUrl();
@@ -404,18 +405,29 @@
       }
 
       async function pollReplies(inboundId, ticket) {
-        const deadline = Date.now() + 600000;
-        while (Date.now() < deadline) {
+        let shown = 0;
+        for (;;) {
           const res = await fetch(
             '/v1/studio/chat/' + encodeURIComponent(inboundId) +
               '?ticket=' + encodeURIComponent(ticket),
           );
           const data = await res.json().catch(() => ({}));
+          if (res.status === 401) {
+            ticketStore.removeItem(TICKET_KEY);
+            throw new Error('Agent Studio signed out — open chat again from Studio');
+          }
           if (!res.ok) {
             throw new Error(data?.error || 'Poll failed (' + res.status + ')');
           }
+          const replies = Array.isArray(data.replies)
+            ? data.replies
+            : (typeof data.reply === 'string' && data.reply ? [data.reply] : []);
+          if (replies.length > shown) {
+            for (const reply of replies.slice(shown)) addMsg('agent', reply);
+            shown = replies.length;
+          }
           if (data.status === 'completed') {
-            showAgentReplies(data);
+            if (shown === 0) showAgentReplies(data);
             return;
           }
           if (data.status === 'failed') {
@@ -423,7 +435,6 @@
           }
           await new Promise((r) => setTimeout(r, 1500));
         }
-        throw new Error('Timed out waiting for agent reply');
       }
 
       form.addEventListener('submit', (ev) => {
@@ -434,7 +445,7 @@
         addMsg('user', text);
         input.focus();
 
-        const t = sessionStorage.getItem(TICKET_KEY) || '';
+        const t = ticketStore.getItem(TICKET_KEY) || '';
 
         void (async () => {
           try {
@@ -447,6 +458,10 @@
               body: JSON.stringify({ text, ticket: t || undefined }),
             });
             const data = await res.json().catch(() => ({}));
+            if (res.status === 401) {
+              ticketStore.removeItem(TICKET_KEY);
+              throw new Error('Agent Studio signed out — open chat again from Studio');
+            }
             if (!res.ok) {
               throw new Error(data?.error || 'Request failed (' + res.status + ')');
             }

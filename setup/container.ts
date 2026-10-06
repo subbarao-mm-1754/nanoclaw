@@ -5,6 +5,7 @@
  */
 import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
+import http from 'http';
 import os from 'os';
 import path from 'path';
 import { setTimeout as sleep } from 'timers/promises';
@@ -27,6 +28,26 @@ function dockerStatus(): DockerStatus {
 
 function dockerRunning(): boolean {
   return dockerStatus() === 'ok';
+}
+
+/** True when this host can open Debian HTTP (port 80) within a few seconds. */
+function debianHttpReachable(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      'http://deb.debian.org/debian/',
+      { family: 4, timeout: 12_000 },
+      (res) => {
+        res.resume();
+        const code = res.statusCode ?? 0;
+        resolve(code >= 200 && code < 500);
+      },
+    );
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
 }
 
 /**
@@ -300,16 +321,32 @@ export async function run(args: string[]): Promise<void> {
     // .env is optional; absence is normal on a fresh checkout
   }
 
+  const extraBuildFlags: string[] = [];
+  // Rootless Podman often cannot reach the internet via pasta/slirp (apt
+  // times out to deb.debian.org). Host network matches a normal `curl` on
+  // the machine. Docker Desktop / Colima on macOS should not use this.
+  if (getPlatform() === 'linux') {
+    extraBuildFlags.push('--network=host');
+  }
+
+  // Probe the host network (same path as --network=host builds). Do not infer
+  // HTTP vs HTTPS from apt files inside the image.
+  if (!(await debianHttpReachable())) {
+    buildArgs.push('--build-arg APT_USE_HTTPS=true');
+    log.info('Debian HTTP (port 80) unreachable — using HTTPS apt mirrors in the image build');
+  }
+
   // Build — stdio inherit so the parent setup runner can tail docker's
   // per-step output and render it in a rolling window. Previously we used
   // execSync which buffered everything; users couldn't tell whether a
   // 3–10 minute build was making progress or hung.
   let buildOk = false;
-  log.info('Building container', { runtime, buildArgs });
+  log.info('Building container', { runtime, buildArgs, extraBuildFlags });
   const buildRes = spawnSync(
     buildCmd.split(' ')[0],
     [
       ...buildCmd.split(' ').slice(1),
+      ...extraBuildFlags,
       ...buildArgs.flatMap((a) => a.split(' ')),
       '-t',
       image,

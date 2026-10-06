@@ -1,0 +1,155 @@
+# OneCLI Community (2.x) for NanoClaw — Podman docker-compose 1.x friendly.
+# Compose file format 2.4 (no top-level `name:` — that breaks Compose 1.x).
+# Project name is set by the caller: docker compose -p onecli
+#
+# Services: postgres + migrations + api + web + gateway
+# Dashboard: 10254  |  Gateway: 10255  |  API: 10256
+# Postgres uses trust auth — no DB password.
+#
+# Start order is orchestrated by setup (up postgres → run migrations → up rest)
+# because Compose 1.x lacks service_completed_successfully.
+version: "2.4"
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-onecli}
+      POSTGRES_DB: ${POSTGRES_DB:-onecli}
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onecli"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - onecli
+
+  migrations:
+    image: ghcr.io/onecli/onecli-migrations:${ONECLI_VERSION:-2.7.0}
+    container_name: onecli-migrations
+    restart: "no"
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://onecli@postgres:5432/onecli
+    env_file:
+      - .env
+    networks:
+      - onecli
+
+  api:
+    image: ghcr.io/onecli/onecli-api:${ONECLI_VERSION:-2.7.0}
+    container_name: onecli-api
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_API_PORT:-10256}:10256"
+    environment:
+      DATABASE_URL: postgresql://onecli@postgres:5432/onecli
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:-}
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-http://127.0.0.1:10254}
+      APP_URL: ${APP_URL:-http://127.0.0.1:10254}
+      API_URL: ${API_URL:-http://127.0.0.1:10256}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-http://127.0.0.1:10255}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-127.0.0.1}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
+      GATEWAY_INTERNAL_URL: http://gateway:10255
+      # NanoClaw agent containers run on the host runtime, not the OneCLI
+      # compose network — they reach the published gateway via host.docker.internal.
+      ONECLI_AGENT_PROXY_ADDRESS: host.docker.internal:10255
+    volumes:
+      - app-data:/app/data:ro
+    env_file:
+      - .env
+    networks:
+      - onecli
+
+  web:
+    image: ghcr.io/onecli/onecli-web:${ONECLI_VERSION:-2.7.0}
+    container_name: onecli-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_APP_PORT:-10254}:10254"
+    environment:
+      DATABASE_URL: postgresql://onecli@postgres:5432/onecli
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-http://127.0.0.1:10254}
+      APP_URL: ${APP_URL:-http://127.0.0.1:10254}
+      API_URL: ${API_URL:-http://127.0.0.1:10256}
+      GATEWAY_API_URL: ${GATEWAY_API_URL:-http://127.0.0.1:10255}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-127.0.0.1}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
+      ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
+      GATEWAY_INTERNAL_URL: http://gateway:10255
+    env_file:
+      - .env
+    networks:
+      - onecli
+
+  gateway:
+    image: ghcr.io/onecli/onecli-gateway:${ONECLI_VERSION:-2.7.0}
+    container_name: onecli-gateway
+    # Image USER is non-root; Podman named volumes are root-owned in the
+    # container, so the process cannot mkdir /app/data/gateway (EACCES).
+    user: "0"
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${ONECLI_BIND_HOST:-127.0.0.1}:${ONECLI_GATEWAY_PORT:-10255}:10255"
+    environment:
+      DATABASE_URL: postgresql://onecli@postgres:5432/onecli
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      GATEWAY_INTERNAL_SECRET: ${GATEWAY_INTERNAL_SECRET:-}
+      ONECLI_EXTERNAL_URL: ${ONECLI_EXTERNAL_URL:-http://127.0.0.1:10254}
+      APP_URL: ${APP_URL:-http://127.0.0.1:10254}
+      ONECLI_BIND_HOST: ${ONECLI_BIND_HOST:-127.0.0.1}
+      ONECLI_APP_PORT: ${ONECLI_APP_PORT:-10254}
+      INTERNAL_API_URL: http://api:10256
+    volumes:
+      - app-data:/app/data
+    env_file:
+      - .env
+    networks:
+      - onecli
+    healthcheck:
+      test: ["CMD", "onecli-gateway", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Makes /app/data writable before the gateway mints ca.pem (no shell in gateway image).
+  gateway-data:
+    image: alpine:3.21
+    container_name: onecli-gateway-data
+    user: "0"
+    restart: "no"
+    volumes:
+      - app-data:/app/data
+    command: ["sh", "-c", "mkdir -p /app/data/gateway && chmod 0777 /app/data /app/data/gateway"]
+    networks:
+      - onecli
+
+volumes:
+  pgdata:
+  app-data:
+
+networks:
+  onecli:
+    driver: bridge

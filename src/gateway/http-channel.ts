@@ -6,7 +6,7 @@
  */
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../channels/adapter.js';
 import { registerChannelAdapter } from '../channels/channel-registry.js';
-import { saveHttpResponse, type HttpOutboundRecord } from './store/http-responses.js';
+import { appendHttpOutbound, type HttpOutboundRecord } from './store/http-responses.js';
 
 let deliveryInboundId: string | null = null;
 let deliveryConversationId: string | null = null;
@@ -26,17 +26,6 @@ export function beginHttpDelivery(ctx: {
 }
 
 export function endHttpDelivery(): void {
-  if (deliveryInboundId && pendingOutbound.length > 0) {
-    const first = pendingOutbound[0]!;
-    saveHttpResponse({
-      inbound_id: deliveryInboundId,
-      platform_id: first.platform_id ?? 'unknown',
-      thread_id: first.thread_id ?? null,
-      conversation_id: deliveryConversationId ?? undefined,
-      worker_job_id: deliveryWorkerJobId ?? undefined,
-      outbound: [...pendingOutbound],
-    });
-  }
   deliveryInboundId = null;
   deliveryConversationId = null;
   deliveryWorkerJobId = null;
@@ -64,8 +53,9 @@ function createHttpAdapter(): ChannelAdapter {
       threadId: string | null,
       message: OutboundMessage,
     ): Promise<string | undefined> {
-      if (!deliveryInboundId) {
-        throw new Error('HTTP delivery context not set');
+      const inboundId = deliveryInboundId ?? threadId;
+      if (!inboundId) {
+        return undefined;
       }
 
       const id = `http-out-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -84,6 +74,14 @@ function createHttpAdapter(): ChannelAdapter {
           data_base64: f.data.toString('base64'),
         })),
       };
+      appendHttpOutbound({
+        inbound_id: inboundId,
+        platform_id: platformId,
+        thread_id: threadId,
+        conversation_id: deliveryConversationId ?? undefined,
+        worker_job_id: deliveryWorkerJobId ?? undefined,
+        record,
+      });
       pendingOutbound.push(record);
       return id;
     },

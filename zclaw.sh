@@ -122,12 +122,50 @@ spinner_update()  { clear_line; printf '%s  %s… %s' "$(gray '◒')" "$1" "$(di
 spinner_success() { clear_line; printf '%s  %s %s\n' "$(gray '◇')" "$1" "$(dim "(${2}s)")"; }
 spinner_failure() { clear_line; printf '%s  %s %s\n' "$(red '✗')"  "$1" "$(dim "(${2}s)")"; }
 
+# Cache sudo before background steps redirect stdout. Passworded sudo inside
+# `setup.sh > log` hangs forever because the prompt never reaches the TTY.
+# `sudo -n true` later in the keep-alive refreshes the timestamp until this
+# PID exits (survives `exec` into setup:auto).
+ensure_sudo() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  command -v sudo >/dev/null 2>&1 || return 0
+
+  if sudo -n true >/dev/null 2>&1; then
+    :
+  else
+    printf '  %s\n' \
+      "$(dim 'ZClaw needs administrator access to install Node, packages, and the container runtime.')"
+    printf '  %s\n\n' \
+      "$(dim 'Enter your password once. Setup will keep it for the rest of this run.')"
+    if [ ! -e /dev/tty ]; then
+      printf '  %s\n\n' \
+        "$(red 'No terminal available for a sudo password. Re-run from an interactive shell.')"
+      exit 1
+    fi
+    if ! sudo -v -p "  Password: " </dev/tty >/dev/tty 2>/dev/tty; then
+      printf '\n  %s\n\n' "$(red 'sudo authentication failed. Re-run bash zclaw.sh and try again.')"
+      exit 1
+    fi
+    printf '\n'
+  fi
+
+  (
+    parent=$$
+    while true; do
+      sleep 50
+      sudo -n true >/dev/null 2>&1 || exit 0
+      kill -0 "$parent" 2>/dev/null || exit 0
+    done
+  ) &
+  disown
+}
+
 # ─── fresh-run setup ────────────────────────────────────────────────────
 
 rm -rf "$STEPS_DIR"
 rm -f  "$PROGRESS_LOG"
 mkdir -p "$STEPS_DIR" "$LOGS_DIR"
-write_heade
+write_header
 
 # ZClaw splash — under-the-sea lobster mascot in truecolor braille,
 # with the figlet wordmark and taglines below. Pre-rendered into
@@ -247,6 +285,11 @@ if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
   esac
 fi
 
+# ─── pre-flight: sudo (Linux / macOS) ──────────────────────────────────
+# Prompt on the TTY *before* the bootstrap spinner. Later sudo calls
+# (NodeSource, apt, Podman, Homebrew) run with output redirected.
+ensure_sudo
+
 # ─── pre-flight: Homebrew on macOS ─────────────────────────────────────
 # setup/install-node.sh and setup/install-docker.sh both require `brew` on
 # macOS. On a factory Mac there's no brew, and those helpers would fail
@@ -355,10 +398,13 @@ fi
 # wipe it.
 export NANOCLAW_BOOTSTRAPPED=1
 
-# setup.sh may have just installed pnpm via npm into a prefix that's not on
-# our PATH (custom `npm config set prefix`, or the default prefix missing
-# from the shell's login PATH). Its PATH mutation doesn't propagate back
-# to us — so replay the same lookup here before the exec.
+# setup.sh may have just installed pnpm into ~/.local/bin (or another npm
+# prefix). That PATH mutation does not propagate back here — replay it
+# before exec so we don't pick up a broken root-owned /usr/bin/pnpm shim.
+if [ -n "${HOME:-}" ] && [ -d "${HOME}/.local/bin" ]; then
+  export PATH="${HOME}/.local/bin:$PATH"
+fi
+export COREPACK_HOME="${COREPACK_HOME:-${HOME}/.local/share/corepack}"
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
   NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
   if [ -n "$NPM_PREFIX" ] && [ -x "$NPM_PREFIX/bin/pnpm" ]; then

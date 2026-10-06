@@ -149,5 +149,7 @@ export function getSession(token: string): (GatewaySession & { user: GatewayUser
 }
 
 export function deleteSession(token: string): void {
-  getGatewayDb().prepare('DELETE FROM gateway_sessions WHERE token = ?').run(token);
+  const db = getGatewayDb();
+  db.prepare('DELETE FROM studio_chat_tickets WHERE session_token = ?').run(token);
+  db.prepare('DELETE FROM gateway_sessions WHERE token = ?').run(token);
 }

@@ -7,19 +7,16 @@ import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { OneCLI } from '@onecli-sh/sdk';
-
 import {
   CONTAINER_IMAGE,
   CONTAINER_INSTALL_LABEL,
   GROUPS_DIR,
-  ONECLI_API_KEY,
-  ONECLI_URL,
   TIMEZONE,
   WORKER_SKIP_ONECLI,
 } from './config.js';
+import { applyContainerConfigV1, ensureAgentV1 } from './onecli-v1.js';
 import type { ContainerConfig } from './container-config.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, containerUserNamespaceArgs, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { ensureClaudeSharedFilesystem } from './group-init.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -39,7 +36,6 @@ import {
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
-const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -425,10 +421,13 @@ async function buildContainerArgs(
   // a transient hard failure: if we can't wire the gateway, we don't spawn.
   // The worker leaves the inbound message pending and can retry.
   if (agentIdentifier && !(workerSpawn && WORKER_SKIP_ONECLI)) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    await ensureAgentV1({ name: agentGroup.name, identifier: agentIdentifier });
   }
   if (!(workerSpawn && WORKER_SKIP_ONECLI)) {
-    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    const onecliApplied = await applyContainerConfigV1(args, {
+      addHostMapping: false,
+      agent: agentIdentifier,
+    });
     if (!onecliApplied) {
       throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
     }
@@ -455,6 +454,7 @@ async function buildContainerArgs(
 
   // Host gateway
   args.push(...hostGatewayArgs());
+  args.push(...containerUserNamespaceArgs());
 
   // User mapping
   const hostUid = process.getuid?.();

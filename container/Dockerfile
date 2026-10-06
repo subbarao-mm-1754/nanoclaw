@@ -23,13 +23,36 @@ ARG CLAUDE_CODE_VERSION=2.1.154
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
+# Set by setup/container.ts / container/build.sh after a host probe of
+# http://deb.debian.org (same network as Linux --network=host builds).
+ARG APT_USE_HTTPS=false
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
+#
+# Apt: IPv4 always. HTTP unless the host installer passed APT_USE_HTTPS=true
+# (port 80 blocked). HTTPS verify is off only for this RUN — node:slim has no
+# CA store until ca-certificates is installed.
+ARG APT_USE_HTTPS=false
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
+    printf '%s\n' \
+      'Acquire::ForceIPv4 "true";' \
+      'Acquire::Retries "2";' \
+      > /etc/apt/apt.conf.d/99nanoclaw-apt \
+    && if [ "$APT_USE_HTTPS" = "true" ]; then \
+         echo "Using Debian HTTPS mirrors (host probe: HTTP unreachable)"; \
+         find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+           -exec sed -i \
+             's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+             {} +; \
+         printf '%s\n' \
+           'Acquire::https::Verify-Peer "false";' \
+           'Acquire::https::Verify-Host "false";' \
+           >> /etc/apt/apt.conf.d/99nanoclaw-apt; \
+       fi \
+    && apt-get update && apt-get install -y --no-install-recommends \
         chromium \
         fonts-liberation \
         fonts-noto-color-emoji \
@@ -54,6 +77,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \
+    && rm -f /etc/apt/apt.conf.d/99nanoclaw-apt \
     && rm -rf /var/lib/apt/lists/*
 
 # Chromium path for agent-browser / Playwright consumers

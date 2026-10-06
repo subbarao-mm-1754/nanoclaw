@@ -53,6 +53,25 @@ export function saveHttpResponse(input: {
     );
 }
 
+export function appendHttpOutbound(input: {
+  inbound_id: string;
+  platform_id: string;
+  thread_id: string | null;
+  conversation_id?: string;
+  worker_job_id?: string;
+  record: HttpOutboundRecord;
+}): void {
+  const existing = getHttpResponse(input.inbound_id);
+  saveHttpResponse({
+    inbound_id: input.inbound_id,
+    platform_id: input.platform_id,
+    thread_id: input.thread_id ?? existing?.thread_id ?? null,
+    conversation_id: input.conversation_id ?? existing?.conversation_id ?? undefined,
+    worker_job_id: input.worker_job_id ?? existing?.worker_job_id ?? undefined,
+    outbound: existing ? [...existing.outbound, input.record] : [input.record],
+  });
+}
+
 export function getHttpResponse(inboundId: string): HttpResponseRecord | null {
   const row = getGatewayDb()
     .prepare('SELECT * FROM http_responses WHERE inbound_id = ?')
