@@ -6,7 +6,7 @@ import {
 } from '../channels/channel-registry.js';
 import { GATEWAY_SKIP_CHANNELS } from '../config.js';
 import { log } from '../log.js';
-import { routeChannelInbound } from './channel-router.js';
+import { routeChannelInbound, type ChannelRouteResult } from './channel-router.js';
 import { listUserAgents } from './store/agent-select.js';
 import { upsertChannelConnection } from './store/channels.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
@@ -67,6 +67,93 @@ function resolveWorkspaceForNewConversation(
   }
 }
 
+export type ChannelIngestResult =
+  | { kind: 'builder'; routed: Extract<ChannelRouteResult, { kind: 'builder' }> }
+  | { kind: 'agent'; conversationId: string; workspaceId: string; messageId: string };
+
+/**
+ * Same slash-command routing + conversation bind as Cliq (and every other channel).
+ */
+export async function ingestChannelInbound(input: {
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+  message: {
+    id: string;
+    kind: string;
+    content: unknown;
+    timestamp: string;
+  };
+  senderDisplayName?: string;
+}): Promise<ChannelIngestResult> {
+  const routed = await routeChannelInbound({
+    channel_type: input.channelType,
+    platform_id: input.platformId,
+    thread_id: input.threadId,
+    content: input.message.content,
+    sender_display_name: input.senderDisplayName,
+  });
+
+  if (routed.kind === 'builder') {
+    log.info('Gateway routed inbound to builder', {
+      messageId: input.message.id,
+      channelType: input.channelType,
+      platformId: input.platformId,
+      action: routed.action,
+      jobId: routed.jobId,
+    });
+    return { kind: 'builder', routed };
+  }
+
+  const content = routed.content ?? input.message.content;
+  const workspaceId = resolveWorkspaceForNewConversation(
+    input.channelType,
+    input.platformId,
+    input.threadId,
+    content,
+    input.senderDisplayName,
+  );
+
+  const conversation = getOrCreateConversation({
+    channel_type: input.channelType,
+    platform_id: input.platformId,
+    thread_id: input.threadId,
+    display_name: input.senderDisplayName,
+    workspace_id: workspaceId,
+  });
+
+  const messageId = input.message.id || newMessageId();
+  enqueueInboundMessage(
+    {
+      id: messageId,
+      channel_type: input.channelType,
+      platform_id: input.platformId,
+      thread_id: input.threadId,
+      kind: input.message.kind,
+      content,
+      timestamp: input.message.timestamp,
+      sender_id: extractSenderId(content, input.platformId),
+      sender_display_name: input.senderDisplayName,
+    },
+    conversation.id,
+  );
+
+  log.info('Gateway enqueued inbound message', {
+    messageId,
+    channelType: input.channelType,
+    platformId: input.platformId,
+    conversationId: conversation.id,
+    workspaceId: conversation.workspace_id,
+  });
+
+  return {
+    kind: 'agent',
+    conversationId: conversation.id,
+    workspaceId: conversation.workspace_id,
+    messageId,
+  };
+}
+
 async function handleInbound(
   adapter: ChannelAdapter,
   platformId: string,
@@ -80,64 +167,12 @@ async function handleInbound(
   },
   senderDisplayName?: string,
 ): Promise<void> {
-  const routed = await routeChannelInbound({
-    channel_type: adapter.channelType,
-    platform_id: platformId,
-    thread_id: threadId,
-    content: message.content,
-    sender_display_name: senderDisplayName,
-  });
-
-  if (routed.kind === 'builder') {
-    log.info('Gateway routed inbound to builder', {
-      messageId: message.id,
-      channelType: adapter.channelType,
-      platformId,
-      action: routed.action,
-      jobId: routed.jobId,
-    });
-    return;
-  }
-
-  const content = routed.content ?? message.content;
-  const workspaceId = resolveWorkspaceForNewConversation(
-    adapter.channelType,
-    platformId,
-    threadId,
-    content,
-    senderDisplayName,
-  );
-
-  const conversation = getOrCreateConversation({
-    channel_type: adapter.channelType,
-    platform_id: platformId,
-    thread_id: threadId,
-    display_name: senderDisplayName,
-    workspace_id: workspaceId,
-  });
-
-  const messageId = message.id || newMessageId();
-  enqueueInboundMessage(
-    {
-      id: messageId,
-      channel_type: adapter.channelType,
-      platform_id: platformId,
-      thread_id: threadId,
-      kind: message.kind,
-      content,
-      timestamp: message.timestamp,
-      sender_id: extractSenderId(content, platformId),
-      sender_display_name: senderDisplayName,
-    },
-    conversation.id,
-  );
-
-  log.info('Gateway enqueued inbound message', {
-    messageId,
+  await ingestChannelInbound({
     channelType: adapter.channelType,
     platformId,
-    conversationId: conversation.id,
-    workspaceId: conversation.workspace_id,
+    threadId,
+    message,
+    senderDisplayName,
   });
 }
 

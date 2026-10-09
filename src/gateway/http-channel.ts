@@ -25,6 +25,10 @@ export function beginHttpDelivery(ctx: {
   pendingOutbound.length = 0;
 }
 
+export function getHttpDeliveryInboundId(): string | null {
+  return deliveryInboundId;
+}
+
 export function endHttpDelivery(): void {
   deliveryInboundId = null;
   deliveryConversationId = null;

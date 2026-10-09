@@ -31,6 +31,7 @@ import {
 } from './builder/service.js';
 import { handleWorkerOutboundCallback } from './outbound-callback.js';
 import { outboundContentToDisplayText } from '../channels/ask-question.js';
+import { ingestChannelInbound } from './channel-manager.js';
 import { beginHttpDelivery, endHttpDelivery } from './http-channel.js';
 import { routeChannelInbound } from './channel-router.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
@@ -719,21 +720,26 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     conversationId: `http-cmd-${messageId}`,
     workerJobId: `http-cmd-${messageId}`,
   });
-  let routed;
+  let ingested;
   try {
-    routed = await routeChannelInbound({
-      channel_type: 'http',
-      platform_id: identity.platform_id,
-      thread_id: messageId,
-      content,
-      sender_display_name: identity.display_name,
+    ingested = await ingestChannelInbound({
+      channelType: 'http',
+      platformId: identity.platform_id,
+      threadId: null,
+      message: {
+        id: messageId,
+        kind: 'chat',
+        content,
+        timestamp: new Date().toISOString(),
+      },
+      senderDisplayName: identity.display_name,
     });
   } finally {
     endHttpDelivery();
   }
 
   const BUILDER_WAIT_ACTIONS = new Set(['started', 'edit', 'test', 'continued']);
-  if (routed.kind === 'builder' && BUILDER_WAIT_ACTIONS.has(routed.action ?? '')) {
+  if (ingested.kind === 'builder' && BUILDER_WAIT_ACTIONS.has(ingested.routed.action ?? '')) {
     jsonResponse(res, 202, { inbound_id: messageId, status: 'pending' });
     return;
   }
@@ -750,8 +756,8 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     return;
   }
 
-  if (routed.kind === 'builder') {
-    const reply = `(${routed.action ?? 'builder'})`;
+  if (ingested.kind === 'builder') {
+    const reply = `(${ingested.routed.action ?? 'builder'})`;
     jsonResponse(res, 200, {
       inbound_id: messageId,
       status: 'completed',
@@ -760,37 +766,6 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
     });
     return;
   }
-
-  const routedContent = routed.content ?? content;
-  let workspaceId: string | undefined;
-  const owner = getUserById(identity.user_id);
-  if (owner) {
-    const agents = listUserAgents(owner.id);
-    workspaceId = agents[0]?.workspace_id;
-  }
-
-  const conversation = getOrCreateConversation({
-    channel_type: 'http',
-    platform_id: identity.platform_id,
-    thread_id: null,
-    display_name: identity.display_name,
-    workspace_id: workspaceId,
-  });
-
-  enqueueInboundMessage(
-    {
-      id: messageId,
-      channel_type: 'http',
-      platform_id: identity.platform_id,
-      thread_id: null,
-      kind: 'chat',
-      content: routedContent,
-      timestamp: new Date().toISOString(),
-      sender_id: identity.sender_id,
-      sender_display_name: identity.display_name,
-    },
-    conversation.id,
-  );
 
   // Return immediately so the UI can accept the next message while the agent works.
   jsonResponse(res, 202, { inbound_id: messageId, status: 'pending' });

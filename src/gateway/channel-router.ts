@@ -1,3 +1,4 @@
+import { getHttpDeliveryInboundId } from './http-channel.js';
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import { log } from '../log.js';
 import { deleteAgent } from './agent-service.js';
@@ -265,7 +266,12 @@ export async function routeChannelInbound(input: {
   const delivery = {
     channel_type: input.channel_type,
     platform_id: input.platform_id,
-    thread_id: input.thread_id,
+    // Studio HTTP uses a stable conversation thread (usually null) like Cliq DMs.
+    // Builder replies still need the current request's inbound id so the chat poll can find them.
+    thread_id:
+      input.channel_type === 'http'
+        ? (getHttpDeliveryInboundId() ?? input.thread_id)
+        : input.thread_id,
   };
 
   const lower = text.toLowerCase();
