@@ -33,6 +33,10 @@ PROGRESS_LOG="$LOGS_DIR/setup.log"
 # so `setup_launched` covers dropoff before bootstrap even starts.
 # shellcheck source=setup/lib/diagnostics.sh
 source "$PROJECT_ROOT/setup/lib/diagnostics.sh"
+# PATH: brew (macOS) + ~/.local/bin for this process and shell profiles.
+# shellcheck source=setup/lib/shell-path.sh
+source "$PROJECT_ROOT/setup/lib/shell-path.sh"
+nanoclaw_ensure_paths
 ph_event setup_launched \
   platform="$(uname -s | tr 'A-Z' 'a-z')" \
   is_wsl="$([ -f /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null && echo true || echo false)"
@@ -296,6 +300,9 @@ ensure_sudo
 # later inside the bootstrap spinner with a cryptic error. Prompt here,
 # before the spinner starts, so the user knows what's about to happen and
 # brew's own interactive sudo/CLT prompts stay readable.
+#
+# nanoclaw_ensure_paths already ran — if brew exists under /opt/homebrew but
+# was missing from PATH, it is visible now. Only prompt when brew is absent.
 if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   printf '  %s\n' \
     "$(dim "Homebrew isn't installed. ZClaw uses it to install Node and Docker on your Mac.")"
@@ -314,13 +321,8 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
         "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
         || true
 
-      # Put brew on PATH for this session (the installer writes to
-      # .zprofile/.bash_profile for future shells, but not this one).
-      if [ -x /opt/homebrew/bin/brew ]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-      elif [ -x /usr/local/bin/brew ]; then
-        eval "$(/usr/local/bin/brew shellenv)"
-      fi
+      # Session + profiles (installer may have written .zprofile already).
+      nanoclaw_ensure_paths
 
       if ! command -v brew >/dev/null 2>&1; then
         printf '\n  %s %s\n' "$(red '✗')" "Homebrew install didn't complete."
@@ -399,11 +401,8 @@ fi
 export NANOCLAW_BOOTSTRAPPED=1
 
 # setup.sh may have just installed pnpm into ~/.local/bin (or another npm
-# prefix). That PATH mutation does not propagate back here — replay it
-# before exec so we don't pick up a broken root-owned /usr/bin/pnpm shim.
-if [ -n "${HOME:-}" ] && [ -d "${HOME}/.local/bin" ]; then
-  export PATH="${HOME}/.local/bin:$PATH"
-fi
+# prefix). Replay brew + local bin, then npm-prefix fallback for pnpm.
+nanoclaw_ensure_paths
 export COREPACK_HOME="${COREPACK_HOME:-${HOME}/.local/share/corepack}"
 if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
   NPM_PREFIX="$(npm config get prefix 2>/dev/null)"
@@ -414,6 +413,21 @@ fi
 
 # --silent suppresses pnpm's `> nanoclaw@2.0.0 setup:auto / > tsx setup/auto.ts`
 # preamble so the flow continues visually from "Basics installed" straight
-# into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
-# `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
-exec pnpm --silent run setup:auto -- "$@"
+# into setup:auto's spinner. `-- "$@"` forwards any flags (e.g.
+# --onecli-api-host) to setup:auto.
+#
+# Do not `exec` — on success we hand off to an interactive shell that
+# inherits PATH so docker/brew/zclaw work in this same terminal window.
+pnpm --silent run setup:auto -- "$@"
+SETUP_AUTO_RC=$?
+
+nanoclaw_ensure_paths
+nanoclaw_write_path_exports_file "$PROJECT_ROOT/setup/path-exports.sh"
+
+if [ "$SETUP_AUTO_RC" -eq 0 ]; then
+  # Replaces this process with $SHELL -i (inherits PATH). Skip in CI via
+  # NANOCLAW_SKIP_SHELL_HANDOFF=1.
+  nanoclaw_handoff_interactive_shell "$PROJECT_ROOT"
+fi
+
+exit "$SETUP_AUTO_RC"

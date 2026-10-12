@@ -13,7 +13,7 @@ Windows is supported via **WSL2** (treat as Linux below).
 | **Homebrew** | Installed if missing (prompted in `zclaw.sh`) | — | Needed for Node / Colima / Docker CLI formulae |
 | **Node.js 20+** | Installed if missing | Installed if missing | `setup/install-node.sh` |
 | **pnpm** + `node_modules` | Yes | Yes | `setup.sh` / `pnpm install --frozen-lockfile` |
-| **Container runtime** | See [macOS runtime](#macos-container-runtime) | See [Linux runtime](#linux-wsl2-container-runtime) | Worker spawns agent containers via `docker` CLI |
+| **Container runtime** | See [macOS runtime](#macos-container-runtime) (Colima path also installs `docker-buildx`) | See [Linux runtime](#linux-wsl2-container-runtime) | Worker spawns agent containers via `docker` CLI |
 | **Agent image** | Built (`nanoclaw-agent…:latest`) | Built | `setup/container.ts` / `container/build.sh` |
 | **OneCLI gateway + CLI** | Yes (local by default) | Yes (local by default) | `setup/onecli.ts` → `onecli.sh/install` |
 | **OneCLI Postgres** | Compose container | Compose container | Pulled/started by OneCLI installer — not host `apt`/`brew` Postgres |
@@ -30,13 +30,38 @@ Installers are **idempotent** where possible: if a binary/app is already present
 
 ---
 
+## PATH / Docker host after setup
+
+`setup/lib/shell-path.sh` (sourced by `zclaw.sh`, `setup/install-docker.sh`, and `setup/auto.ts`) is **platform-gated**:
+
+| | macOS | Linux / WSL2 |
+|--|--------|----------------|
+| Homebrew on `PATH` | Yes (`brew shellenv`) | **No** (never touched) |
+| Colima `DOCKER_HOST` | Yes → `unix://${HOME}/.colima/default/docker.sock` + `docker context use colima` (skipped if Docker Desktop is present) | **No** (Podman / docker shim unchanged) |
+| `~/.local/bin` on `PATH` | Yes | Yes |
+| Shell profile lines | brew + Colima `DOCKER_HOST` + local bin | local bin only |
+| launchd / systemd | launchd `PATH` includes Homebrew; `DOCKER_HOST` set for Colima | systemd `PATH` unchanged (no Homebrew / no Colima) |
+
+Also:
+
+| Target | What |
+|--------|------|
+| **Current terminal after `bash zclaw.sh`** | On success, interactive `$SHELL` inherits the updated env. Skip with `NANOCLAW_SKIP_SHELL_HANDOFF=1` |
+| **Manual refresh** | `source setup/path-exports.sh` |
+
+Colima v0.4+ uses the **default** profile socket (`~/.colima/default/docker.sock`), not `~/.colima/docker/docker.sock`.
+
+---
+
 ## macOS container runtime
 
 Preference order in `setup/install-docker.sh`:
 
-1. **Docker Desktop already installed** (`/Applications/Docker.app` or `~/Applications/Docker.app`) → **reuse it**. Do not install another engine.
-2. **Else Colima already installed** → reuse Colima; ensure Docker CLI + Compose via Homebrew **formulae** (`docker`, `docker-compose`).
-3. **Else** → install **Colima + Docker CLI + Compose** with Homebrew (`brew install colima docker docker-compose`).
+1. **Docker Desktop already installed** (`/Applications/Docker.app` or `~/Applications/Docker.app`) → **reuse it**. Do not install another engine. Desktop already bundles Buildx.
+2. **Else Colima already installed** → reuse Colima; ensure Docker CLI + Compose + Buildx via Homebrew **formulae** (`docker`, `docker-compose`, `docker-buildx`), and symlink plugins into `~/.docker/cli-plugins`.
+3. **Else** → install **Colima + Docker CLI + Compose + Buildx** with Homebrew (`brew install colima docker docker-compose docker-buildx`), then link CLI plugins the same way.
+
+**Why Buildx:** the agent `Dockerfile` uses BuildKit cache mounts. Recent Docker CLIs need the `docker-buildx` plugin for `docker build` when BuildKit is the default; Homebrew’s `docker` formula does not include it.
 
 **Docker Desktop is never installed by NanoClaw setup.** Only reused if the user already has it.
 

@@ -39,12 +39,11 @@ import { isValidTimezone } from '../src/timezone.js';
 const RUN_START = Date.now();
 
 async function main(): Promise<void> {
-  // Make sure ~/.local/bin is on PATH for every child process we spawn.
-  // Installers we run mid-setup (OneCLI, claude) drop binaries there and
-  // append a PATH line to the user's shell rc, but rc updates don't reach
-  // an already-running Node process — so without this patch a freshly
-  // installed `onecli` is invisible to a subsequent `runInheritScript`.
-  ensureLocalBinOnPath();
+  // brew (macOS) + ~/.local/bin for this process and shell profiles so
+  // docker/pnpm/onecli work during setup and in new terminals afterward.
+  // Mid-setup installers also drop binaries in ~/.local/bin; rc updates do
+  // not reach this already-running Node process without the session patch.
+  ensureShellPaths();
 
   // Parse CLI flags first — `--help` short-circuits before we render anything,
   // and flag values get folded into process.env so existing step code reading
@@ -354,6 +353,10 @@ async function main(): Promise<void> {
       return;
     }
   }
+
+  // Re-persist after OneCLI/claude may have written profiles; refresh PATH.
+  ensureShellPaths();
+  writePathExportsFile();
 
   const rows: [string, string][] = [
     ['Check services:', './bin/zclaw status'],
@@ -756,10 +759,93 @@ async function runTimezoneStep(): Promise<void> {
 
 function ensureLocalBinOnPath(): void {
   const localBin = path.join(os.homedir(), '.local', 'bin');
+  try {
+    fs.mkdirSync(localBin, { recursive: true });
+  } catch {
+    // ignore
+  }
   const current = process.env.PATH ?? '';
   const segments = current.split(path.delimiter).filter(Boolean);
   if (segments.includes(localBin)) return;
   process.env.PATH = current ? `${localBin}${path.delimiter}${current}` : localBin;
+}
+
+/** Prepend Homebrew bin dirs on macOS when brew exists but is off PATH. */
+function ensureBrewBinsOnPath(): void {
+  if (process.platform !== 'darwin') return;
+  const candidates = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/local/sbin',
+  ];
+  const current = process.env.PATH ?? '';
+  const segments = new Set(current.split(path.delimiter).filter(Boolean));
+  const prepend: string[] = [];
+  for (const dir of candidates) {
+    if (segments.has(dir)) continue;
+    try {
+      if (fs.existsSync(dir)) prepend.push(dir);
+    } catch {
+      // ignore
+    }
+  }
+  if (prepend.length === 0) return;
+  process.env.PATH = `${prepend.join(path.delimiter)}${current ? path.delimiter + current : ''}`;
+}
+
+/** macOS + Colima only — apply DOCKER_HOST in this Node process (not Linux). */
+function ensureColimaDockerHostEnv(): void {
+  if (process.platform !== 'darwin') return;
+  if (
+    fs.existsSync('/Applications/Docker.app') ||
+    fs.existsSync(path.join(os.homedir(), 'Applications', 'Docker.app'))
+  ) {
+    return;
+  }
+  const hasColima = spawnSync('bash', ['-c', 'command -v colima'], {
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (hasColima.status !== 0) return;
+  const sock = path.join(os.homedir(), '.colima', 'default', 'docker.sock');
+  // Set even before the socket exists so children inherit the correct host.
+  process.env.DOCKER_HOST = `unix://${sock}`;
+}
+
+/**
+ * Session PATH + persist brew/local-bin (+ macOS Colima DOCKER_HOST) via
+ * setup/lib/shell-path.sh. Brew/Colima helpers are Darwin-only inside that
+ * script — Linux/WSL only get ~/.local/bin.
+ */
+function ensureShellPaths(): void {
+  ensureBrewBinsOnPath();
+  ensureLocalBinOnPath();
+  const script = path.join(process.cwd(), 'setup', 'lib', 'shell-path.sh');
+  if (!fs.existsSync(script)) return;
+  spawnSync(
+    'bash',
+    ['-c', `source ${JSON.stringify(script)} && nanoclaw_ensure_paths`],
+    { encoding: 'utf-8', stdio: 'ignore' },
+  );
+  // Re-apply after bash persist — child env does not mutate this process.
+  ensureBrewBinsOnPath();
+  ensureLocalBinOnPath();
+  ensureColimaDockerHostEnv();
+}
+
+function writePathExportsFile(): void {
+  const script = path.join(process.cwd(), 'setup', 'lib', 'shell-path.sh');
+  const dest = path.join(process.cwd(), 'setup', 'path-exports.sh');
+  if (!fs.existsSync(script)) return;
+  spawnSync(
+    'bash',
+    [
+      '-c',
+      `source ${JSON.stringify(script)} && nanoclaw_write_path_exports_file ${JSON.stringify(dest)}`,
+    ],
+    { encoding: 'utf-8', stdio: 'ignore' },
+  );
 }
 
 function anthropicSecretExists(): boolean {

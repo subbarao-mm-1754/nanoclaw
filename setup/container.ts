@@ -77,8 +77,54 @@ function macosEngineLabel(): string {
   return 'docker';
 }
 
+/**
+ * Colima v0.4+ socket is ~/.colima/default/docker.sock (profile "default").
+ * macOS + Colima only — never runs on Linux/WSL (Podman uses usePodmanUserSocket).
+ */
+function resolveColimaDockerSock(): string | null {
+  if (!preferColimaOnMac()) return null;
+  const defaultSock = path.join(os.homedir(), '.colima', 'default', 'docker.sock');
+  if (fs.existsSync(defaultSock)) return defaultSock;
+
+  const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
+  const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
+  const m = out.match(/socket:\s*(unix:\/\/\/[^\s]+)/i);
+  if (m?.[1]?.startsWith('unix:///')) {
+    return m[1].slice('unix://'.length);
+  }
+  // Expected path before the socket file exists (first start).
+  return defaultSock;
+}
+
+/**
+ * Point DOCKER_HOST at Colima's default-profile socket and select the
+ * `colima` Docker context. Corrects wrong hosts such as
+ * ~/.colima/docker/docker.sock. No-op on Linux and when Docker Desktop is used.
+ */
+function ensureColimaDockerHost(): void {
+  if (!preferColimaOnMac()) return;
+  const sock = resolveColimaDockerSock();
+  if (!sock) return;
+
+  const host = `unix://${sock}`;
+  const prev = process.env.DOCKER_HOST ?? '';
+  process.env.DOCKER_HOST = host;
+  spawnSync('docker', ['context', 'use', 'colima'], {
+    encoding: 'utf-8',
+    stdio: 'ignore',
+  });
+  if (prev !== host) {
+    log.info('Using Colima Docker socket', {
+      DOCKER_HOST: host,
+      previous: prev || '(unset)',
+    });
+  }
+}
+
 /** Point DOCKER_HOST at the rootless Podman user socket when present. */
 function usePodmanUserSocket(): void {
+  // Linux/WSL only — never override macOS Colima / Desktop.
+  if (getPlatform() !== 'linux') return;
   if (process.env.DOCKER_HOST) return;
   try {
     const uid = typeof process.getuid === 'function' ? process.getuid() : null;
@@ -104,6 +150,7 @@ function startMacosRuntime(): void {
     const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
     if (status.status === 0 && /is running/i.test(out)) {
       log.info('Colima already running');
+      ensureColimaDockerHost();
       return;
     }
     // Blocks until the VM is ready (first start can take several minutes).
@@ -112,6 +159,7 @@ function startMacosRuntime(): void {
       stdio: 'inherit',
       timeout: 300_000,
     });
+    ensureColimaDockerHost();
     return;
   }
   // Last resort — user may have Desktop without the usual app path.
@@ -250,11 +298,21 @@ export async function run(args: string[]): Promise<void> {
   if (preferPodmanOnLinux()) {
     usePodmanUserSocket();
   }
+  // macOS Colima only — fixes DOCKER_HOST before the first docker info probe.
+  if (preferColimaOnMac()) {
+    ensureColimaDockerHost();
+  }
 
   {
     let status = dockerStatus();
     if (status !== 'ok') {
       status = await tryStartDocker();
+    }
+    if (preferColimaOnMac()) {
+      ensureColimaDockerHost();
+      if (status !== 'ok') {
+        status = dockerStatus();
+      }
     }
 
     // Docker Engine only: socket unreachable due to group perms — current

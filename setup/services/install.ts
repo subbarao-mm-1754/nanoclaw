@@ -163,6 +163,19 @@ function maybeFixDockerAcl(): boolean {
   }
 }
 
+/** Colima on macOS only — launchd has no Docker context, so set DOCKER_HOST. */
+function macosColimaDockerHost(homeDir: string): string | null {
+  if (
+    fs.existsSync('/Applications/Docker.app') ||
+    fs.existsSync(path.join(homeDir, 'Applications', 'Docker.app'))
+  ) {
+    return null;
+  }
+  if (!commandExists('colima')) return null;
+  const sock = path.join(homeDir, '.colima', 'default', 'docker.sock');
+  return `unix://${sock}`;
+}
+
 function installLaunchd(
   projectRoot: string,
   nodePath: string,
@@ -170,6 +183,7 @@ function installLaunchd(
   kinds: ServiceKind[],
 ): InstallResult {
   const labels: string[] = [];
+  const dockerHost = macosColimaDockerHost(homeDir);
   for (const kind of kinds) {
     const label = getLaunchdServiceLabel(kind, projectRoot);
     const plistPath = path.join(
@@ -181,7 +195,7 @@ function installLaunchd(
     fs.mkdirSync(path.dirname(plistPath), { recursive: true });
     fs.writeFileSync(
       plistPath,
-      buildLaunchdPlist({ kind, projectRoot, nodePath, homeDir }),
+      buildLaunchdPlist({ kind, projectRoot, nodePath, homeDir, dockerHost }),
     );
     log.info('Wrote launchd plist', { kind, plistPath });
 

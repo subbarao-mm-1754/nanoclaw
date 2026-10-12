@@ -6,12 +6,19 @@ export function buildLaunchdPlist(opts: {
   projectRoot: string;
   nodePath: string;
   homeDir: string;
+  /** When set (Colima on macOS), worker/gateway talk to the right docker.sock. */
+  dockerHost?: string | null;
 }): string {
-  const { kind, projectRoot, nodePath, homeDir } = opts;
+  const { kind, projectRoot, nodePath, homeDir, dockerHost } = opts;
   const label = getLaunchdServiceLabel(kind, projectRoot);
   const entry = `${projectRoot}/${distEntry(kind)}`;
   const outLog = `${projectRoot}/logs/${logBasename(kind, 'out')}`;
   const errLog = `${projectRoot}/logs/${logBasename(kind, 'err')}`;
+  const dockerHostXml = dockerHost
+    ? `
+        <key>DOCKER_HOST</key>
+        <string>${dockerHost}</string>`
+    : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,9 +40,9 @@ export function buildLaunchdPlist(opts: {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:${homeDir}/.local/bin</string>
         <key>HOME</key>
-        <string>${homeDir}</string>
+        <string>${homeDir}</string>${dockerHostXml}
         <key>NANOCLAW_ROLE</key>
         <string>${kind}</string>
     </dict>

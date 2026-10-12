@@ -2,7 +2,8 @@
 # Setup helper: install-docker — installs the container runtime used by NanoClaw.
 #
 #   macOS  → Prefer existing Docker Desktop if present; otherwise use/install
-#            Colima + Docker CLI (Homebrew formulae). Never installs Docker Desktop.
+#            Colima + Docker CLI + Compose + Buildx (Homebrew formulae).
+#            Never installs Docker Desktop.
 #   Linux  → Podman + podman-docker CLI shim (+ Compose provider)
 #            so `docker` / `docker compose` talk to Podman. Does NOT install
 #            Docker Engine (get.docker.com).
@@ -15,6 +16,13 @@
 # it. Starting the runtime (after install) stays separate — `open -a Docker`
 # or `colima start` on macOS, `systemctl --user start podman.socket` on Linux.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=lib/shell-path.sh
+source "$PROJECT_ROOT/setup/lib/shell-path.sh"
+# macOS: brew + Colima DOCKER_HOST. Linux: ~/.local/bin only (no brew/Colima).
+nanoclaw_ensure_paths
 
 echo "=== NANOCLAW SETUP: INSTALL_DOCKER ==="
 
@@ -65,6 +73,57 @@ ensure_compose_provider() {
   fi
 }
 
+# Homebrew Docker plugins are not on Docker's default search path. Symlink
+# them into ~/.docker/cli-plugins (Colima / brew docs). Prefer brew --prefix
+# so Apple Silicon (/opt/homebrew) and Intel (/usr/local) both work.
+link_macos_docker_cli_plugin() {
+  local name=$1
+  local brew_bin
+  brew_bin="$(brew --prefix 2>/dev/null)/opt/${name}/bin/${name}"
+  if [ ! -x "$brew_bin" ]; then
+    # Some formulae expose the binary only on PATH after install.
+    brew_bin="$(command -v "$name" 2>/dev/null || true)"
+  fi
+  if [ -z "$brew_bin" ] || [ ! -x "$brew_bin" ]; then
+    echo "NOTE: ${name} binary not found — skip CLI plugin symlink"
+    return 0
+  fi
+  local dest="${HOME}/.docker/cli-plugins/${name}"
+  mkdir -p "$(dirname "$dest")"
+  ln -sfn "$brew_bin" "$dest"
+  echo "PLUGIN: linked $dest -> $brew_bin"
+}
+
+# Agent Dockerfile uses BuildKit cache mounts (# syntax=docker/dockerfile:1.7,
+# RUN --mount=type=cache). Recent Docker CLIs require the buildx plugin for
+# `docker build` when BuildKit is the default — Docker Desktop bundles it;
+# Colima + brew docker does not.
+ensure_macos_docker_buildx() {
+  if docker buildx version >/dev/null 2>&1; then
+    echo "BUILDX: $(docker buildx version 2>/dev/null | head -1)"
+    return 0
+  fi
+
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "NOTE: brew missing — cannot install docker-buildx"
+    return 0
+  fi
+
+  if ! brew list --formula docker-buildx >/dev/null 2>&1 \
+    && ! command -v docker-buildx >/dev/null 2>&1; then
+    echo "STEP: brew-install-docker-buildx"
+    brew install docker-buildx
+  fi
+
+  link_macos_docker_cli_plugin docker-buildx
+
+  if docker buildx version >/dev/null 2>&1; then
+    echo "BUILDX: $(docker buildx version 2>/dev/null | head -1)"
+  else
+    echo "NOTE: docker buildx still unavailable after install — agent image build may fail"
+  fi
+}
+
 ensure_macos_docker_cli() {
   # Colima needs the Docker CLI formulae (not Docker Desktop cask).
   if ! command -v brew >/dev/null 2>&1; then
@@ -79,10 +138,23 @@ ensure_macos_docker_cli() {
   if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
     pkgs+=(docker-compose)
   fi
+  # Buildx is required for BuildKit-backed `docker build` on recent CLIs.
+  if ! docker buildx version >/dev/null 2>&1; then
+    if ! brew list --formula docker-buildx >/dev/null 2>&1 \
+      && ! command -v docker-buildx >/dev/null 2>&1; then
+      pkgs+=(docker-buildx)
+    fi
+  fi
   if [ "${#pkgs[@]}" -gt 0 ]; then
     echo "STEP: brew-install-docker-cli (${pkgs[*]})"
     brew install "${pkgs[@]}"
   fi
+  # Compose as a CLI plugin (in addition to standalone docker-compose binary).
+  if brew list --formula docker-compose >/dev/null 2>&1 \
+    || [ -x "$(brew --prefix 2>/dev/null)/opt/docker-compose/bin/docker-compose" ]; then
+    link_macos_docker_cli_plugin docker-compose
+  fi
+  ensure_macos_docker_buildx
   ensure_compose_provider
 }
 
@@ -153,6 +225,7 @@ install_or_reuse_macos() {
     echo "COLIMA_VERSION: $(colima version 2>/dev/null | head -1 || echo unknown)"
     ensure_macos_docker_cli
     echo "DOCKER_VERSION: $(docker --version 2>/dev/null || echo unknown)"
+    echo "BUILDX: $(docker buildx version 2>/dev/null | head -1 || echo unknown)"
     echo "=== END ==="
     exit 0
   fi
@@ -166,7 +239,10 @@ install_or_reuse_macos() {
   fi
 
   # Formulae only — do not `brew install --cask docker`.
-  brew install colima docker docker-compose
+  # docker-buildx: BuildKit plugin for `docker build` (agent Dockerfile cache mounts).
+  brew install colima docker docker-compose docker-buildx
+  link_macos_docker_cli_plugin docker-compose
+  ensure_macos_docker_buildx
   ensure_compose_provider
 
   if ! command -v colima >/dev/null 2>&1; then
@@ -186,6 +262,7 @@ install_or_reuse_macos() {
   echo "RUNTIME: colima"
   echo "COLIMA_VERSION: $(colima version 2>/dev/null | head -1 || echo unknown)"
   echo "DOCKER_VERSION: $(docker --version 2>/dev/null || echo unknown)"
+  echo "BUILDX: $(docker buildx version 2>/dev/null | head -1 || echo unknown)"
   echo "=== END ==="
   exit 0
 }
