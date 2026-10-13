@@ -56,6 +56,7 @@ export function createAgentRecord(input: {
   workspace_id?: string;
   agent_group_id?: string;
   agent_kind?: 'agent' | 'orchestrator';
+  routing_description?: string | null;
 }): GatewayAgent {
   const workspaceId = input.workspace_id ?? generateId('ws');
   const agentGroupId = input.agent_group_id ?? generateId('ag');
@@ -76,6 +77,7 @@ export function createAgentRecord(input: {
     is_default: input.is_default,
     is_master: input.is_master,
     agent_kind: input.agent_kind ?? 'agent',
+    routing_description: input.routing_description,
   });
 
   saveAgentFiles(workspaceId, input.files);
@@ -85,7 +87,13 @@ export function createAgentRecord(input: {
 export function updateAgentMetadata(
   workspaceId: string,
   userId: string,
-  input: { name?: string; container_config?: ContainerConfigSnapshot; cli_scope?: string; is_default?: boolean },
+  input: {
+    name?: string;
+    container_config?: ContainerConfigSnapshot;
+    cli_scope?: string;
+    is_default?: boolean;
+    routing_description?: string | null;
+  },
 ): GatewayAgent {
   assertAgentOwner(workspaceId, userId);
   const workspace = updateWorkspaceMetadata(workspaceId, input);

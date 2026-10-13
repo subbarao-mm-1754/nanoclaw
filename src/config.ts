@@ -23,6 +23,11 @@ const envConfig = readEnvFile([
   'LIVE_BROWSER_HOST_PORT_END',
   'LIVE_BROWSER_TICKET_TTL_MS',
   'MULTI_AGENT_ORCHESTRATION_ENABLED',
+  'AUTO_AGENT_ROUTE',
+  'LAYA_OLLAMA_URL',
+  'LAYA_MODEL',
+  'LAYA_CONFIDENCE_MIN',
+  'LAYA_PROBABILITY_MIN',
   'WORKER_BUILD_TURN_TIMEOUT_MS',
   'WORKER_BUILD_PROGRESS_INTERVAL_MS',
   'WORKER_BUILD_TURN_MAX_MS',
@@ -236,6 +241,40 @@ export const MULTI_AGENT_ORCHESTRATION_ENABLED =
   (process.env.MULTI_AGENT_ORCHESTRATION_ENABLED ??
     envConfig.MULTI_AGENT_ORCHESTRATION_ENABLED ??
     'true') !== 'false';
+
+/**
+ * Laya-based auto agent routing (stay vs sticky switch) on each normal message.
+ * Off by default — set AUTO_AGENT_ROUTE=true. Requires Ollama ≥0.40 with `laya` pulled.
+ */
+export const AUTO_AGENT_ROUTE =
+  (process.env.AUTO_AGENT_ROUTE ?? envConfig.AUTO_AGENT_ROUTE ?? 'false') === 'true';
+
+/** Ollama base URL for Laya `/v1/systemone` (not Anthropic chat proxy). */
+export const LAYA_OLLAMA_URL = (
+  process.env.LAYA_OLLAMA_URL ||
+  envConfig.LAYA_OLLAMA_URL ||
+  'http://127.0.0.1:11434'
+).replace(/\/$/, '');
+
+export const LAYA_MODEL = process.env.LAYA_MODEL || envConfig.LAYA_MODEL || 'laya';
+
+/** Min Laya `confidence` required to sticky-switch away from the current agent. */
+export const LAYA_CONFIDENCE_MIN = Math.min(
+  1,
+  Math.max(
+    0,
+    parseFloat(process.env.LAYA_CONFIDENCE_MIN || envConfig.LAYA_CONFIDENCE_MIN || '0.55') || 0.55,
+  ),
+);
+
+/** Min probability on the chosen agent required to sticky-switch. */
+export const LAYA_PROBABILITY_MIN = Math.min(
+  1,
+  Math.max(
+    0,
+    parseFloat(process.env.LAYA_PROBABILITY_MIN || envConfig.LAYA_PROBABILITY_MIN || '0.4') || 0.4,
+  ),
+);
 
 /** Fixed stream port inside the agent container (agent-browser). */
 export const LIVE_BROWSER_STREAM_PORT = parseInt(

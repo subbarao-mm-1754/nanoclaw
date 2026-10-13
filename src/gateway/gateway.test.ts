@@ -22,6 +22,21 @@ vi.mock('./worker-client.js', () => ({
   destroyWorkspaceOnWorker: vi.fn(),
 }));
 
+/** Processor calls Laya when AUTO_AGENT_ROUTE=true — keep unit tests offline. */
+vi.mock('./agent-route/auto-route.js', () => ({
+  applyAutoAgentRoute: async (input: { conversation: { workspace_id: string } }) => ({
+    conversation: input.conversation,
+    switched: false,
+    fromWorkspaceId: input.conversation.workspace_id,
+    toWorkspaceId: input.conversation.workspace_id,
+    toAgentName: null,
+    reason: 'disabled' as const,
+  }),
+  labelOutboundText: (text: string) => text,
+  formatAgentReplyLabel: (name: string) => name,
+  selectRoutableAgents: () => [],
+}));
+
 const deliverOutboundMessageMock = vi.fn();
 
 vi.mock('./delivery.js', async () => {

@@ -1410,12 +1410,18 @@ async function finalizeCompletedBuild(
     }
   } else {
     const agentName = parsed.agent_name?.trim() || job.title || 'New Agent';
+    const { buildRoutingDescription } = await import('../agent-route/routing-description.js');
     agent = await createAgent({
       name: agentName,
       owner_user_id: job.user_id,
       files,
       is_default: false,
       agent_kind: 'agent',
+      routing_description: buildRoutingDescription({
+        name: agentName,
+        files,
+        titleHint: job.title,
+      }),
     });
 
     doneText = [

@@ -49,7 +49,7 @@ export const BUILD_HELP_TEXT = [
   '• `/cancel` — cancel the active build or edit',
   '• `/chat` — cancel any active build/edit and switch to user-agent mode',
   '• `/agents` — list your user agents (marks which is active in this chat)',
-  '• `/use <name or id>` — bind this chat to a user agent',
+  '• `/use <name or id>` — bind this chat to a user agent (overrides auto-route for that command)',
   '• `/delete <name or id>` — permanently delete a user agent',
   '• `/register` or reply **Register it now** — after a finished `/build`, create the agent and clean up the builder',
   '• `/help` — show this help',

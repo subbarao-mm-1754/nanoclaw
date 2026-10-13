@@ -5,6 +5,7 @@ import {
   invalidateWorkerWorkspaceCache,
   isWorkerWorkspaceMissingError,
 } from './agent-service.js';
+import { applyAutoAgentRoute } from './agent-route/auto-route.js';
 import { getConversation } from './store/conversations.js';
 import {
   claimNextInbound,
@@ -25,7 +26,7 @@ async function processOneInbound(): Promise<boolean> {
   const inbound = claimNextInbound();
   if (!inbound) return false;
 
-  const conversation = inbound.conversation_id ? getConversation(inbound.conversation_id) : null;
+  let conversation = inbound.conversation_id ? getConversation(inbound.conversation_id) : null;
   if (!conversation) {
     updateMessageStatus(inbound.id, 'failed', { error: 'Conversation not found' });
     return true;
@@ -37,6 +38,10 @@ async function processOneInbound(): Promise<boolean> {
   const content = JSON.parse(inbound.content_json) as Record<string, unknown>;
 
   try {
+    // Slash commands never reach here (/use skips Laya). Stay-or-switch for normal chat.
+    const routed = await applyAutoAgentRoute({ conversation, inbound });
+    conversation = routed.conversation;
+
     const { ensureOrchestrationRunForUserMessage, extraDestinationsForWorkspace } =
       await import('./orchestration/index.js');
     const goalText =

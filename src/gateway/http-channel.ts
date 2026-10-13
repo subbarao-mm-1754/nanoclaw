@@ -13,15 +13,22 @@ let deliveryConversationId: string | null = null;
 let deliveryWorkerJobId: string | null = null;
 const pendingOutbound: HttpOutboundRecord[] = [];
 
+let deliveryAgentName: string | null = null;
+let deliveryAgentWorkspaceId: string | null = null;
+
 /** Set by the gateway processor before delivering HTTP outbound messages. */
 export function beginHttpDelivery(ctx: {
   inboundId: string;
   conversationId: string;
   workerJobId: string;
+  agentName?: string | null;
+  agentWorkspaceId?: string | null;
 }): void {
   deliveryInboundId = ctx.inboundId;
   deliveryConversationId = ctx.conversationId;
   deliveryWorkerJobId = ctx.workerJobId;
+  deliveryAgentName = ctx.agentName ?? null;
+  deliveryAgentWorkspaceId = ctx.agentWorkspaceId ?? null;
   pendingOutbound.length = 0;
 }
 
@@ -33,6 +40,8 @@ export function endHttpDelivery(): void {
   deliveryInboundId = null;
   deliveryConversationId = null;
   deliveryWorkerJobId = null;
+  deliveryAgentName = null;
+  deliveryAgentWorkspaceId = null;
   pendingOutbound.length = 0;
 }
 
@@ -77,6 +86,8 @@ function createHttpAdapter(): ChannelAdapter {
           filename: f.filename,
           data_base64: f.data.toString('base64'),
         })),
+        agent_name: deliveryAgentName,
+        agent_workspace_id: deliveryAgentWorkspaceId,
       };
       appendHttpOutbound({
         inbound_id: inboundId,

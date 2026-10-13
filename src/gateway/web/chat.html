@@ -13,6 +13,7 @@
         --text: #e7ecf3;
         --muted: #8b9bb0;
         --accent: #3d8bfd;
+        --agent-label: #3ecf9a;
         --user: #243044;
         --agent: #1e2a38;
         --error-bg: #3a1f24;
@@ -31,6 +32,7 @@
         --text: #1a2332;
         --muted: #5c6b7e;
         --accent: #2563eb;
+        --agent-label: #0b8f6a;
         --user: #e8eef8;
         --agent: #f0f3f7;
         --error-bg: #fde8ea;
@@ -97,9 +99,12 @@
         max-width: 42rem;
         padding: 0.75rem 1rem;
         border-radius: 10px;
-        white-space: pre-wrap;
         word-break: break-word;
         line-height: 1.45;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.55rem;
       }
       .msg.user { align-self: flex-end; background: var(--user); border: 1px solid var(--border); }
       .msg.agent { align-self: flex-start; background: var(--agent); border: 1px solid var(--border); }
@@ -111,11 +116,29 @@
       }
       .msg .role {
         display: block;
+        flex: 0 0 auto;
         font-size: 0.7rem;
         text-transform: uppercase;
         letter-spacing: 0.04em;
         color: var(--muted);
-        margin-bottom: 0.35rem;
+        white-space: nowrap;
+      }
+      .msg.agent .role {
+        text-transform: none;
+        letter-spacing: 0.01em;
+        font-size: 0.95rem;
+        font-weight: 700;
+        line-height: 1.3;
+        color: var(--agent-label);
+        padding-bottom: 0.4rem;
+        border-bottom: 1px solid color-mix(in srgb, var(--agent-label) 28%, var(--border));
+        white-space: normal;
+      }
+      .msg .body {
+        display: block;
+        flex: 1 1 auto;
+        min-width: 0;
+        white-space: pre-wrap;
       }
       .msg a {
         color: var(--link);
@@ -378,30 +401,69 @@
         if (last < text.length) appendLinkedText(parent, text.slice(last));
       }
 
-      function addMsg(role, text) {
+      function stripLeadingAgentLabel(text, agentName) {
+        let t = String(text || '');
+        const name = (agentName && String(agentName).trim()) || '';
+        if (name) {
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          t = t.replace(new RegExp('^(?:\\*\\*' + escaped + '\\*\\*|\\[' + escaped + '\\])\\s*\\n?', 'i'), '');
+        }
+        return t.replace(/^\s+/, '');
+      }
+
+      function addMsg(role, text, agentName) {
         if (empty) empty.remove();
         const el = document.createElement('div');
         el.className = 'msg ' + role;
-        const label = document.createElement('span');
+
+        const label = document.createElement('div');
         label.className = 'role';
-        label.textContent = role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Agent';
+        let bodyText = String(text || '');
+        if (role === 'user') label.textContent = 'You';
+        else if (role === 'error') label.textContent = 'Error';
+        else {
+          const name = (agentName && String(agentName).trim()) || 'Agent';
+          label.textContent = name;
+          bodyText = stripLeadingAgentLabel(bodyText, name);
+          if (name !== 'Agent' && name !== 'System') {
+            who.textContent = 'Active: ' + name;
+          }
+        }
+
+        const body = document.createElement('div');
+        body.className = 'body';
+        appendRichText(body, bodyText);
+
         el.appendChild(label);
-        appendRichText(el, text);
+        el.appendChild(body);
         log.appendChild(el);
         log.scrollTop = log.scrollHeight;
       }
 
-      function showAgentReplies(data) {
+      function normalizeReplyItems(data) {
+        if (Array.isArray(data.reply_items) && data.reply_items.length) {
+          return data.reply_items
+            .filter((r) => r && typeof r.text === 'string' && r.text.trim())
+            .map((r) => ({
+              text: r.text,
+              agent_name: typeof r.agent_name === 'string' ? r.agent_name : null,
+            }));
+        }
         const replies = Array.isArray(data.replies)
           ? data.replies.filter((r) => typeof r === 'string' && r.trim())
           : typeof data.reply === 'string' && data.reply.trim()
             ? [data.reply]
             : [];
-        if (replies.length === 0) {
+        return replies.map((text) => ({ text, agent_name: null }));
+      }
+
+      function showAgentReplies(data) {
+        const items = normalizeReplyItems(data);
+        if (items.length === 0) {
           addMsg('error', 'Empty agent reply');
           return;
         }
-        for (const reply of replies) addMsg('agent', reply);
+        for (const item of items) addMsg('agent', item.text, item.agent_name);
       }
 
       async function pollReplies(inboundId, ticket) {
@@ -419,12 +481,10 @@
           if (!res.ok) {
             throw new Error(data?.error || 'Poll failed (' + res.status + ')');
           }
-          const replies = Array.isArray(data.replies)
-            ? data.replies
-            : (typeof data.reply === 'string' && data.reply ? [data.reply] : []);
-          if (replies.length > shown) {
-            for (const reply of replies.slice(shown)) addMsg('agent', reply);
-            shown = replies.length;
+          const items = normalizeReplyItems(data);
+          if (items.length > shown) {
+            for (const item of items.slice(shown)) addMsg('agent', item.text, item.agent_name);
+            shown = items.length;
           }
           if (data.status === 'completed') {
             if (shown === 0) showAgentReplies(data);

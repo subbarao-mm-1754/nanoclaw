@@ -1,6 +1,7 @@
 import type { ContainerConfigSnapshot } from '../container-config.js';
 import { log } from '../log.js';
 import { generateId, slugifyName } from './auth.js';
+import { buildRoutingDescription } from './agent-route/routing-description.js';
 import { ensureWorkspaceIntegrations } from './integrations/broker.js';
 import { ensureOnecliAgent } from './integrations/onecli-sync.js';
 import type { GatewayAgent, GatewayAgentFile } from './types.js';
@@ -124,6 +125,7 @@ export async function createAgent(input: {
   files: GatewayAgentFile[];
   is_default?: boolean;
   agent_kind?: 'agent' | 'orchestrator';
+  routing_description?: string | null;
 }): Promise<GatewayAgent> {
   if (input.files.length === 0) {
     throw new Error('At least one agent file is required (e.g. CLAUDE.local.md)');
@@ -161,6 +163,9 @@ export async function createAgent(input: {
     container_config: containerConfig,
     cli_scope: cliScope,
     agent_kind: input.agent_kind ?? 'agent',
+    routing_description:
+      input.routing_description ??
+      buildRoutingDescription({ name: input.name, files: input.files }),
     // Master agents are only created via ensureMasterAgentForUser.
     is_master: false,
   });

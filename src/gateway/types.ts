@@ -50,6 +50,8 @@ export interface GatewayWorkspace {
   worker_content_hash: string | null;
   /** Solo agent (default) or multi-agent orchestrator. */
   agent_kind: GatewayAgentKind;
+  /** Short blurb for Laya auto-routing (when this agent should handle a message). */
+  routing_description: string | null;
   created_at: string;
   updated_at: string;
 }

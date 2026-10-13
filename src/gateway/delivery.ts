@@ -3,15 +3,20 @@ import path from 'path';
 
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import type { OutboundFile } from '../channels/adapter.js';
+import { AUTO_AGENT_ROUTE } from '../config.js';
 import { log } from '../log.js';
 import { platformMessageIdFromSession } from '../session-message-id.js';
+import { labelOutboundText } from './agent-route/auto-route.js';
 import { getConversation } from './store/conversations.js';
+import { getWorkspace } from './store/workspaces.js';
 import type { CustomerMessage } from './types.js';
 
 /** Reaction/edit payloads carry session-namespaced inbound ids — strip for channel APIs. */
 function contentForChannelDelivery(
   content: unknown,
   agentGroupId?: string,
+  agentName?: string | null,
+  channelType?: string,
 ): unknown {
   if (!content || typeof content !== 'object') return content;
   const record = content as Record<string, unknown>;
@@ -26,20 +31,46 @@ function contentForChannelDelivery(
       messageId: platformMessageIdFromSession(record.messageId, agentGroupId),
     };
   }
+  if (agentName) {
+    const next: Record<string, unknown> = { ...record, agent_name: agentName };
+    // External channels get a visible prefix; HTTP chat UI uses agent_name metadata.
+    if (
+      AUTO_AGENT_ROUTE &&
+      channelType !== 'http' &&
+      typeof record.text === 'string' &&
+      record.text.trim()
+    ) {
+      next.text = labelOutboundText(record.text, agentName);
+    }
+    return next;
+  }
   return content;
 }
 
-export async function deliverOutboundMessage(message: CustomerMessage): Promise<void> {
+export async function deliverOutboundMessage(
+  message: CustomerMessage,
+  opts?: { agentName?: string | null; agentWorkspaceId?: string | null },
+): Promise<void> {
   const adapter = getChannelAdapter(message.channel_type);
   if (!adapter) {
     throw new Error(`No channel adapter for type: ${message.channel_type}`);
   }
 
   const rawContent = JSON.parse(message.content_json) as unknown;
-  const agentGroupId = message.conversation_id
-    ? (getConversation(message.conversation_id)?.agent_group_id ?? undefined)
-    : undefined;
-  const content = contentForChannelDelivery(rawContent, agentGroupId);
+  const conversation = message.conversation_id
+    ? getConversation(message.conversation_id)
+    : null;
+  const agentGroupId = conversation?.agent_group_id ?? undefined;
+  const workspace =
+    (opts?.agentWorkspaceId ? getWorkspace(opts.agentWorkspaceId) : null) ??
+    (conversation ? getWorkspace(conversation.workspace_id) : null);
+  const agentName = opts?.agentName ?? workspace?.name ?? null;
+  const content = contentForChannelDelivery(
+    rawContent,
+    agentGroupId,
+    agentName,
+    message.channel_type,
+  );
   let files: OutboundFile[] | undefined;
   if (message.files_json) {
     const raw = JSON.parse(message.files_json) as Array<{ filename: string; data_base64: string }>;

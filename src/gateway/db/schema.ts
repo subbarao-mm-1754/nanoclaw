@@ -52,6 +52,9 @@ function migrateGatewaySchema(db: Database.Database): void {
         `ALTER TABLE gateway_workspaces ADD COLUMN is_master INTEGER NOT NULL DEFAULT 0`,
       );
     }
+    if (!columnExists(db, 'gateway_workspaces', 'routing_description')) {
+      db.exec(`ALTER TABLE gateway_workspaces ADD COLUMN routing_description TEXT`);
+    }
 
     // Replace install-wide unique default with per-user unique default.
     db.exec(`DROP INDEX IF EXISTS idx_gateway_workspaces_default`);
@@ -363,6 +366,7 @@ export function initGatewaySchema(db: Database.Database): void {
       container_config_json  TEXT,
       worker_content_hash    TEXT,
       agent_kind             TEXT NOT NULL DEFAULT 'agent',
+      routing_description    TEXT,
       created_at             TEXT NOT NULL,
       updated_at             TEXT NOT NULL
     );

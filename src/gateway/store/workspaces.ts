@@ -29,6 +29,7 @@ function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
     container_config: parseContainerConfig(row.container_config_json as string | null),
     worker_content_hash: (row.worker_content_hash as string | null) ?? null,
     agent_kind: kind,
+    routing_description: (row.routing_description as string | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
   };
@@ -60,6 +61,7 @@ export function registerWorkspace(input: {
   cli_scope?: string;
   container_config?: ContainerConfigSnapshot;
   agent_kind?: 'agent' | 'orchestrator';
+  routing_description?: string | null;
 }): GatewayWorkspace {
   const db = getGatewayDb();
   const ts = now();
@@ -77,13 +79,18 @@ export function registerWorkspace(input: {
     if (isDefault) {
       clearDefaultsForOwner(db, ownerUserId, ts);
     }
+    const routingDescription =
+      input.routing_description !== undefined
+        ? input.routing_description?.trim() || null
+        : null;
+
     db.prepare(
       `INSERT INTO gateway_workspaces (
          workspace_id, agent_group_id, name, is_default, is_master,
          owner_user_id, folder, cli_scope, container_config_json,
-         agent_kind, created_at, updated_at
+         agent_kind, routing_description, created_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id) DO UPDATE SET
          agent_group_id = excluded.agent_group_id,
          name = excluded.name,
@@ -94,6 +101,7 @@ export function registerWorkspace(input: {
          cli_scope = COALESCE(excluded.cli_scope, gateway_workspaces.cli_scope),
          container_config_json = COALESCE(excluded.container_config_json, gateway_workspaces.container_config_json),
          agent_kind = excluded.agent_kind,
+         routing_description = COALESCE(excluded.routing_description, gateway_workspaces.routing_description),
          updated_at = excluded.updated_at`,
     ).run(
       input.workspace_id,
@@ -106,6 +114,7 @@ export function registerWorkspace(input: {
       input.cli_scope ?? 'group',
       input.container_config ? JSON.stringify(input.container_config) : null,
       agentKind,
+      routingDescription,
       ts,
       ts,
     );
@@ -182,7 +191,13 @@ export function deleteWorkspace(workspaceId: string): void {
 
 export function updateWorkspaceMetadata(
   workspaceId: string,
-  input: { name?: string; container_config?: ContainerConfigSnapshot; cli_scope?: string; is_default?: boolean },
+  input: {
+    name?: string;
+    container_config?: ContainerConfigSnapshot;
+    cli_scope?: string;
+    is_default?: boolean;
+    routing_description?: string | null;
+  },
 ): GatewayWorkspace {
   const db = getGatewayDb();
   const ts = now();
@@ -199,6 +214,11 @@ export function updateWorkspaceMetadata(
     if (master && master.workspace_id !== workspaceId) isDefault = 0;
   }
 
+  const routingDescription =
+    input.routing_description !== undefined
+      ? input.routing_description?.trim() || null
+      : workspace.routing_description;
+
   return db.transaction(() => {
     if (isDefault) {
       clearDefaultsForOwner(db, workspace.owner_user_id, ts);
@@ -209,6 +229,7 @@ export function updateWorkspaceMetadata(
          cli_scope = COALESCE(?, cli_scope),
          container_config_json = COALESCE(?, container_config_json),
          is_default = ?,
+         routing_description = ?,
          updated_at = ?
        WHERE workspace_id = ?`,
     ).run(
@@ -216,6 +237,7 @@ export function updateWorkspaceMetadata(
       input.cli_scope ?? null,
       input.container_config ? JSON.stringify(input.container_config) : null,
       isDefault,
+      routingDescription,
       ts,
       workspaceId,
     );

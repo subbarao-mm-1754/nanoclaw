@@ -1,4 +1,5 @@
 import { USER_MASTER_AGENT_NAME } from '../../config.js';
+import { MASTER_ROUTING_DESCRIPTION } from '../agent-route/routing-description.js';
 import type { GatewayWorkspace } from '../types.js';
 import { createAgentRecord } from './agents.js';
 import { getMasterWorkspaceForUser } from './workspaces.js';
@@ -40,6 +41,7 @@ export function ensureMasterAgentForUser(userId: string): GatewayWorkspace {
     cli_scope: 'group',
     is_default: true,
     is_master: true,
+    routing_description: `${name} — ${MASTER_ROUTING_DESCRIPTION}`,
     files: masterAgentFiles(name),
   });
 }

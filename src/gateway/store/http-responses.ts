@@ -8,6 +8,9 @@ export interface HttpOutboundRecord {
   thread_id: string | null;
   content: Record<string, unknown>;
   files?: Array<{ filename: string; data_base64: string }>;
+  /** Agent that produced this reply (for multi-agent chat UI labels). */
+  agent_name?: string | null;
+  agent_workspace_id?: string | null;
 }
 
 export interface HttpResponseRecord {

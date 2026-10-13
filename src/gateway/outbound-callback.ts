@@ -16,6 +16,7 @@ import {
   updateMessageStatus,
 } from './store/messages.js';
 import { invalidateWorkerWorkspaceCache } from './agent-service.js';
+import { getWorkspace } from './store/workspaces.js';
 import type { WorkerCollectedOutbound } from '../worker/types.js';
 
 function outboundFilesForDelivery(
@@ -159,12 +160,18 @@ export async function handleWorkerOutboundCallback(
 
   const processingInbound = findLatestProcessingInbound(conversation.id);
   const useHttp = conversation.channel_type === 'http' && Boolean(processingInbound);
+  const replyWorkspace =
+    getWorkspace(payload.workspace_id) ?? getWorkspace(conversation.workspace_id);
+  const agentName = replyWorkspace?.name ?? null;
+  const agentWorkspaceId = replyWorkspace?.workspace_id ?? payload.workspace_id;
 
   if (useHttp && processingInbound) {
     beginHttpDelivery({
       inboundId: processingInbound.id,
       conversationId: conversation.id,
       workerJobId: jobId,
+      agentName,
+      agentWorkspaceId,
     });
   }
 
@@ -188,7 +195,7 @@ export async function handleWorkerOutboundCallback(
       });
 
       try {
-        await deliverOutboundMessage(row);
+        await deliverOutboundMessage(row, { agentName, agentWorkspaceId });
         updateMessageStatus(row.id, 'delivered');
         deliveredIds.push(row.id);
       } catch (err) {

@@ -654,21 +654,67 @@ async function handleRedeemChatTicket(req: http.IncomingMessage, res: http.Serve
   jsonResponse(res, 200, redeemed);
 }
 
-function httpOutboundToReplies(outbound: unknown): string[] {
+type StudioChatReply = {
+  text: string;
+  agent_name?: string | null;
+  agent_workspace_id?: string | null;
+};
+
+function httpOutboundToReplyObjects(outbound: unknown): StudioChatReply[] {
   if (!Array.isArray(outbound) || outbound.length === 0) return [];
-  const parts: string[] = [];
+  const parts: StudioChatReply[] = [];
   for (const item of outbound) {
     if (!item || typeof item !== 'object') continue;
-    const c = (item as { content?: unknown }).content;
-    const text = outboundContentToDisplayText(c);
-    if (text.trim()) parts.push(text);
+    const rec = item as {
+      content?: unknown;
+      agent_name?: unknown;
+      agent_workspace_id?: unknown;
+    };
+    const text = outboundContentToDisplayText(rec.content);
+    if (!text.trim()) continue;
+    const fromContent =
+      rec.content && typeof rec.content === 'object'
+        ? (rec.content as { agent_name?: unknown }).agent_name
+        : undefined;
+    parts.push({
+      text,
+      agent_name:
+        typeof rec.agent_name === 'string'
+          ? rec.agent_name
+          : typeof fromContent === 'string'
+            ? fromContent
+            : null,
+      agent_workspace_id:
+        typeof rec.agent_workspace_id === 'string' ? rec.agent_workspace_id : null,
+    });
   }
   return parts;
+}
+
+function httpOutboundToReplies(outbound: unknown): string[] {
+  return httpOutboundToReplyObjects(outbound).map((r) => r.text);
 }
 
 function httpOutboundToText(outbound: unknown): string {
   const parts = httpOutboundToReplies(outbound);
   return parts.length > 0 ? parts.join('\n\n') : '(empty agent reply)';
+}
+
+function studioChatReplyPayload(outbound: unknown): {
+  replies: string[];
+  reply_items: StudioChatReply[];
+  reply: string;
+} {
+  const reply_items = httpOutboundToReplyObjects(outbound);
+  const replies = reply_items.map((r) => r.text);
+  return {
+    replies: replies.length > 0 ? replies : [httpOutboundToText(outbound)],
+    reply_items:
+      reply_items.length > 0
+        ? reply_items
+        : [{ text: httpOutboundToText(outbound), agent_name: null, agent_workspace_id: null }],
+    reply: httpOutboundToText(outbound),
+  };
 }
 
 function studioChatTicketFromReq(req: http.IncomingMessage, url: URL, bodyTicket?: string): string {
@@ -746,12 +792,10 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
 
   const immediate = getHttpResponse(messageId);
   if (immediate) {
-    const replies = httpOutboundToReplies(immediate.outbound);
     jsonResponse(res, 200, {
       inbound_id: messageId,
       status: 'completed',
-      replies: replies.length > 0 ? replies : [httpOutboundToText(immediate.outbound)],
-      reply: httpOutboundToText(immediate.outbound),
+      ...studioChatReplyPayload(immediate.outbound),
     });
     return;
   }
@@ -762,6 +806,7 @@ async function handleStudioChat(req: http.IncomingMessage, res: http.ServerRespo
       inbound_id: messageId,
       status: 'completed',
       replies: [reply],
+      reply_items: [{ text: reply, agent_name: 'System', agent_workspace_id: null }],
       reply,
     });
     return;
@@ -796,22 +841,18 @@ function handleStudioChatStatus(
   const stored = getHttpResponse(inboundId);
   const activeBuild = getActiveBuildJobForUser(identity.user_id);
   if (stored && activeBuild?.delivery_thread_id === inboundId) {
-    const replies = httpOutboundToReplies(stored.outbound);
     jsonResponse(res, 200, {
       status: 'processing',
       inbound_id: inboundId,
-      replies: replies.length > 0 ? replies : [httpOutboundToText(stored.outbound)],
-      reply: httpOutboundToText(stored.outbound),
+      ...studioChatReplyPayload(stored.outbound),
     });
     return;
   }
   if (stored) {
-    const replies = httpOutboundToReplies(stored.outbound);
     jsonResponse(res, 200, {
       status: 'completed',
       inbound_id: inboundId,
-      replies: replies.length > 0 ? replies : [httpOutboundToText(stored.outbound)],
-      reply: httpOutboundToText(stored.outbound),
+      ...studioChatReplyPayload(stored.outbound),
     });
     return;
   }
