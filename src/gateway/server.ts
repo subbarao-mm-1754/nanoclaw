@@ -89,6 +89,7 @@ import {
 import { AgentAccessError } from './store/agent-files.js';
 import { AgentDeleteError, getAgentForUser } from './store/agents.js';
 import { listUserAgents } from './store/agent-select.js';
+import { ensureMasterAgentForUser } from './store/master-agent.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import {
   getActiveRunSummary,
@@ -574,8 +575,7 @@ async function handleInjectInbound(req: http.IncomingMessage, res: http.ServerRe
       }
     }
     if (userId) {
-      const agents = listUserAgents(userId);
-      workspaceId = agents[0]?.workspace_id;
+      workspaceId = ensureMasterAgentForUser(userId).workspace_id;
     }
   }
 

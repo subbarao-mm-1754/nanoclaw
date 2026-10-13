@@ -40,6 +40,8 @@ export interface GatewayWorkspace {
   agent_group_id: string;
   name: string;
   is_default: boolean;
+  /** Non-deletable per-user catch-all agent created on signup. */
+  is_master: boolean;
   owner_user_id: string | null;
   folder: string | null;
   cli_scope: string;

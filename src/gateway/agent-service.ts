@@ -161,6 +161,8 @@ export async function createAgent(input: {
     container_config: containerConfig,
     cli_scope: cliScope,
     agent_kind: input.agent_kind ?? 'agent',
+    // Master agents are only created via ensureMasterAgentForUser.
+    is_master: false,
   });
 
   setWorkerContentHash(workspaceId, prepared.content_hash);
@@ -245,6 +247,12 @@ export async function deleteAgent(workspaceId: string, userId: string): Promise<
   const agent = getAgentForUser(workspaceId, userId);
   if (!agent) {
     throw new AgentDeleteError('Agent not found', 404);
+  }
+  if (agent.is_master) {
+    throw new AgentDeleteError(
+      `"${agent.name}" is your master agent and cannot be deleted.`,
+      403,
+    );
   }
 
   const active = getActiveBuildJobForUser(userId);

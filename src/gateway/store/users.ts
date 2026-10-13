@@ -1,6 +1,7 @@
 import { generateId, generateSessionToken, hashPassword, sessionExpiresAt, verifyPassword } from '../auth.js';
 import { getGatewayDb } from '../db/connection.js';
 import type { GatewaySession, GatewayUser } from '../types.js';
+import { ensureMasterAgentForUser } from './master-agent.js';
 
 /** Email promoted to admin on gateway DB init (override via GATEWAY_BOOTSTRAP_ADMIN_EMAIL). */
 export const GATEWAY_BOOTSTRAP_ADMIN_EMAIL = (
@@ -59,6 +60,7 @@ export function createUser(input: {
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(id, email, hashPassword(input.password), input.display_name.trim(), isAdmin, ts);
 
+  ensureMasterAgentForUser(id);
   return getUserById(id)!;
 }
 
@@ -100,6 +102,7 @@ export function loginUser(email: string, password: string): { user: GatewayUser;
   }
 
   const user = rowToUser(row);
+  ensureMasterAgentForUser(user.id);
   const session = createSession(user.id);
   return { user, session };
 }

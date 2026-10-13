@@ -40,6 +40,8 @@ describe('agent-select', () => {
     const listed = formatAgentsForUser(user, 'zoho-cliq', 'zoho-cliq:chat-1', null);
     expect(listed).toContain('HubSpot Bot');
     expect(listed).toContain('Support Bot');
+    expect(listed).toContain('master');
+    expect(listed).toContain('MasterAgent');
     expect(listed).toContain('/use');
     expect(listed).toContain('/delete');
   });

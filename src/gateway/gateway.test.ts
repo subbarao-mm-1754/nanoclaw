@@ -523,10 +523,11 @@ describe('gateway auth and agents', () => {
     ).toEqual(['mcp-remote', 'https://example.test/mcp-v2']);
   });
 
-  it('deletes an agent and rebinds conversations to another agent', async () => {
+  it('deletes an agent and rebinds conversations to the master agent', async () => {
     const { createUser } = await import('./store/users.js');
     const { createAgent, deleteAgent, getAgent } = await import('./agent-service.js');
     const { setConversationWorkspace, findConversation } = await import('./store/conversations.js');
+    const { getMasterWorkspaceForUser } = await import('./store/workspaces.js');
     const { destroyWorkspaceOnWorker } = await import('./worker-client.js');
 
     const alice = createUser({
@@ -534,11 +535,11 @@ describe('gateway auth and agents', () => {
       password: 'password123',
       display_name: 'Delete User',
     });
+    const master = getMasterWorkspaceForUser(alice.id)!;
 
-    const keep = await createAgent({
+    await createAgent({
       name: 'Keep Me',
       owner_user_id: alice.id,
-      is_default: true,
       files: [{ path: 'CLAUDE.local.md', content: '# keep' }],
     });
     const doomed = await createAgent({
@@ -556,13 +557,34 @@ describe('gateway auth and agents', () => {
 
     const result = await deleteAgent(doomed.workspace_id, alice.id);
     expect(result.agent.workspace_id).toBe(doomed.workspace_id);
-    expect(result.rebound_workspace_id).toBe(keep.workspace_id);
+    expect(result.rebound_workspace_id).toBe(master.workspace_id);
     expect(result.conversations_rebound).toBe(1);
     expect(getAgent(doomed.workspace_id, alice.id)).toBeNull();
     expect(findConversation('zoho-cliq', 'zoho-cliq:chat-del', null)?.workspace_id).toBe(
-      keep.workspace_id,
+      master.workspace_id,
     );
     expect(destroyWorkspaceOnWorker).toHaveBeenCalledWith({ workspace_id: doomed.workspace_id });
+  });
+
+  it('creates a non-deletable master agent on user signup', async () => {
+    const { createUser } = await import('./store/users.js');
+    const { deleteAgent } = await import('./agent-service.js');
+    const { getMasterWorkspaceForUser } = await import('./store/workspaces.js');
+    const { AgentDeleteError } = await import('./store/agents.js');
+    const { USER_MASTER_AGENT_NAME } = await import('../config.js');
+
+    const user = createUser({
+      email: 'master@example.com',
+      password: 'password123',
+      display_name: 'Master User',
+    });
+    const master = getMasterWorkspaceForUser(user.id);
+    expect(master).not.toBeNull();
+    expect(master!.name).toBe(USER_MASTER_AGENT_NAME);
+    expect(master!.is_master).toBe(true);
+    expect(master!.is_default).toBe(true);
+
+    await expect(deleteAgent(master!.workspace_id, user.id)).rejects.toBeInstanceOf(AgentDeleteError);
   });
 });
 
@@ -582,5 +604,40 @@ describe('gateway schema', () => {
       .prepare('SELECT workspace_id FROM gateway_workspaces WHERE workspace_id = ?')
       .get('ws-existing');
     expect(workspace).toBeTruthy();
+  });
+
+  it('migrates older gateway_workspaces without is_master', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE gateway_users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE gateway_workspaces (
+        workspace_id TEXT PRIMARY KEY,
+        agent_group_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        owner_user_id TEXT,
+        folder TEXT,
+        cli_scope TEXT NOT NULL DEFAULT 'group',
+        container_config_json TEXT,
+        worker_content_hash TEXT,
+        agent_kind TEXT NOT NULL DEFAULT 'agent',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_gateway_workspaces_default
+        ON gateway_workspaces(is_default) WHERE is_default = 1;
+    `);
+
+    expect(() => initGatewaySchema(db)).not.toThrow();
+    const cols = db.prepare('PRAGMA table_info(gateway_workspaces)').all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === 'is_master')).toBe(true);
+    db.close();
   });
 });

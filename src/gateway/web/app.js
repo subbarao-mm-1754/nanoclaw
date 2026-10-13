@@ -577,6 +577,7 @@ function resetEditor() {
   $('agent-model').value = '';
   $('agent-cli-scope').value = 'group';
   $('agent-default').checked = false;
+  $('agent-default').disabled = false;
   $('file-list').innerHTML = '';
   $('file-list').appendChild(
     createFileBlock('CLAUDE.local.md', '# Agent Instructions\n\nYou are a helpful assistant.'),
@@ -597,6 +598,7 @@ function fillEditor(agent) {
   $('agent-model').value = agent.container_config?.model || '';
   $('agent-cli-scope').value = agent.cli_scope || 'group';
   $('agent-default').checked = Boolean(agent.is_default);
+  $('agent-default').disabled = Boolean(agent.is_master);
   fillMcpServers(agent.container_config?.mcpServers);
 
   $('file-list').innerHTML = '';
@@ -605,7 +607,11 @@ function fillEditor(agent) {
   }
   ensureAtLeastOneFile();
   clearEditorMessages();
-  show($('delete-agent-btn'));
+  if (agent.is_master) {
+    hide($('delete-agent-btn'));
+  } else {
+    show($('delete-agent-btn'));
+  }
 
   if (agent.agent_kind === 'orchestrator') {
     showOrchestrationPanel(agent.workspace_id);
@@ -637,7 +643,8 @@ async function loadAgents() {
       <div>
         <strong>${escapeHtml(agent.name)}</strong>
         ${orchBadge}
-        ${agent.is_default ? '<span class="badge default">default</span>' : ''}
+        ${agent.is_master ? '<span class="badge default">master</span>' : ''}
+        ${agent.is_default && !agent.is_master ? '<span class="badge default">default</span>' : ''}
         ${activeBadge}
         <div class="agent-meta">${escapeHtml(agent.workspace_id)} · ${agent.files?.length ?? 0} files${
           active?.current_node ? ` · node ${escapeHtml(active.current_node)}` : ''
@@ -652,7 +659,11 @@ async function loadAgents() {
         <button type="button" class="secondary edit-agent-btn" data-id="${escapeAttr(agent.workspace_id)}">${
           agent.agent_kind === 'orchestrator' ? 'Open' : 'Edit'
         }</button>
-        <button type="button" class="danger secondary delete-agent-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Delete</button>
+        ${
+          agent.is_master
+            ? ''
+            : `<button type="button" class="danger secondary delete-agent-btn" data-id="${escapeAttr(agent.workspace_id)}" data-name="${escapeAttr(agent.name)}">Delete</button>`
+        }
       </div>
     `;
     const liveBtn = li.querySelector('.live-browser-btn');
@@ -660,9 +671,10 @@ async function loadAgents() {
       liveBtn.addEventListener('click', () => openLiveBrowser(agent.workspace_id, agent.name));
     }
     li.querySelector('.edit-agent-btn').addEventListener('click', () => openAgent(agent.workspace_id));
-    li.querySelector('.delete-agent-btn').addEventListener('click', () =>
-      deleteAgent(agent.workspace_id, agent.name),
-    );
+    const delBtn = li.querySelector('.delete-agent-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', () => deleteAgent(agent.workspace_id, agent.name));
+    }
     list.appendChild(li);
   }
 }

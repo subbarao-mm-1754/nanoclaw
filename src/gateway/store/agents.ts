@@ -52,6 +52,7 @@ export function createAgentRecord(input: {
   container_config?: ContainerConfigSnapshot;
   files: GatewayAgentFile[];
   is_default?: boolean;
+  is_master?: boolean;
   workspace_id?: string;
   agent_group_id?: string;
   agent_kind?: 'agent' | 'orchestrator';
@@ -73,6 +74,7 @@ export function createAgentRecord(input: {
     cli_scope: input.cli_scope ?? 'group',
     container_config: containerConfig,
     is_default: input.is_default,
+    is_master: input.is_master,
     agent_kind: input.agent_kind ?? 'agent',
   });
 
@@ -123,10 +125,17 @@ export function deleteAgentRecord(workspaceId: string, userId: string): DeleteAg
 
   const agent = getAgentForUser(workspaceId, userId);
   if (!agent) throw new AgentDeleteError('Agent not found', 404);
+  if (agent.is_master) {
+    throw new AgentDeleteError(
+      `"${agent.name}" is your master agent and cannot be deleted.`,
+      403,
+    );
+  }
 
   const fallback = listAgentsForUser(userId)
     .filter((w) => w.workspace_id !== workspaceId && isDeletableUserAgent(w.workspace_id))
     .sort((a, b) => {
+      if (a.is_master !== b.is_master) return a.is_master ? -1 : 1;
       if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
       return b.updated_at.localeCompare(a.updated_at);
     })[0];

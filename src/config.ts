@@ -170,6 +170,10 @@ export const GATEWAY_PROCESS_INTERVAL_MS = parseInt(process.env.GATEWAY_PROCESS_
 export const GATEWAY_DEFAULT_WORKSPACE_ID = process.env.GATEWAY_DEFAULT_WORKSPACE_ID || '';
 export const GATEWAY_DEFAULT_AGENT_GROUP_ID = process.env.GATEWAY_DEFAULT_AGENT_GROUP_ID || '';
 export const GATEWAY_DEFAULT_WORKSPACE_NAME = process.env.GATEWAY_DEFAULT_WORKSPACE_NAME || 'Default Agent';
+/** Per-user catch-all agent created on signup. Override via USER_MASTER_AGENT_NAME. */
+export const USER_MASTER_AGENT_NAME = (
+  process.env.USER_MASTER_AGENT_NAME || 'MasterAgent'
+).trim() || 'MasterAgent';
 /** Registry names to skip when the gateway starts channel adapters. Default skips `cli` (Unix socket; host-only). Set to empty to enable all. */
 export const GATEWAY_SKIP_CHANNELS: string[] = (() => {
   const raw = process.env.GATEWAY_SKIP_CHANNELS;

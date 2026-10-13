@@ -47,6 +47,22 @@ function migrateGatewaySchema(db: Database.Database): void {
         `ALTER TABLE gateway_workspaces ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'agent'`,
       );
     }
+    if (!columnExists(db, 'gateway_workspaces', 'is_master')) {
+      db.exec(
+        `ALTER TABLE gateway_workspaces ADD COLUMN is_master INTEGER NOT NULL DEFAULT 0`,
+      );
+    }
+
+    // Replace install-wide unique default with per-user unique default.
+    db.exec(`DROP INDEX IF EXISTS idx_gateway_workspaces_default`);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_workspaces_default_per_user
+        ON gateway_workspaces(owner_user_id) WHERE is_default = 1 AND owner_user_id IS NOT NULL
+    `);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_workspaces_master_per_user
+        ON gateway_workspaces(owner_user_id) WHERE is_master = 1 AND owner_user_id IS NOT NULL
+    `);
   }
 
   db.exec(`
@@ -340,6 +356,7 @@ export function initGatewaySchema(db: Database.Database): void {
       agent_group_id         TEXT NOT NULL,
       name                   TEXT NOT NULL,
       is_default             INTEGER NOT NULL DEFAULT 0,
+      is_master              INTEGER NOT NULL DEFAULT 0,
       owner_user_id          TEXT REFERENCES gateway_users(id),
       folder                 TEXT,
       cli_scope              TEXT NOT NULL DEFAULT 'group',
@@ -350,8 +367,8 @@ export function initGatewaySchema(db: Database.Database): void {
       updated_at             TEXT NOT NULL
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_workspaces_default
-      ON gateway_workspaces(is_default) WHERE is_default = 1;
+    -- Per-user default/master indexes are created in migrateGatewaySchema after
+    -- ensuring is_master exists (CREATE TABLE IF NOT EXISTS is a no-op on older DBs).
 
     CREATE TABLE IF NOT EXISTS gateway_agent_files (
       workspace_id  TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,

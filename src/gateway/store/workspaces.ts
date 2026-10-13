@@ -22,6 +22,7 @@ function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
     agent_group_id: row.agent_group_id as string,
     name: row.name as string,
     is_default: Boolean(row.is_default),
+    is_master: Boolean(row.is_master),
     owner_user_id: (row.owner_user_id as string | null) ?? null,
     folder: (row.folder as string | null) ?? null,
     cli_scope: (row.cli_scope as string) || 'group',
@@ -33,11 +34,27 @@ function rowToWorkspace(row: Record<string, unknown>): GatewayWorkspace {
   };
 }
 
+function clearDefaultsForOwner(db: ReturnType<typeof getGatewayDb>, ownerUserId: string | null, ts: string): void {
+  // Never clear the per-user master agent — it stays the catch-all default.
+  if (ownerUserId) {
+    db.prepare(
+      `UPDATE gateway_workspaces SET is_default = 0, updated_at = ?
+       WHERE owner_user_id = ? AND is_default = 1 AND is_master = 0`,
+    ).run(ts, ownerUserId);
+  } else {
+    db.prepare(
+      `UPDATE gateway_workspaces SET is_default = 0, updated_at = ?
+       WHERE owner_user_id IS NULL AND is_default = 1 AND is_master = 0`,
+    ).run(ts);
+  }
+}
+
 export function registerWorkspace(input: {
   workspace_id: string;
   agent_group_id: string;
   name: string;
   is_default?: boolean;
+  is_master?: boolean;
   owner_user_id?: string;
   folder?: string;
   cli_scope?: string;
@@ -46,24 +63,32 @@ export function registerWorkspace(input: {
 }): GatewayWorkspace {
   const db = getGatewayDb();
   const ts = now();
-  const isDefault = input.is_default ? 1 : 0;
+  const isMaster = input.is_master ? 1 : 0;
   const agentKind = input.agent_kind === 'orchestrator' ? 'orchestrator' : 'agent';
+  const ownerUserId = input.owner_user_id ?? null;
+  // Master is the sole per-user default; other agents cannot take the flag while a master exists.
+  let isDefault = input.is_default || isMaster ? 1 : 0;
+  if (isDefault && !isMaster && ownerUserId) {
+    const existingMaster = getMasterWorkspaceForUser(ownerUserId);
+    if (existingMaster) isDefault = 0;
+  }
 
   return db.transaction(() => {
     if (isDefault) {
-      db.prepare('UPDATE gateway_workspaces SET is_default = 0, updated_at = ? WHERE is_default = 1').run(ts);
+      clearDefaultsForOwner(db, ownerUserId, ts);
     }
     db.prepare(
       `INSERT INTO gateway_workspaces (
-         workspace_id, agent_group_id, name, is_default,
+         workspace_id, agent_group_id, name, is_default, is_master,
          owner_user_id, folder, cli_scope, container_config_json,
          agent_kind, created_at, updated_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(workspace_id) DO UPDATE SET
          agent_group_id = excluded.agent_group_id,
          name = excluded.name,
          is_default = excluded.is_default,
+         is_master = excluded.is_master,
          owner_user_id = COALESCE(excluded.owner_user_id, gateway_workspaces.owner_user_id),
          folder = COALESCE(excluded.folder, gateway_workspaces.folder),
          cli_scope = COALESCE(excluded.cli_scope, gateway_workspaces.cli_scope),
@@ -75,7 +100,8 @@ export function registerWorkspace(input: {
       input.agent_group_id,
       input.name,
       isDefault,
-      input.owner_user_id ?? null,
+      isMaster,
+      ownerUserId,
       input.folder ?? null,
       input.cli_scope ?? 'group',
       input.container_config ? JSON.stringify(input.container_config) : null,
@@ -102,10 +128,33 @@ export function getWorkspaceByAgentGroupId(agentGroupId: string): GatewayWorkspa
   return row ? rowToWorkspace(row) : null;
 }
 
+/** Install-wide default (legacy env seed / owner-less workspace). */
 export function getDefaultWorkspace(): GatewayWorkspace | null {
   const row = getGatewayDb()
     .prepare('SELECT * FROM gateway_workspaces WHERE is_default = 1 LIMIT 1')
     .get() as Record<string, unknown> | undefined;
+  return row ? rowToWorkspace(row) : null;
+}
+
+/** Prefer the user's master agent, then their is_default agent, then newest. */
+export function getDefaultWorkspaceForUser(userId: string): GatewayWorkspace | null {
+  const agents = listAgentsForUser(userId);
+  return (
+    agents.find((a) => a.is_master) ??
+    agents.find((a) => a.is_default) ??
+    agents[0] ??
+    null
+  );
+}
+
+export function getMasterWorkspaceForUser(userId: string): GatewayWorkspace | null {
+  const row = getGatewayDb()
+    .prepare(
+      `SELECT * FROM gateway_workspaces
+       WHERE owner_user_id = ? AND is_master = 1
+       LIMIT 1`,
+    )
+    .get(userId) as Record<string, unknown> | undefined;
   return row ? rowToWorkspace(row) : null;
 }
 
@@ -140,12 +189,19 @@ export function updateWorkspaceMetadata(
   const workspace = getWorkspace(workspaceId);
   if (!workspace) throw new Error('Workspace not found');
 
-  const isDefault =
+  // Master agent must remain the user's default catch-all.
+  let isDefault =
     input.is_default === true ? 1 : input.is_default === false ? 0 : workspace.is_default ? 1 : 0;
+  if (workspace.is_master) {
+    isDefault = 1;
+  } else if (isDefault && workspace.owner_user_id) {
+    const master = getMasterWorkspaceForUser(workspace.owner_user_id);
+    if (master && master.workspace_id !== workspaceId) isDefault = 0;
+  }
 
   return db.transaction(() => {
-    if (input.is_default === true) {
-      db.prepare('UPDATE gateway_workspaces SET is_default = 0, updated_at = ? WHERE is_default = 1').run(ts);
+    if (isDefault) {
+      clearDefaultsForOwner(db, workspace.owner_user_id, ts);
     }
     db.prepare(
       `UPDATE gateway_workspaces SET

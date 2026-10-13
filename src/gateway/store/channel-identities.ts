@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { generateId, hashPassword } from '../auth.js';
 import { getGatewayDb } from '../db/connection.js';
 import type { GatewayUser } from '../types.js';
+import { ensureMasterAgentForUser } from './master-agent.js';
 import { getUserById } from './users.js';
 
 function now(): string {
@@ -78,8 +79,10 @@ export function ensureUserForChannelSender(input: {
           `UPDATE gateway_channel_identities SET display_name = ?, updated_at = ?
            WHERE channel_type = ? AND sender_id = ?`,
         ).run(input.display_name.trim(), now(), channelType, senderId);
+        ensureMasterAgentForUser(user.id);
         return getUserById(user.id)!;
       }
+      ensureMasterAgentForUser(user.id);
       return user;
     }
   }
@@ -130,5 +133,7 @@ export function ensureUserForChannelSender(input: {
        WHERE channel_type = ? AND sender_id = ?`,
     )
     .get(channelType, senderId) as { user_id: string };
-  return getUserById(linked.user_id)!;
+  const user = getUserById(linked.user_id)!;
+  ensureMasterAgentForUser(user.id);
+  return user;
 }

@@ -67,6 +67,7 @@ export function formatAgentList(
     .map((a, i) => {
       const markers: string[] = [];
       if (a.agent_kind === 'orchestrator') markers.push('orchestrator');
+      if (a.is_master) markers.push('master');
       if (a.is_default) markers.push('default');
       if (currentWorkspaceId && a.workspace_id === currentWorkspaceId) markers.push('active in this chat');
       const suffix = markers.length ? ` [${markers.join(', ')}]` : '';

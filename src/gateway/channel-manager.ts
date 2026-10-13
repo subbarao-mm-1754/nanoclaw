@@ -7,11 +7,11 @@ import {
 import { GATEWAY_SKIP_CHANNELS } from '../config.js';
 import { log } from '../log.js';
 import { routeChannelInbound, type ChannelRouteResult } from './channel-router.js';
-import { listUserAgents } from './store/agent-select.js';
 import { upsertChannelConnection } from './store/channels.js';
 import { ensureUserForChannelSender } from './store/channel-identities.js';
 import { enqueueInboundMessage } from './store/messages.js';
 import { findConversation, getOrCreateConversation } from './store/conversations.js';
+import { ensureMasterAgentForUser } from './store/master-agent.js';
 import { getUserById } from './store/users.js';
 
 function newMessageId(): string {
@@ -60,8 +60,8 @@ function resolveWorkspaceForNewConversation(
       });
       userId = user.id;
     }
-    const agents = listUserAgents(userId);
-    return agents[0]?.workspace_id;
+    // New conversations bind to the user's master agent; `/use` sticks on the conversation.
+    return ensureMasterAgentForUser(userId).workspace_id;
   } catch {
     return undefined;
   }
