@@ -24,6 +24,7 @@ import type {
 } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
 import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
+import { handleMcpAuthSystemMessage } from './mcp-auth-actions.js';
 import { buildOutboundMultipartBody, type OutboundMultipartFilePart } from './outbound-multipart.js';
 
 const POST_STOP_GRACE_MS = WORKER_OUTBOUND_POST_STOP_GRACE_MS;
@@ -173,12 +174,21 @@ export async function drainOutboundBatch(
             rawContent: msg.content,
           });
           if (!handledBrowser) {
-            await handleKnowledgeSystemMessage({
+            const handledMcpAuth = await handleMcpAuthSystemMessage({
               workspaceId,
               agentGroupId,
               sessionId,
+              delivery: notifyDelivery,
               rawContent: msg.content,
             });
+            if (!handledMcpAuth) {
+              await handleKnowledgeSystemMessage({
+                workspaceId,
+                agentGroupId,
+                sessionId,
+                rawContent: msg.content,
+              });
+            }
           }
         } catch (err) {
           log.error('Failed handling system action', { sessionId, msgId: msg.id, err });

@@ -38,7 +38,7 @@ async function processOneInbound(): Promise<boolean> {
   const content = JSON.parse(inbound.content_json) as Record<string, unknown>;
 
   try {
-    // Slash commands never reach here (/use skips Laya). Stay-or-switch for normal chat.
+    // Slash commands never reach here (/use skips decision routing). Stay-or-switch for normal chat.
     const routed = await applyAutoAgentRoute({ conversation, inbound });
     conversation = routed.conversation;
 

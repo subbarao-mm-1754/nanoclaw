@@ -280,6 +280,15 @@ export function findKnowledgeResponse(requestId: string): MessageInRow | undefin
 
 /** Find a pending browser_session_response for a requestId. */
 export function findBrowserSessionResponse(requestId: string): MessageInRow | undefined {
+  return findSystemResponseByType(requestId, 'browser_session_response');
+}
+
+/** Find a pending mcp_auth_response for a requestId. */
+export function findMcpAuthResponse(requestId: string): MessageInRow | undefined {
+  return findSystemResponseByType(requestId, 'mcp_auth_response');
+}
+
+function findSystemResponseByType(requestId: string, typeName: string): MessageInRow | undefined {
   const inbound = openInboundDb();
   const outbound = getOutboundDb();
 
@@ -295,7 +304,7 @@ export function findBrowserSessionResponse(requestId: string): MessageInRow | un
       } catch {
         continue;
       }
-      if (type !== 'browser_session_response') continue;
+      if (type !== typeName) continue;
 
       const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
       if (acked) continue;

@@ -11,6 +11,9 @@ import {
   getConnection,
   getRegistrationByIssuer,
   listConnectionsForWorkspace,
+  registrationToClient,
+  setConnectionError,
+  setOnecliSecretId,
   upsertPendingConnection,
   upsertRegistration,
 } from './store.js';
@@ -34,12 +37,16 @@ import {
 } from './registration.js';
 import { buildAuthorizeUrl } from './oauth-client.js';
 import { newCodeVerifier } from './pkce.js';
-import { registrationToClient } from './store.js';
 import {
   extractPrimaryRemoteMcpUrl,
   extractRemoteMcpUrls,
   suggestMcpServerName,
 } from './mcp-url.js';
+import {
+  extractContainerLocalMcpOAuthUrls,
+  extractMcpResourceFromOAuthUrl,
+  isContainerLocalMcpOAuthUrl,
+} from './mcp-auth-guard.js';
 
 vi.mock('./onecli-sync.js', () => ({
   upsertAccessTokenSecret: vi.fn(async () => 'secret-test-1'),
@@ -382,5 +389,90 @@ describe('mcp-url extract', () => {
   it('parses /mcp connect <url>', () => {
     const urls = extractRemoteMcpUrls('/mcp connect https://example.com/v1/mcp');
     expect(urls[0]).toContain('example.com/v1/mcp');
+  });
+});
+
+describe('container-local MCP OAuth guard', () => {
+  it('detects Zoho mcp-client authorize URLs with localhost redirect_uri', () => {
+    const url =
+      'https://mcp.localzoho.com/mcp-client/abc/123/oauth?response_type=code' +
+      '&client_id=1000.AAA&code_challenge=x&code_challenge_method=S256' +
+      '&redirect_uri=http%3A%2F%2Flocalhost%3A60955%2Fcallback' +
+      '&state=z5D8_801IpOQxQ75FV9xGPgz27ppdylFy64E9miORD8' +
+      '&resource=https%3A%2F%2Fsolotest.mcp.testzohomcp.com%2Fmcp%2Fkey%2Fmessage';
+    expect(isContainerLocalMcpOAuthUrl(url)).toBe(true);
+    expect(extractMcpResourceFromOAuthUrl(url)).toContain('testzohomcp.com');
+    expect(extractContainerLocalMcpOAuthUrls(`Please open ${url}`)).toEqual([url]);
+  });
+
+  it('does not flag Gateway authorize callbacks', () => {
+    expect(
+      isContainerLocalMcpOAuthUrl(
+        'http://127.0.0.1:8090/v1/integrations/oauth/callback?code=x&state=abc',
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('ensureWorkspaceIntegrations recovery', () => {
+  it('recovers error connections with refresh_token into OneCLI', async () => {
+    const { ensureWorkspaceIntegrations, findReusableUserConnection } = await import(
+      './broker.js'
+    );
+    const { upsertAccessTokenSecret } = await import('./onecli-sync.js');
+
+    const fakeProvider: OAuthProviderConfig = {
+      id: 'recoverprovider',
+      displayName: 'Recover',
+      hostPattern: 'api.recover.example.com',
+      scopes: ['read'],
+      buildAuthorizeUrl: () => 'https://example.com/auth',
+      exchangeCode: async () => ({ access_token: 'a', refresh_token: 'r', expires_in: 120 }),
+      refresh: async () => ({ access_token: 'recovered-atk', refresh_token: 'rtk', expires_in: 3600 }),
+    };
+    registerOAuthProvider(fakeProvider);
+
+    const user = createUser({
+      email: 'recover@example.com',
+      password: 'password123',
+      display_name: 'Recover User',
+    });
+    registerWorkspace({
+      workspace_id: 'ws-recover-1',
+      agent_group_id: 'ag-recover-1',
+      name: 'RecoverAgent',
+      is_default: true,
+      owner_user_id: user.id,
+      folder: 'recover',
+      cli_scope: 'group',
+    });
+
+    const pending = upsertPendingConnection(user.id, 'recoverprovider', {
+      mcpUrl: 'https://mcp.recover.example.com/sse',
+      mcpServerName: 'recoverprovider',
+    });
+    applyTokenSet(pending.id, {
+      access_token: 'stale-atk',
+      refresh_token: 'rtk',
+      expires_in: 3600,
+    });
+    setOnecliSecretId(pending.id, 'deleted-secret-id');
+    setConnectionError(pending.id, 'onecli secrets update NOT_FOUND');
+    bindWorkspaceIntegration('ws-recover-1', pending.id);
+
+    expect(getConnection(pending.id)!.status).toBe('error');
+    expect(
+      findReusableUserConnection(user.id, 'recoverprovider', 'https://mcp.recover.example.com/sse')
+        ?.id,
+    ).toBe(pending.id);
+
+    await ensureWorkspaceIntegrations('ws-recover-1');
+
+    const recovered = getConnection(pending.id)!;
+    expect(recovered.status).toBe('connected');
+    expect(recovered.access_token).toBe('recovered-atk');
+    expect(recovered.onecli_secret_id).toBe('secret-test-1');
+    expect(recovered.last_error).toBeNull();
+    expect(upsertAccessTokenSecret).toHaveBeenCalled();
   });
 });

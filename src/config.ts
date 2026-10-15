@@ -24,10 +24,18 @@ const envConfig = readEnvFile([
   'LIVE_BROWSER_TICKET_TTL_MS',
   'MULTI_AGENT_ORCHESTRATION_ENABLED',
   'AUTO_AGENT_ROUTE',
-  'LAYA_OLLAMA_URL',
-  'LAYA_MODEL',
-  'LAYA_CONFIDENCE_MIN',
-  'LAYA_PROBABILITY_MIN',
+  // Decision-model routing (clef-flash / systemone)
+  'DECISION_MODEL_URL',
+  'DECISION_MODEL',
+  'DECISION_CONFIDENCE_MIN',
+  'DECISION_PROBABILITY_MIN',
+  'DECISION_OPTION_TOKEN_LIMIT',
+  'DECISION_OPTIONS_TOTAL_LIMIT',
+  'DECISION_MESSAGE_CHARS',
+  'DECISION_MAX_AGENTS',
+  'DECISION_ROUTING_BLURB_CHARS',
+  'DECISION_HISTORY_MESSAGES',
+  'DECISION_HISTORY_CHARS',
   'WORKER_BUILD_TURN_TIMEOUT_MS',
   'WORKER_BUILD_PROGRESS_INTERVAL_MS',
   'WORKER_BUILD_TURN_MAX_MS',
@@ -243,38 +251,101 @@ export const MULTI_AGENT_ORCHESTRATION_ENABLED =
     'true') !== 'false';
 
 /**
- * Laya-based auto agent routing (stay vs sticky switch) on each normal message.
- * Off by default — set AUTO_AGENT_ROUTE=true. Requires Ollama ≥0.40 with `laya` pulled.
+ * Decision-model auto agent routing (stay vs sticky switch) on each normal message.
+ * Off by default — set AUTO_AGENT_ROUTE=true.
+ * Requires a System One–compatible decision model server (default model: `clef-flash`).
  */
 export const AUTO_AGENT_ROUTE =
   (process.env.AUTO_AGENT_ROUTE ?? envConfig.AUTO_AGENT_ROUTE ?? 'false') === 'true';
 
-/** Ollama base URL for Laya `/v1/systemone` (not Anthropic chat proxy). */
-export const LAYA_OLLAMA_URL = (
-  process.env.LAYA_OLLAMA_URL ||
-  envConfig.LAYA_OLLAMA_URL ||
-  'http://127.0.0.1:11434'
+function envFirst(...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const fromProcess = process.env[key];
+    if (fromProcess !== undefined && fromProcess !== '') return fromProcess;
+    const fromFile = envConfig[key as keyof typeof envConfig];
+    if (typeof fromFile === 'string' && fromFile !== '') return fromFile;
+  }
+  return undefined;
+}
+
+function envInt(keys: string[], fallback: number, min: number, max: number): number {
+  const raw = envFirst(...keys);
+  const n = raw !== undefined ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function envFloat01(keys: string[], fallback: number): number {
+  const raw = envFirst(...keys);
+  const n = raw !== undefined ? parseFloat(raw) : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(1, Math.max(0, n));
+}
+
+/**
+ * Base URL for the decision-model `/v1/systemone` server
+ * (Ollama, or any other System One–compatible host — not the Anthropic chat proxy).
+ */
+export const DECISION_MODEL_URL = (
+  envFirst('DECISION_MODEL_URL') || 'http://127.0.0.1:11434'
 ).replace(/\/$/, '');
 
-export const LAYA_MODEL = process.env.LAYA_MODEL || envConfig.LAYA_MODEL || 'laya';
+/** Decision model name (`clef-flash` recommended; `clef` also works). */
+export const DECISION_MODEL = envFirst('DECISION_MODEL') || 'clef-flash';
 
-/** Min Laya `confidence` required to sticky-switch away from the current agent. */
-export const LAYA_CONFIDENCE_MIN = Math.min(
-  1,
-  Math.max(
-    0,
-    parseFloat(process.env.LAYA_CONFIDENCE_MIN || envConfig.LAYA_CONFIDENCE_MIN || '0.55') || 0.55,
-  ),
-);
+/**
+ * Min decision `confidence` required to sticky-switch away from the current agent.
+ * Keep modest for many-way choices (11 agents → confidence rarely exceeds ~0.5).
+ */
+export const DECISION_CONFIDENCE_MIN = envFloat01(['DECISION_CONFIDENCE_MIN'], 0.35);
 
 /** Min probability on the chosen agent required to sticky-switch. */
-export const LAYA_PROBABILITY_MIN = Math.min(
-  1,
-  Math.max(
-    0,
-    parseFloat(process.env.LAYA_PROBABILITY_MIN || envConfig.LAYA_PROBABILITY_MIN || '0.4') || 0.4,
-  ),
+export const DECISION_PROBABILITY_MIN = envFloat01(['DECISION_PROBABILITY_MIN'], 0.4);
+
+/**
+ * Soft cap (estimated tokens) for each choice option's criteria text.
+ * Raise for richer agent blurbs within the model context window.
+ */
+export const DECISION_OPTION_TOKEN_LIMIT = envInt(
+  ['DECISION_OPTION_TOKEN_LIMIT'],
+  2048,
+  16,
+  65_536,
 );
+
+/**
+ * Soft cap (estimated tokens) for all choice options combined (keys + values).
+ * Keep well under the model context window so state + history still fit.
+ */
+export const DECISION_OPTIONS_TOTAL_LIMIT = envInt(
+  ['DECISION_OPTIONS_TOTAL_LIMIT'],
+  65_536,
+  64,
+  262_144,
+);
+
+/** Max characters of the current user message included in decision `state`. */
+export const DECISION_MESSAGE_CHARS = envInt(['DECISION_MESSAGE_CHARS'], 32_000, 50, 262_144);
+
+/** Max agents offered as choice options (systemone choice supports ≤26). */
+export const DECISION_MAX_AGENTS = envInt(['DECISION_MAX_AGENTS'], 26, 2, 26);
+
+/** Max characters for each agent's routing blurb before option formatting. */
+export const DECISION_ROUTING_BLURB_CHARS = envInt(
+  ['DECISION_ROUTING_BLURB_CHARS'],
+  2000,
+  40,
+  32_000,
+);
+
+/**
+ * How many prior conversation messages (inbound+outbound) to include as context.
+ * Set 0 to disable history. Helps the model detect continuations vs topic switches.
+ */
+export const DECISION_HISTORY_MESSAGES = envInt(['DECISION_HISTORY_MESSAGES'], 20, 0, 100);
+
+/** Total character budget for the recent-history snippet in decision `state`. */
+export const DECISION_HISTORY_CHARS = envInt(['DECISION_HISTORY_CHARS'], 32_000, 0, 262_144);
 
 /** Fixed stream port inside the agent container (agent-browser). */
 export const LIVE_BROWSER_STREAM_PORT = parseInt(

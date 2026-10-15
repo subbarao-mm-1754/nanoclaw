@@ -192,6 +192,8 @@ export async function handleWorkerOutboundCallback(
         content: out.content,
         files: outboundFilesForDelivery(out),
         worker_job_id: jobId,
+        agent_name: agentName,
+        agent_workspace_id: agentWorkspaceId,
       });
 
       try {

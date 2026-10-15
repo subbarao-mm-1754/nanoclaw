@@ -65,8 +65,9 @@ services:
       ONECLI_API_PORT: ${ONECLI_API_PORT:-10256}
       ONECLI_GATEWAY_PORT: ${ONECLI_GATEWAY_PORT:-10255}
       GATEWAY_INTERNAL_URL: http://gateway:10255
-      # NanoClaw agent containers run on the host runtime, not the OneCLI
-      # compose network — they reach the published gateway via host.docker.internal.
+      # Advertised to /v1/container-config. Local NanoClaw rewrites this to
+      # gateway:10255 and attaches agents to the onecli compose network so the
+      # proxy can stay on 127.0.0.1. Remote ONECLI_URL leaves the address as-is.
       ONECLI_AGENT_PROXY_ADDRESS: host.docker.internal:10255
     volumes:
       - app-data:/app/data:ro

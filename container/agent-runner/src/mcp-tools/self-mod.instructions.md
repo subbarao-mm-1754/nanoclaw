@@ -23,3 +23,7 @@ add_mcp_server({ name: "memory", command: "pnpm", args: ["dlx", "@modelcontextpr
 ```
 
 Do not ask the user to give you credentials or tell them how to create credentials (OAuth, API keys, etc.) — NEVER fabricate credential setup instructions. Credentials are handled by the OneCLI gateway. Use `"onecli-managed"` as the placeholder value for any credential env vars or config fields. After the MCP server is installed and the container restarts, load `/onecli-gateway` for the full credential-handling flow (connect URLs, stubs, error recovery).
+
+If a **remote MCP** (http/sse) fails with 401/403/auth errors, or MCP status is `needs-auth`, call **`request_mcp_auth`** so the Gateway starts OAuth and messages the user. Never call remote MCP `authenticate` / `complete_authentication` tools. Never invent or paste localhost / mcp-client /callback authorize links.
+
+When you receive **`[mcp-auth-ready]`**, credentials are already in OneCLI — retry the real MCP tools for the user's pending request. Do not call `request_mcp_auth` again unless tools still return 401/403.

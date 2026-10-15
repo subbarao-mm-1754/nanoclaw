@@ -83,8 +83,23 @@ export function insertOutboundMessage(input: {
   content: unknown;
   files?: Array<{ filename: string; data_base64: string }>;
   worker_job_id: string;
+  /** Serving agent — stored on content_json for decision-model history. */
+  agent_name?: string | null;
+  agent_workspace_id?: string | null;
 }): CustomerMessage {
   const ts = now();
+  const content =
+    input.content && typeof input.content === 'object' && !Array.isArray(input.content)
+      ? {
+          ...(input.content as Record<string, unknown>),
+          ...(input.agent_name?.trim()
+            ? { agent_name: input.agent_name.trim() }
+            : {}),
+          ...(input.agent_workspace_id?.trim()
+            ? { agent_workspace_id: input.agent_workspace_id.trim() }
+            : {}),
+        }
+      : input.content;
   getGatewayDb()
     .prepare(
       `INSERT INTO customer_messages
@@ -99,7 +114,7 @@ export function insertOutboundMessage(input: {
       input.thread_id,
       input.conversation_id,
       input.kind,
-      JSON.stringify(input.content),
+      JSON.stringify(content),
       input.files ? JSON.stringify(input.files) : null,
       input.worker_job_id,
       ts,
@@ -186,6 +201,31 @@ export function listPendingMessages(direction: 'inbound' | 'outbound'): Customer
     )
     .all(direction) as Record<string, unknown>[];
   return rows.map(rowToMessage);
+}
+
+/**
+ * Recent inbound/outbound messages for a conversation (oldest → newest).
+ * Used by decision-model auto-routing for short conversation context.
+ */
+export function listRecentConversationMessages(
+  conversationId: string,
+  limit: number,
+  excludeMessageId?: string,
+): CustomerMessage[] {
+  if (limit <= 0) return [];
+  const rows = getGatewayDb()
+    .prepare(
+      `SELECT * FROM customer_messages
+       WHERE conversation_id = ?
+         AND (? IS NULL OR id != ?)
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    )
+    .all(conversationId, excludeMessageId ?? null, excludeMessageId ?? null, limit) as Record<
+    string,
+    unknown
+  >[];
+  return rows.map(rowToMessage).reverse();
 }
 
 export function countMessagesByStatus(): Record<MessageStatus, number> {

@@ -73,17 +73,40 @@ Per-agent container config is a snapshot on the gateway workspace, materialized 
 
 API keys and OAuth tokens are managed by the OneCLI gateway. Secrets are injected into containers at request time — none via env vars or chat context. See `container/skills/onecli-gateway/SKILL.md`. Host wiring: `ensureAgent()` in `container-runner.ts`. Run `onecli --help`.
 
-### Gotcha: auto-created agents start in `selective` secret mode
+### Gotcha: agents need explicit secret grants (OneCLI 1.7+)
 
-When the worker first spawns a session, `onecli.ensureAgent` creates the agent in **selective** mode (no secrets assigned by default).
+OneCLI removed `set-secret-mode all` / `agents set-secrets`. Agents only inject credentials that were **granted**. `ensureAgentV1` grants every vault secret after create; if Claude still `api_retry`s with 0 tokens, grant Anthropic manually:
 
 ```bash
-onecli agents list
-onecli agents set-secret-mode --id <agent-id> --mode all
-# or: onecli agents set-secrets --id <agent-id> --secret-ids <id1>,<id2>
+onecli secrets list
+# PUT grant (CLI set-secrets is Gone):
+curl -X PUT "http://127.0.0.1:10256/v1/agents/<agent-id>/grants/secrets/<secret-id>" \
+  -H "Authorization: Bearer $ONECLI_API_KEY" -H "Content-Type: application/json" -d '{}'
 ```
 
-No container restart needed after flipping mode — the next API call picks up credentials.
+No container restart needed — the next API call picks up the grant.
+
+### Auth modes (API key vs `claude setup-token`)
+
+Store the credential in the OneCLI vault as type `anthropic` (not in container `.env`). OneCLI selects the mode:
+
+| Vault value | Container sees | Who shapes the Anthropic request |
+|-------------|----------------|----------------------------------|
+| API key | proxy + key injection | Agent SDK / Claude Code |
+| `claude setup-token` (OAuth) | `CLAUDE_CODE_OAUTH_TOKEN=placeholder` + proxy Bearer rewrite | Claude Code identity required (`systemPrompt.preset: claude_code`) |
+
+Do not send a setup-token as `x-api-key`. Bare Bearer without Claude Code identity often returns a fake `429 rate_limit_error` even when the account has quota.
+
+### Reaching the OneCLI proxy (local vs remote)
+
+Do **not** bind the credential gateway to `0.0.0.0` just for agents. NanoClaw chooses the path from `ONECLI_URL`:
+
+| `ONECLI_URL` | Agent container networking | Proxy host |
+|--------------|----------------------------|------------|
+| Loopback (`127.0.0.1` / `localhost`) | Joins Compose network `onecli_onecli` (override: `ONECLI_AGENT_NETWORK`) | `gateway:10255` |
+| Remote host | Default runtime network | Whatever `/v1/container-config` returns |
+
+OneCLI can stay published on `127.0.0.1` for the host CLI; remote vaults need no special bind.
 
 ## Skills
 

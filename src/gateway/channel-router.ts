@@ -45,7 +45,7 @@ export const BUILD_HELP_TEXT = [
   '• `/test <message>` — while editing, send that message to the draft (edits so far). Does not switch this chat’s agent',
   '• `/save` — apply the current draft to the live agent (chat binding unchanged)',
   '• While a build/edit is waiting for you — just reply normally (no command)',
-  '• Paste a Zoho-managed MCP URL (or `/mcp <url>`) during a build/edit — Gateway sends an authorize link',
+  '• Paste a Zoho-managed MCP URL (or `/mcp <url>`) during a build/edit **or while using an agent** — Gateway sends an authorize link and attaches MCP to that agent',
   '• `/cancel` — cancel the active build or edit',
   '• `/chat` — cancel any active build/edit and switch to user-agent mode',
   '• `/agents` — list your user agents (marks which is active in this chat)',
@@ -166,10 +166,13 @@ async function replyToChannel(
 /**
  * If the message contains a remote MCP URL, start OAuth and tell the user to
  * open the authorize link. Returns true when a URL was found (OAuth attempted).
+ *
+ * Pass buildJobId (build/edit) and/or workspaceId (bound agent chat).
  */
-async function maybeStartBuildMcpOAuth(input: {
+async function maybeStartMcpOAuth(input: {
   user: GatewayUser;
-  buildJobId: string;
+  buildJobId?: string;
+  workspaceId?: string;
   text: string;
   channel_type: string;
   platform_id: string;
@@ -184,6 +187,7 @@ async function maybeStartBuildMcpOAuth(input: {
       mcpUrl,
       mcpServerName: suggestMcpServerName(mcpUrl),
       buildJobId: input.buildJobId,
+      workspaceId: input.workspaceId,
     });
     if (result.reused) {
       await replyToChannel(
@@ -194,7 +198,9 @@ async function maybeStartBuildMcpOAuth(input: {
           'Remote MCP detected — already authorized for your account.',
           '',
           `Using existing connection (\`${result.provider}\`).`,
-          'It will attach automatically when the agent is registered. No need to authorize again.',
+          input.workspaceId
+            ? 'It is attached to this agent. Send a normal message to use it.'
+            : 'It will attach automatically when the agent is registered. No need to authorize again.',
         ].join('\n'),
       );
     } else {
@@ -207,7 +213,9 @@ async function maybeStartBuildMcpOAuth(input: {
           '',
           `Open this link: ${result.authorize_url}`,
           '',
-          'After you authorize, this MCP will attach automatically when the agent is created.',
+          input.workspaceId
+            ? 'After you authorize, this MCP attaches to the agent bound to this chat.'
+            : 'After you authorize, this MCP will attach automatically when the agent is created.',
         ].join('\n'),
       );
     }
@@ -218,7 +226,11 @@ async function maybeStartBuildMcpOAuth(input: {
         : err instanceof Error
           ? err.message
           : String(err);
-    log.warn('Build MCP OAuth start failed', { buildJobId: input.buildJobId, err });
+    log.warn('MCP OAuth start failed', {
+      buildJobId: input.buildJobId,
+      workspaceId: input.workspaceId,
+      err,
+    });
     await replyToChannel(
       input.channel_type,
       input.platform_id,
@@ -227,6 +239,18 @@ async function maybeStartBuildMcpOAuth(input: {
     );
   }
   return true;
+}
+
+/** @deprecated alias — build/edit call sites */
+async function maybeStartBuildMcpOAuth(input: {
+  user: GatewayUser;
+  buildJobId: string;
+  text: string;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+}): Promise<boolean> {
+  return maybeStartMcpOAuth(input);
 }
 
 /**
@@ -645,6 +669,23 @@ export async function routeChannelInbound(input: {
         );
       }
       return { kind: 'builder', action: 'continued', jobId: active.id };
+    }
+  }
+
+  // While chatting with a bound agent: `/mcp <url>` or a pasted MCP URL starts
+  // Gateway OAuth and attaches to that agent (not build-only).
+  const bound = findConversation(input.channel_type, input.platform_id, input.thread_id);
+  if (bound?.workspace_id && getAgentForUser(bound.workspace_id, user.id)) {
+    const started = await maybeStartMcpOAuth({
+      user,
+      workspaceId: bound.workspace_id,
+      text,
+      channel_type: input.channel_type,
+      platform_id: input.platform_id,
+      thread_id: input.thread_id,
+    });
+    if (started && /^\/mcp(?:\s|$)/i.test(text)) {
+      return { kind: 'builder', action: 'help' };
     }
   }
 

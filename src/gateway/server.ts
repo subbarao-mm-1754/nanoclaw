@@ -51,6 +51,7 @@ import {
   startOAuthConnect,
   unbindIntegrationFromWorkspace,
 } from './integrations/broker.js';
+import { handleMcpAuthRequest } from './integrations/mcp-auth-request.js';
 import {
   disconnectCliqAccount,
   getCliqStatusForUser,
@@ -1393,6 +1394,35 @@ async function handleInternalBrowserSessionRequest(
   jsonResponse(res, result.ok ? 200 : 400, result);
 }
 
+async function handleInternalMcpAuthRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const notifyRaw = body.notify;
+  const result = await handleMcpAuthRequest({
+    workspace_id: requireString(body, 'workspace_id'),
+    mcp_url: typeof body.mcp_url === 'string' ? body.mcp_url : undefined,
+    mcp_server_name: typeof body.mcp_server_name === 'string' ? body.mcp_server_name : undefined,
+    notify:
+      notifyRaw && typeof notifyRaw === 'object' && !Array.isArray(notifyRaw)
+        ? {
+            channel_type: String((notifyRaw as Record<string, unknown>).channel_type ?? ''),
+            platform_id: String((notifyRaw as Record<string, unknown>).platform_id ?? ''),
+            thread_id:
+              typeof (notifyRaw as Record<string, unknown>).thread_id === 'string'
+                ? ((notifyRaw as Record<string, unknown>).thread_id as string)
+                : null,
+          }
+        : null,
+  });
+  jsonResponse(res, result.ok ? 200 : 400, result);
+}
+
 async function handleInternalKnowledge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorizeWorkerCallback(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -1868,6 +1898,10 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
     }
     if (req.method === 'POST' && pathname === '/v1/internal/browser-sessions/request') {
       await handleInternalBrowserSessionRequest(req, res);
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/v1/internal/mcp-auth/request') {
+      await handleInternalMcpAuthRequest(req, res);
       return;
     }
     const browserSessionMatch = pathname.match(/^\/v1\/browser-sessions\/([^/]+)$/);

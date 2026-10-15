@@ -78,6 +78,18 @@ export function isRunnerCommand(msg: MessageInRow): boolean {
   return cat === 'admin' || cat === 'passthrough';
 }
 
+/**
+ * Gateway wake after remote MCP OAuth. Must start a fresh SDK query so MCP
+ * reconnects with OneCLI-injected credentials — pushing into an open query
+ * leaves sticky `needs-auth` from the first init.
+ */
+export function isMcpAuthReadyMessage(msg: MessageInRow): boolean {
+  if (msg.kind !== 'chat' && msg.kind !== 'chat-sdk') return false;
+  const content = parseContent(msg.content);
+  const text = (content.text || '').trim();
+  return text.startsWith('[mcp-auth-ready]');
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractSenderId(msg: MessageInRow, content: any): string | null {
   const raw: string | null = content?.senderId || content?.author?.userId || null;

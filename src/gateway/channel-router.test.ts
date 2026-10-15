@@ -42,6 +42,8 @@ vi.mock('../channels/channel-registry.js', () => ({
   getChannelAdapter: () => ({
     deliver: (...args: unknown[]) => deliverMock(...args),
   }),
+  registerChannelAdapter: vi.fn(),
+  listChannelAdapters: vi.fn(() => []),
 }));
 
 beforeEach(() => {
@@ -454,5 +456,51 @@ describe('routeChannelInbound', () => {
     const text = deliverMock.mock.calls.map((c) => String(c[2]?.content?.text ?? '')).join('\n');
     expect(text).toMatch(/already authorized/i);
     expect(text).not.toMatch(/Open this link:/);
+  });
+
+  it('starts Gateway OAuth on /mcp while using a bound agent (no active build)', async () => {
+    const { createAgentRecord } = await import('./store/agents.js');
+    const { setConversationWorkspace } = await import('./store/conversations.js');
+    const { ensureUserForChannelSender } = await import('./store/channel-identities.js');
+
+    const user = ensureUserForChannelSender({
+      channel_type: 'zoho-cliq',
+      sender_id: 'zoho-cliq:u-mcp-agent',
+    });
+    const agent = createAgentRecord({
+      name: 'SoloTest',
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# solo' }],
+    });
+    setConversationWorkspace({
+      channel_type: base.channel_type,
+      platform_id: base.platform_id,
+      thread_id: base.thread_id,
+      workspace_id: agent.workspace_id,
+    });
+
+    startOAuthConnectMock.mockClear();
+    deliverMock.mockClear();
+    const result = await routeChannelInbound({
+      ...base,
+      content: {
+        text: '/mcp https://mail-mcp.zohomcp.com/mcp/message?key=agent1',
+        senderId: 'zoho-cliq:u-mcp-agent',
+        sender: 'Fay',
+      },
+    });
+    expect(result).toEqual({ kind: 'builder', action: 'help' });
+    expect(startOAuthConnectMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: user.id,
+        workspaceId: agent.workspace_id,
+        mcpUrl: expect.stringContaining('zohomcp.com'),
+      }),
+    );
+    expect(
+      deliverMock.mock.calls.some((c) =>
+        String(c[2]?.content?.text ?? '').includes('Open this link:'),
+      ),
+    ).toBe(true);
   });
 });

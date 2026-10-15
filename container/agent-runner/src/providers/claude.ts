@@ -175,6 +175,18 @@ const preToolUseHook: HookCallback = async (input) => {
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
     } as unknown as ReturnType<HookCallback>;
   }
+  // Remote MCP servers expose Claude OAuth helpers (authenticate /
+  // complete_authentication) that open localhost callbacks. Auth is host-mediated
+  // via mcp__nanoclaw__request_mcp_auth + OneCLI injection instead.
+  if (/^mcp__.+__(authenticate|complete_authentication)$/.test(toolName)) {
+    return {
+      decision: 'block',
+      stopReason:
+        `Tool '${toolName}' is blocked — do not start container-local OAuth. ` +
+        'Call mcp__nanoclaw__request_mcp_auth instead; the Gateway posts the authorize link. ' +
+        'Never invent or paste localhost /callback or mcp-client authorize URLs.',
+    } as unknown as ReturnType<HookCallback>;
+  }
   // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
   // tool: no declared timeout.
   const declaredTimeoutMs =
@@ -461,6 +473,17 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // Always use the Claude Code system preset. Setup-token / OAuth
+    // (CLAUDE_CODE_OAUTH_TOKEN via OneCLI) requires Claude Code identity on
+    // the wire; without it Anthropic returns a fake rate_limit_error. API
+    // keys work either way — the preset is still the right default for this
+    // product (we invoke Claude Code via pathToClaudeCodeExecutable).
+    const systemPrompt = {
+      type: 'preset' as const,
+      preset: 'claude_code' as const,
+      ...(instructions ? { append: instructions } : {}),
+    };
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -468,7 +491,7 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
+        systemPrompt,
         allowedTools: [
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),

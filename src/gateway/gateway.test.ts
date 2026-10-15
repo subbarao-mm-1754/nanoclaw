@@ -22,7 +22,7 @@ vi.mock('./worker-client.js', () => ({
   destroyWorkspaceOnWorker: vi.fn(),
 }));
 
-/** Processor calls Laya when AUTO_AGENT_ROUTE=true — keep unit tests offline. */
+/** Processor calls the decision model when AUTO_AGENT_ROUTE=true — keep unit tests offline. */
 vi.mock('./agent-route/auto-route.js', () => ({
   applyAutoAgentRoute: async (input: { conversation: { workspace_id: string } }) => ({
     conversation: input.conversation,

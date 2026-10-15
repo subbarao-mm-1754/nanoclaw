@@ -1,25 +1,26 @@
 import {
   AUTO_AGENT_ROUTE,
-  LAYA_CONFIDENCE_MIN,
-  LAYA_PROBABILITY_MIN,
+  DECISION_CONFIDENCE_MIN,
+  DECISION_HISTORY_CHARS,
+  DECISION_HISTORY_MESSAGES,
+  DECISION_MAX_AGENTS,
+  DECISION_MESSAGE_CHARS,
+  DECISION_PROBABILITY_MIN,
 } from '../../config.js';
 import { log } from '../../log.js';
 import type { Conversation, CustomerMessage, GatewayWorkspace } from '../types.js';
 import { isUserFacingWorkspaceId, listUserAgents } from '../store/agent-select.js';
 import { setConversationWorkspace } from '../store/conversations.js';
+import { listRecentConversationMessages } from '../store/messages.js';
 import { getWorkspace } from '../store/workspaces.js';
-import { safeLayaChoice } from './laya-client.js';
+import { safeDecisionChoice } from './decision-client.js';
 import {
-  clampToLayaTokens,
-  estimateLayaTokens,
-  formatLayaOptionCriteria,
-  LAYA_OPTIONS_TOTAL_TARGET,
+  clampToDecisionTokens,
+  decisionOptionsTotalTarget,
+  estimateDecisionTokens,
+  formatOptionCriteria,
   perOptionTokenBudget,
 } from './routing-description.js';
-
-/** Keep agent count low so options fit Laya's 176-token shared budget. */
-const MAX_AGENTS_PER_CHOICE = 8;
-const MAX_MESSAGE_CHARS = 200;
 
 export type AutoRouteResult = {
   conversation: Conversation;
@@ -27,7 +28,14 @@ export type AutoRouteResult = {
   fromWorkspaceId: string;
   toWorkspaceId: string;
   toAgentName: string | null;
-  reason: 'disabled' | 'no_text' | 'solo' | 'stay' | 'switch' | 'laya_failed' | 'low_confidence';
+  reason:
+    | 'disabled'
+    | 'no_text'
+    | 'solo'
+    | 'stay'
+    | 'switch'
+    | 'decision_failed'
+    | 'low_confidence';
 };
 
 function extractUserText(content: unknown): string {
@@ -36,7 +44,23 @@ function extractUserText(content: unknown): string {
   return typeof text === 'string' ? text.trim() : '';
 }
 
-/** Pick ≤20 candidates: always current + master, then newest others. */
+function extractAgentName(content: unknown): string | null {
+  if (!content || typeof content !== 'object') return null;
+  const name = (content as { agent_name?: unknown }).agent_name;
+  return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
+/** Strip channel delivery prefix `**Agent**\n` so history isn't double-labeled. */
+function stripAgentLabelPrefix(text: string, agentName: string | null): string {
+  if (!agentName) return text;
+  const prefixes = [`**${agentName}**\n`, `[${agentName}]\n`, `**${agentName}**: `, `${agentName}: `];
+  for (const p of prefixes) {
+    if (text.startsWith(p)) return text.slice(p.length).trimStart();
+  }
+  return text;
+}
+
+/** Pick ≤ DECISION_MAX_AGENTS candidates: always current + master, then newest others. */
 export function selectRoutableAgents(
   agents: GatewayWorkspace[],
   currentWorkspaceId: string,
@@ -62,22 +86,23 @@ export function selectRoutableAgents(
     .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
 
   for (const a of rest) {
-    if (selected.length >= MAX_AGENTS_PER_CHOICE) break;
+    if (selected.length >= DECISION_MAX_AGENTS) break;
     selected.push(a);
   }
   return selected;
 }
 
 /**
- * Short keys + per-option budgets that fit Laya's shared 176-token options pool.
+ * Short keys + per-option budgets that fit the configured shared options pool.
  */
-export function buildLayaAgentCriteria(
+export function buildAgentCriteria(
   agents: GatewayWorkspace[],
   currentWorkspaceId: string,
 ): { criteria: Record<string, string>; keyToWorkspaceId: Map<string, string> } {
   const criteria: Record<string, string> = {};
   const keyToWorkspaceId = new Map<string, string>();
   let budget = perOptionTokenBudget(agents.length);
+  const target = decisionOptionsTotalTarget();
 
   const fill = (maxTokens: number) => {
     for (const key of Object.keys(criteria)) delete criteria[key];
@@ -85,7 +110,7 @@ export function buildLayaAgentCriteria(
     agents.forEach((agent, i) => {
       const key = `a${i}`;
       keyToWorkspaceId.set(key, agent.workspace_id);
-      criteria[key] = formatLayaOptionCriteria(
+      criteria[key] = formatOptionCriteria(
         agent,
         agent.workspace_id === currentWorkspaceId,
         maxTokens,
@@ -97,12 +122,12 @@ export function buildLayaAgentCriteria(
 
   // Shrink until estimated total is under target (keys + values).
   let guard = 0;
-  while (guard++ < 12) {
+  while (guard++ < 24) {
     const total =
-      Object.keys(criteria).reduce((n, k) => n + estimateLayaTokens(k), 0) +
-      Object.values(criteria).reduce((n, v) => n + estimateLayaTokens(v), 0);
-    if (total <= LAYA_OPTIONS_TOTAL_TARGET) break;
-    budget = Math.max(6, budget - 2);
+      Object.keys(criteria).reduce((n, k) => n + estimateDecisionTokens(k), 0) +
+      Object.values(criteria).reduce((n, v) => n + estimateDecisionTokens(v), 0);
+    if (total <= target) break;
+    budget = Math.max(6, budget - Math.max(2, Math.floor(budget * 0.1)));
     fill(budget);
   }
 
@@ -110,8 +135,62 @@ export function buildLayaAgentCriteria(
 }
 
 /**
- * One Laya stay-or-switch decision. Sticky-binds like `/use` when switching.
- * On failure / low confidence / solo agent → stay.
+ * Recent turns for the decision model. Assistant lines are labeled with the
+ * serving agent name so stay-vs-switch can see who handled the thread.
+ */
+export function buildRecentHistory(
+  conversationId: string,
+  excludeMessageId: string,
+  currentAgentName?: string | null,
+): string | undefined {
+  if (DECISION_HISTORY_MESSAGES <= 0 || DECISION_HISTORY_CHARS <= 0) return undefined;
+
+  const recent = listRecentConversationMessages(
+    conversationId,
+    DECISION_HISTORY_MESSAGES,
+    excludeMessageId,
+  );
+  if (recent.length === 0) return undefined;
+
+  const lines: string[] = [];
+  for (const msg of recent) {
+    let content: unknown = null;
+    try {
+      content = JSON.parse(msg.content_json) as unknown;
+    } catch {
+      content = null;
+    }
+    let text = extractUserText(content);
+    if (!text) continue;
+
+    if (msg.direction === 'inbound') {
+      lines.push(`user: ${text}`);
+      continue;
+    }
+
+    const agentName = extractAgentName(content) ?? currentAgentName?.trim() ?? null;
+    text = stripAgentLabelPrefix(text, agentName);
+    const speaker = agentName || 'assistant';
+    const mark =
+      currentAgentName?.trim() &&
+      agentName &&
+      agentName.toLowerCase() === currentAgentName.trim().toLowerCase()
+        ? '*'
+        : '';
+    lines.push(`${speaker}${mark}: ${text}`);
+  }
+  if (lines.length === 0) return undefined;
+
+  let joined = lines.join('\n');
+  if (joined.length > DECISION_HISTORY_CHARS) {
+    joined = `…${joined.slice(-(DECISION_HISTORY_CHARS - 1))}`;
+  }
+  return joined;
+}
+
+/**
+ * One stay-or-switch decision via `/v1/systemone` (default model: clef-flash).
+ * Sticky-binds like `/use` when switching. On failure / low confidence / solo → stay.
  */
 export async function applyAutoAgentRoute(input: {
   conversation: Conversation;
@@ -150,91 +229,72 @@ export async function applyAutoAgentRoute(input: {
   const agents = selectRoutableAgents(listUserAgents(ownerUserId), fromWorkspaceId);
   if (agents.length <= 1) return stay('solo');
 
-  const { criteria, keyToWorkspaceId } = buildLayaAgentCriteria(agents, fromWorkspaceId);
-  const state = {
-    current: clampToLayaTokens(current?.name ?? 'current', 12),
-    message: message.slice(0, MAX_MESSAGE_CHARS),
-  };
-
-  const optionsByKey = Object.fromEntries(
-    [...keyToWorkspaceId.entries()].map(([key, workspaceId]) => {
-      const agent = agents.find((a) => a.workspace_id === workspaceId);
-      return [key, { workspaceId, name: agent?.name ?? workspaceId, criteria: criteria[key] }];
-    }),
+  const { criteria, keyToWorkspaceId } = buildAgentCriteria(agents, fromWorkspaceId);
+  const currentNameTokens = Math.min(
+    48,
+    Math.max(12, Math.floor(perOptionTokenBudget(agents.length) / 3)),
   );
+  const recent = buildRecentHistory(conversation.id, inbound.id, current?.name);
+  const state: Record<string, string> = {
+    current: clampToDecisionTokens(current?.name ?? 'current', currentNameTokens),
+    message: message.slice(0, DECISION_MESSAGE_CHARS),
+  };
+  if (recent) state.recent = recent;
 
-  log.info('Auto agent route: calling Laya', {
+  log.info('Auto agent route: deciding', {
     conversationId: conversation.id,
     currentAgent: current?.name ?? fromWorkspaceId,
-    currentWorkspaceId: fromWorkspaceId,
-    messagePreview: message.slice(0, 120),
-    options: optionsByKey,
+    agentCount: agents.length,
   });
 
-  const answer = await safeLayaChoice({
+  const answer = await safeDecisionChoice({
     state,
     questionKey: 'agent',
     questions: {
       agent: {
         type: 'choice',
         instructions:
-          'Pick the agent for this message. Prefer current if it is a continuation; switch only when another agent clearly owns it.',
+          'Pick the agent whose specialty best matches state.message. state.current (* in recent) is the bound agent — keep it for same-topic continuations, but switch when the new message clearly matches another agent\'s specialty (e.g. contacts/invoices vs news).',
         criteria,
       },
     },
   });
 
-  if (!answer) return stay('laya_failed');
+  if (!answer) return stay('decision_failed');
 
   const chosenId = keyToWorkspaceId.get(answer.choice) ?? answer.choice;
   const chosen = agents.find((a) => a.workspace_id === chosenId);
   if (!chosen) {
-    log.warn('Auto agent route: Laya chose unknown option', {
+    log.warn('Auto agent route: unknown option', {
       conversationId: conversation.id,
       choiceKey: answer.choice,
-      options: optionsByKey,
     });
-    return stay('laya_failed');
+    return stay('decision_failed');
   }
-
-  const probabilitiesByName = Object.fromEntries(
-    Object.entries(answer.probabilities).map(([key, prob]) => {
-      const workspaceId = keyToWorkspaceId.get(key) ?? key;
-      const agent = agents.find((a) => a.workspace_id === workspaceId);
-      return [agent?.name ?? key, Number(prob)];
-    }),
-  );
 
   const chosenProb =
     answer.probabilities[answer.choice] ?? answer.probabilities[chosenId] ?? 0;
 
   if (chosen.workspace_id === fromWorkspaceId) {
-    log.info('Auto agent route: recommendation', {
+    log.info('Auto agent route: stay', {
       conversationId: conversation.id,
-      decision: 'stay',
-      recommendedAgent: chosen.name,
-      recommendedWorkspaceId: chosen.workspace_id,
+      agent: chosen.name,
       confidence: answer.confidence,
       probability: chosenProb,
-      probabilities: probabilitiesByName,
     });
     return stay('stay', chosen.name);
   }
 
-  if (answer.confidence < LAYA_CONFIDENCE_MIN || chosenProb < LAYA_PROBABILITY_MIN) {
-    log.info('Auto agent route: recommendation', {
+  if (
+    answer.confidence < DECISION_CONFIDENCE_MIN ||
+    chosenProb < DECISION_PROBABILITY_MIN
+  ) {
+    log.info('Auto agent route: stay (low confidence)', {
       conversationId: conversation.id,
-      decision: 'stay_low_confidence',
-      recommendedAgent: chosen.name,
-      recommendedWorkspaceId: chosen.workspace_id,
       currentAgent: current?.name ?? fromWorkspaceId,
+      suggestedAgent: chosen.name,
       confidence: answer.confidence,
       probability: chosenProb,
-      thresholds: {
-        confidenceMin: LAYA_CONFIDENCE_MIN,
-        probabilityMin: LAYA_PROBABILITY_MIN,
-      },
-      probabilities: probabilitiesByName,
     });
     return stay('low_confidence');
   }
@@ -247,16 +307,12 @@ export async function applyAutoAgentRoute(input: {
     display_name: conversation.display_name ?? undefined,
   });
 
-  log.info('Auto agent route: recommendation', {
+  log.info('Auto agent route: switch', {
     conversationId: conversation.id,
-    decision: 'switch',
     fromAgent: current?.name ?? fromWorkspaceId,
-    fromWorkspaceId,
-    recommendedAgent: chosen.name,
-    recommendedWorkspaceId: chosen.workspace_id,
+    toAgent: chosen.name,
     confidence: answer.confidence,
     probability: chosenProb,
-    probabilities: probabilitiesByName,
   });
 
   return {

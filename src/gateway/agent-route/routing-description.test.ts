@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DECISION_OPTION_TOKEN_LIMIT,
+  DECISION_OPTIONS_TOTAL_LIMIT,
+  DECISION_ROUTING_BLURB_CHARS,
+} from '../../config.js';
+import {
   buildRoutingDescription,
-  clampToLayaTokens,
-  estimateLayaTokens,
-  formatLayaOptionCriteria,
-  LAYA_OPTION_TOKEN_LIMIT,
-  LAYA_OPTIONS_TOTAL_LIMIT,
+  clampToDecisionTokens,
+  estimateDecisionTokens,
+  formatOptionCriteria,
   MASTER_ROUTING_DESCRIPTION,
   perOptionTokenBudget,
   truncateRoutingBlurb,
@@ -13,9 +16,11 @@ import {
 import type { GatewayWorkspace } from '../types.js';
 
 describe('routing-description', () => {
-  it('truncates long blurbs', () => {
-    const long = 'x'.repeat(200);
-    expect(truncateRoutingBlurb(long).length).toBeLessThanOrEqual(120);
+  it('truncates long blurbs to the configured routing blurb size', () => {
+    const long = 'x'.repeat(DECISION_ROUTING_BLURB_CHARS + 500);
+    const out = truncateRoutingBlurb(long);
+    expect(out.length).toBeLessThanOrEqual(DECISION_ROUTING_BLURB_CHARS);
+    expect(out.endsWith('…')).toBe(true);
   });
 
   it('builds master description', () => {
@@ -47,7 +52,27 @@ describe('routing-description', () => {
     expect(d.toLowerCase()).toContain('hiring');
   });
 
-  it('keeps Laya option criteria under per-option and shared budgets', () => {
+  it('skips title-only H1 and prefers You-are role line for specialty', () => {
+    const d = buildRoutingDescription({
+      name: 'SoloAssistant',
+      files: [
+        {
+          path: 'CLAUDE.local.md',
+          content:
+            '# SoloAssistant\n\nYou are **SoloAssistant**, a business operations assistant for a solopreneur.\n\n' +
+            '## Your role\n\n' +
+            '- **Invoicing** — draft and send invoices.\n' +
+            '- **Clients / contacts** — create and look up client records.\n' +
+            '- **Payments** — check paid vs unpaid.\n',
+        },
+      ],
+    });
+    expect(d.toLowerCase()).toContain('contact');
+    expect(d.toLowerCase()).toContain('invoicing');
+    expect(d).not.toBe('SoloAssistant — SoloAssistant');
+  });
+
+  it('keeps option criteria under per-option and shared budgets', () => {
     const agent = {
       workspace_id: 'ws-deadfc926889e3db',
       name: 'MasterAgent',
@@ -58,10 +83,12 @@ describe('routing-description', () => {
     } as GatewayWorkspace;
 
     const budget = perOptionTokenBudget(5);
-    const criteria = formatLayaOptionCriteria(agent, true, budget);
-    expect(estimateLayaTokens(criteria)).toBeLessThanOrEqual(LAYA_OPTION_TOKEN_LIMIT);
-    expect(estimateLayaTokens(criteria)).toBeLessThanOrEqual(budget);
-    expect(estimateLayaTokens(clampToLayaTokens('word '.repeat(80), 20))).toBeLessThanOrEqual(20);
-    expect(perOptionTokenBudget(8) * 8).toBeLessThanOrEqual(LAYA_OPTIONS_TOTAL_LIMIT);
+    const criteria = formatOptionCriteria(agent, true, budget);
+    expect(estimateDecisionTokens(criteria)).toBeLessThanOrEqual(DECISION_OPTION_TOKEN_LIMIT);
+    expect(estimateDecisionTokens(criteria)).toBeLessThanOrEqual(budget);
+    expect(estimateDecisionTokens(clampToDecisionTokens('word '.repeat(80), 20))).toBeLessThanOrEqual(
+      20,
+    );
+    expect(perOptionTokenBudget(8) * 8).toBeLessThanOrEqual(DECISION_OPTIONS_TOTAL_LIMIT);
   });
 });

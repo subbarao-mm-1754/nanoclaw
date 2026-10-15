@@ -7,6 +7,10 @@ import { AUTO_AGENT_ROUTE } from '../config.js';
 import { log } from '../log.js';
 import { platformMessageIdFromSession } from '../session-message-id.js';
 import { labelOutboundText } from './agent-route/auto-route.js';
+import {
+  extractContainerLocalMcpOAuthUrls,
+  rewriteContainerLocalMcpAuthText,
+} from './integrations/mcp-auth-guard.js';
 import { getConversation } from './store/conversations.js';
 import { getWorkspace } from './store/workspaces.js';
 import type { CustomerMessage } from './types.js';
@@ -65,8 +69,39 @@ export async function deliverOutboundMessage(
     (opts?.agentWorkspaceId ? getWorkspace(opts.agentWorkspaceId) : null) ??
     (conversation ? getWorkspace(conversation.workspace_id) : null);
   const agentName = opts?.agentName ?? workspace?.name ?? null;
+
+  // Safety net: Claude/container MCP OAuth uses localhost:PORT/callback. Those
+  // links are useless in Cliq — rewrite to Gateway-owned authorize URLs.
+  let deliveryContent = rawContent;
+  if (
+    workspace?.owner_user_id &&
+    deliveryContent &&
+    typeof deliveryContent === 'object' &&
+    typeof (deliveryContent as { text?: unknown }).text === 'string'
+  ) {
+    const text = (deliveryContent as { text: string }).text;
+    if (extractContainerLocalMcpOAuthUrls(text).length > 0) {
+      try {
+        const rewritten = await rewriteContainerLocalMcpAuthText({
+          text,
+          userId: workspace.owner_user_id,
+          workspaceId: workspace.workspace_id,
+        });
+        if (rewritten.rewritten) {
+          deliveryContent = { ...(deliveryContent as object), text: rewritten.text };
+        }
+      } catch (err) {
+        log.warn('Failed rewriting container-local MCP OAuth outbound', {
+          messageId: message.id,
+          workspaceId: workspace.workspace_id,
+          err,
+        });
+      }
+    }
+  }
+
   const content = contentForChannelDelivery(
-    rawContent,
+    deliveryContent,
     agentGroupId,
     agentName,
     message.channel_type,

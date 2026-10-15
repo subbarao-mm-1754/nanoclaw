@@ -89,6 +89,106 @@ function oauthRedirectUri(): string {
   return `${GATEWAY_PUBLIC_URL.replace(/\/$/, '')}/v1/integrations/oauth/callback`;
 }
 
+/** Notify every channel conversation currently bound to this workspace. */
+async function notifyWorkspaceChannels(workspaceId: string, text: string): Promise<void> {
+  try {
+    const { listConversationsForWorkspace } = await import('../store/conversations.js');
+    const { getChannelAdapter } = await import('../../channels/channel-registry.js');
+    const convs = listConversationsForWorkspace(workspaceId);
+    for (const conv of convs) {
+      const adapter = getChannelAdapter(conv.channel_type);
+      if (!adapter) continue;
+      try {
+        await adapter.deliver(conv.platform_id, conv.thread_id, {
+          kind: 'chat',
+          content: { text },
+        });
+      } catch (err) {
+        log.warn('Failed notifying conversation after MCP OAuth', {
+          conversationId: conv.id,
+          err,
+        });
+      }
+    }
+  } catch (err) {
+    log.warn('notifyWorkspaceChannels failed', { workspaceId, err });
+  }
+}
+
+/**
+ * Rematerialize workspace MCP config (OneCLI placeholder headers) and wake the
+ * agent with [mcp-auth-ready]. Do NOT kill containers — conversation resume
+ * stays intact; the agent-runner ends the open SDK query so MCP reconnects.
+ */
+async function refreshWorkspaceAfterMcpAuth(
+  workspaceId: string,
+  opts?: { mcpUrl?: string | null; mcpServerName?: string | null },
+): Promise<void> {
+  try {
+    const { invalidateWorkerWorkspaceCache, ensureWorkspaceOnWorker } = await import(
+      '../agent-service.js'
+    );
+    invalidateWorkerWorkspaceCache(workspaceId);
+    await ensureWorkspaceOnWorker(workspaceId);
+  } catch (err) {
+    log.warn('Failed to rematerialize workspace after MCP OAuth', { workspaceId, err });
+  }
+  await enqueueMcpAuthReadyForWorkspace(workspaceId, opts);
+}
+
+/** Wake the bound agent so it reconnects MCP and retries tools (no container kill). */
+export async function enqueueMcpAuthReadyForWorkspace(
+  workspaceId: string,
+  opts?: { mcpUrl?: string | null; mcpServerName?: string | null },
+): Promise<void> {
+  try {
+    const { listConversationsForWorkspace } = await import('../store/conversations.js');
+    const { enqueueInboundMessage } = await import('../store/messages.js');
+    const { generateId } = await import('../auth.js');
+    const server = opts?.mcpServerName?.trim() || 'remote MCP';
+    const urlLine = opts?.mcpUrl ? `URL: ${opts.mcpUrl}` : null;
+    const text = [
+      `[mcp-auth-ready] Remote MCP authorized for this agent (${server}).`,
+      urlLine,
+      'Credentials are in OneCLI and will be injected on the next MCP connect.',
+      'Retry the real MCP tools for the user\'s pending request now.',
+      'Do NOT call authenticate / complete_authentication.',
+      'Do NOT invent or paste localhost OAuth /callback links.',
+      'Do NOT call request_mcp_auth again unless tools still return 401/403.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const convs = listConversationsForWorkspace(workspaceId);
+    const ts = new Date().toISOString();
+    for (const conv of convs) {
+      enqueueInboundMessage(
+        {
+          id: generateId('msg'),
+          channel_type: conv.channel_type,
+          platform_id: conv.platform_id,
+          thread_id: conv.thread_id,
+          kind: 'chat',
+          content: { text },
+          sender_id: 'system:mcp-auth',
+          sender_display_name: 'MCP auth',
+          timestamp: ts,
+        },
+        conv.id,
+      );
+    }
+    if (convs.length > 0) {
+      log.info('Enqueued mcp-auth-ready inbound', {
+        workspaceId,
+        conversations: convs.length,
+        mcpServerName: opts?.mcpServerName ?? null,
+      });
+    }
+  } catch (err) {
+    log.warn('Failed to enqueue mcp-auth-ready inbound', { workspaceId, err });
+  }
+}
+
 function secretName(connection: OAuthConnection): string {
   return `gateway-${connection.user_id.slice(0, 8)}-${connection.provider}`;
 }
@@ -111,14 +211,17 @@ function mcpUrlsLikelySame(a: string, b: string): boolean {
   }
 }
 
-/** True when the user already has a usable OAuth connection for this MCP/provider. */
+/** True when the user already has a recoverable OAuth connection for this MCP/provider. */
 export function findReusableUserConnection(
   userId: string,
   provider: string,
   mcpUrl?: string | null,
 ): OAuthConnection | null {
+  // Include `error`: OneCLI vault resets mark connections error while refresh_token
+  // is still valid. ensureWorkspaceIntegrations / recoverConnectionForOnecli heal them.
   const usable = (c: OAuthConnection): boolean =>
-    c.status === 'connected' && Boolean(c.refresh_token || accessTokenFresh(c));
+    (c.status === 'connected' || c.status === 'error') &&
+    Boolean(c.refresh_token || accessTokenFresh(c));
 
   const byProvider = getConnectionForUserProvider(userId, provider);
   if (byProvider && usable(byProvider)) return byProvider;
@@ -129,6 +232,52 @@ export function findReusableUserConnection(
     if (c.mcp_url && mcpUrlsLikelySame(c.mcp_url, mcpUrl)) return c;
   }
   return null;
+}
+
+/**
+ * Refresh (if needed) and sync access token into OneCLI.
+ * Recovers `error` connections after vault resets / stale secret ids.
+ */
+export async function recoverConnectionForOnecli(
+  connection: OAuthConnection,
+): Promise<OAuthConnection> {
+  if (isChannelOAuthProvider(connection.provider)) {
+    return connection;
+  }
+  if (!connection.refresh_token && !accessTokenFresh(connection)) {
+    throw new IntegrationError('Connection has no refresh token to recover', 400);
+  }
+
+  let current = connection;
+  // Always refresh when status is error so OneCLI gets a token we know is valid,
+  // even if access_token_expires_at still looks fresh.
+  const needsRefresh = current.status === 'error' || !accessTokenFresh(current);
+  if (needsRefresh) {
+    if (!current.refresh_token) {
+      throw new IntegrationError('Connection has no refresh token to recover', 400);
+    }
+    if (current.registration_id) {
+      const registration = getRegistration(current.registration_id);
+      if (!registration) {
+        throw new IntegrationError('OAuth registration missing for connection', 400);
+      }
+      const tokens = await refreshAccessToken({
+        registration: registrationToClient(registration),
+        refreshToken: current.refresh_token,
+        resource: current.resource,
+      });
+      current = applyTokenSet(current.id, tokens, { keepRefreshIfMissing: true });
+    } else {
+      const provider = getOAuthProvider(current.provider);
+      if (!provider) {
+        throw new IntegrationError(`Unknown OAuth provider: ${current.provider}`, 404);
+      }
+      const tokens = await provider.refresh(current.refresh_token);
+      current = applyTokenSet(current.id, tokens, { keepRefreshIfMissing: true });
+    }
+  }
+
+  return syncConnectionToOnecli(current);
 }
 
 async function attachExistingConnectionToContext(
@@ -384,23 +533,46 @@ export async function startOAuthConnect(input: {
       discovery.canonicalMcpUrl,
     );
     if (reusable) {
-      const current = await attachExistingConnectionToContext(reusable, {
-        workspaceId: input.workspaceId,
-        buildJobId: input.buildJobId,
-        mcpUrl: discovery.canonicalMcpUrl,
-        mcpServerName: input.mcpServerName ?? reusable.mcp_server_name,
-        registrationId: registration.id,
-        resource: discovery.resource.resource,
-      });
-      return {
-        authorize_url: null,
-        reused: true,
-        connection_id: current.id,
-        state: null,
-        registration_id: registration.id,
-        provider,
-        mcp_url: discovery.canonicalMcpUrl,
-      };
+      try {
+        const synced = await recoverConnectionForOnecli(reusable);
+        const current = await attachExistingConnectionToContext(synced, {
+          workspaceId: input.workspaceId,
+          buildJobId: input.buildJobId,
+          mcpUrl: discovery.canonicalMcpUrl,
+          mcpServerName: input.mcpServerName ?? reusable.mcp_server_name,
+          registrationId: registration.id,
+          resource: discovery.resource.resource,
+        });
+        if (input.workspaceId && current.onecli_secret_id) {
+          const workspace = getWorkspace(input.workspaceId);
+          if (workspace) {
+            try {
+              await assignSecretToAgent(
+                workspace.agent_group_id,
+                current.onecli_secret_id,
+                workspace.name,
+              );
+            } catch (err) {
+              log.warn('OneCLI agent secret assign deferred after MCP reuse', { err });
+            }
+          }
+        }
+        return {
+          authorize_url: null,
+          reused: true,
+          connection_id: current.id,
+          state: null,
+          registration_id: registration.id,
+          provider,
+          mcp_url: discovery.canonicalMcpUrl,
+        };
+      } catch (err) {
+        log.warn('Reusable MCP connection recovery failed; starting fresh OAuth', {
+          connectionId: reusable.id,
+          err,
+        });
+        // Fall through to a new authorize URL.
+      }
     }
 
     const connection = upsertPendingConnection(input.userId, provider, {
@@ -607,6 +779,10 @@ export async function handleOAuthCallback(input: {
               log.warn('OneCLI agent secret assign deferred', { err });
             }
           }
+          await refreshWorkspaceAfterMcpAuth(job.result_workspace_id, {
+            mcpUrl: updated.mcp_url,
+            mcpServerName: updated.mcp_server_name,
+          });
         } else if (job.preview_workspace_id && job.preview_agent_group_id) {
           workspaceId = job.preview_workspace_id;
           bindWorkspaceIntegration(job.preview_workspace_id, updated.id);
@@ -622,6 +798,10 @@ export async function handleOAuthCallback(input: {
               log.warn('OneCLI preview secret assign deferred', { err });
             }
           }
+          await refreshWorkspaceAfterMcpAuth(job.preview_workspace_id, {
+            mcpUrl: updated.mcp_url,
+            mcpServerName: updated.mcp_server_name,
+          });
         }
 
         // Notify Cliq / delivery channel
@@ -636,7 +816,7 @@ export async function handleOAuthCallback(input: {
                   'Remote MCP authorized successfully.',
                   updated.mcp_url ? `URL: ${updated.mcp_url}` : null,
                   job.result_workspace_id
-                    ? 'It is attached to your agent — send a message to use it.'
+                    ? 'It is attached to your agent — the agent was notified to reconnect and continue.'
                     : job.preview_workspace_id
                       ? 'It is attached to the edit draft. `/test` can use it now; `/save` applies it to the live agent. This chat’s bound agent is unchanged.'
                       : 'Continue the build in this chat. When the agent is created, this MCP will be attached automatically.',
@@ -664,16 +844,49 @@ export async function handleOAuthCallback(input: {
             workspace.name,
           );
         } catch (err) {
-          log.warn('OneCLI agent secret assign deferred until next agent run', {
+          // Without a grant, OneCLI leaves Bearer onecli-managed unreplaced → MCP 401.
+          // Keep connection connected (tokens are valid); ensureWorkspaceIntegrations retries.
+          log.error('OneCLI agent secret grant failed after MCP OAuth', {
             workspaceId,
+            agentGroupId: workspace.agent_group_id,
+            secretId: updated.onecli_secret_id,
             err,
           });
+          await notifyWorkspaceChannels(
+            workspaceId,
+            [
+              'Remote MCP OAuth completed, but granting the credential to this agent failed.',
+              'Send another message to retry grant, or ask the agent to call request_mcp_auth again.',
+              err instanceof Error ? `Detail: ${err.message}` : String(err),
+            ].join('\n'),
+          );
         }
+      }
+      await refreshWorkspaceAfterMcpAuth(workspaceId, {
+        mcpUrl: updated.mcp_url,
+        mcpServerName: updated.mcp_server_name,
+      });
+      if (workspace?.agent_group_id && updated.onecli_secret_id) {
+        // Only claim success when grant path was attempted (errors already notified).
+        await notifyWorkspaceChannels(
+          workspaceId,
+          [
+            'Remote MCP authorized successfully.',
+            updated.mcp_url ? `URL: ${updated.mcp_url}` : null,
+            'Credentials are in OneCLI — the agent was notified to reconnect and continue your request.',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
       }
     } else if (workspaceId && oauthState.build_job_id && oauthState.workspace_id) {
       // already handled above when result_workspace set; if workspace_id was also set:
       bindWorkspaceIntegration(workspaceId, updated.id);
       await attachRemoteMcpToWorkspace(workspaceId, updated);
+      await refreshWorkspaceAfterMcpAuth(workspaceId, {
+        mcpUrl: updated.mcp_url,
+        mcpServerName: updated.mcp_server_name,
+      });
     }
 
     return {
@@ -786,13 +999,20 @@ export async function attachRemoteMcpToWorkspace(
     /zohomcp/i.test(connection.mcp_url) ||
     /zohomcp/i.test(connection.provider);
 
+  const authPolicy =
+    'Auth is injected by OneCLI — do not paste tokens. ' +
+    'If remote MCP tools fail with 401/403/auth errors, call mcp__nanoclaw__request_mcp_auth (do not invent OAuth URLs). ' +
+    'Never share localhost OAuth, /callback, or mcp-client authorize links — they mislead users and do not work. ' +
+    'Only the Gateway may send authorize links to chat.';
+
   const defaultInstructions = isZohoHosted
     ? [
-        `Zoho-hosted MCP (${connection.mcp_url}). Auth is injected by OneCLI — do not paste tokens.`,
+        `Zoho-hosted MCP (${connection.mcp_url}). ${authPolicy}`,
         'For contacts, CRM records, mail, and other Zoho data, call the zoho-hosted MCP tools — do not guess from general knowledge.',
       ].join(' ')
-    : `Remote MCP (${connection.mcp_url}). Auth is injected by OneCLI — do not paste tokens.`;
+    : `Remote MCP (${connection.mcp_url}). ${authPolicy}`;
 
+  // Refresh auth policy on every attach so older agents stop posting container OAuth URLs.
   const nextEntry: McpServerConfig = {
     type: 'http',
     url: connection.mcp_url,
@@ -800,7 +1020,7 @@ export async function attachRemoteMcpToWorkspace(
       ...(prev && 'headers' in prev ? prev.headers : {}),
       Authorization: `Bearer ${PLACEHOLDER_BEARER}`,
     },
-    instructions: prev?.instructions ?? defaultInstructions,
+    instructions: defaultInstructions,
   };
 
   if (
@@ -827,37 +1047,27 @@ export async function attachRemoteMcpToWorkspace(
 /**
  * Ensure access tokens for a workspace are fresh in OneCLI and assigned to
  * the agent. Call before / during worker prepare.
+ *
+ * Also recovers `error` connections (e.g. OneCLI secret deleted after vault
+ * reset). Skipping those left agents with `Bearer onecli-managed` but no vault
+ * secret — Claude then started container-local OAuth and posted localhost
+ * authorize links into Cliq.
  */
 export async function ensureWorkspaceIntegrations(workspaceId: string): Promise<void> {
   const workspace = getWorkspace(workspaceId);
   if (!workspace) return;
 
   const connections = listConnectionsForWorkspace(workspaceId).filter(
-    (c) => c.status === 'connected' && c.refresh_token && !isChannelOAuthProvider(c.provider),
+    (c) =>
+      (c.status === 'connected' || c.status === 'error') &&
+      c.refresh_token &&
+      !isChannelOAuthProvider(c.provider),
   );
   if (connections.length === 0) return;
 
   for (const connection of connections) {
     try {
-      let current = connection;
-      if (!accessTokenFresh(current)) {
-        if (current.registration_id) {
-          const registration = getRegistration(current.registration_id);
-          if (!registration || !current.refresh_token) continue;
-          const tokens = await refreshAccessToken({
-            registration: registrationToClient(registration),
-            refreshToken: current.refresh_token,
-            resource: current.resource,
-          });
-          current = applyTokenSet(current.id, tokens, { keepRefreshIfMissing: true });
-        } else {
-          const provider = getOAuthProvider(current.provider);
-          if (!provider || !current.refresh_token) continue;
-          const tokens = await provider.refresh(current.refresh_token);
-          current = applyTokenSet(current.id, tokens, { keepRefreshIfMissing: true });
-        }
-      }
-      current = await syncConnectionToOnecli(current);
+      const current = await recoverConnectionForOnecli(connection);
       if (current.mcp_url) {
         await attachRemoteMcpToWorkspace(workspaceId, current);
       }

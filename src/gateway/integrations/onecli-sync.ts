@@ -2,7 +2,11 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 import { log } from '../../log.js';
-import { ensureAgentV1 } from '../../onecli-v1.js';
+import {
+  ensureAgentV1,
+  findAgentIdByIdentifierV1,
+  grantSecretToAgentV1,
+} from '../../onecli-v1.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -10,21 +14,12 @@ export async function ensureOnecliAgent(input: {
   name: string;
   identifier: string;
 }): Promise<void> {
+  // ensureAgentV1 creates the agent and grants all vault secrets (Anthropic +
+  // MCP). OneCLI 1.7+ removed secret-mode "all"; grants are required.
   await ensureAgentV1({
     name: input.name,
     identifier: input.identifier,
   });
-  // ensureAgent creates agents in selective mode with an empty allow-list.
-  // Gateway user agents need Anthropic + any vault secrets with matching host
-  // patterns (incl. remote MCP). Flip to "all" immediately.
-  const agentId = await findAgentIdByIdentifier(input.identifier);
-  if (agentId) {
-    await setAgentSecretModeAll(agentId);
-  }
-}
-
-async function setAgentSecretModeAll(agentId: string): Promise<void> {
-  await runOnecli(['agents', 'set-secret-mode', '--id', agentId, '--mode', 'all']);
 }
 
 export interface OnecliSecretSpec {
@@ -72,32 +67,16 @@ function extractList(payload: unknown): Array<Record<string, unknown>> {
   return [];
 }
 
-/**
- * Create or update a OneCLI generic secret that injects the current access token.
- * Returns the OneCLI secret id.
- */
-export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<string> {
-  const headerName = spec.headerName ?? 'Authorization';
-  const valueFormat = spec.valueFormat ?? 'Bearer {value}';
+function isOnecliNotFound(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /"code"\s*:\s*"NOT_FOUND"|error"\s*:\s*"Not Found"|NOT_FOUND/i.test(message);
+}
 
-  if (spec.existingSecretId) {
-    await runOnecli([
-      'secrets',
-      'update',
-      '--id',
-      spec.existingSecretId,
-      '--value',
-      spec.value,
-      '--host-pattern',
-      spec.hostPattern,
-      '--header-name',
-      headerName,
-      '--value-format',
-      valueFormat,
-    ]);
-    return spec.existingSecretId;
-  }
-
+async function createAccessTokenSecret(
+  spec: OnecliSecretSpec,
+  headerName: string,
+  valueFormat: string,
+): Promise<string> {
   const created = await runOnecli([
     'secrets',
     'create',
@@ -121,9 +100,53 @@ export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<s
   return id;
 }
 
+/**
+ * Create or update a OneCLI generic secret that injects the current access token.
+ * Returns the OneCLI secret id (existing id on update, or a **new** id on create /
+ * recreate-after-NOT_FOUND). Caller should persist the returned id.
+ */
+export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<string> {
+  const headerName = spec.headerName ?? 'Authorization';
+  const valueFormat = spec.valueFormat ?? 'Bearer {value}';
+
+  if (spec.existingSecretId) {
+    try {
+      await runOnecli([
+        'secrets',
+        'update',
+        '--id',
+        spec.existingSecretId,
+        '--value',
+        spec.value,
+        '--host-pattern',
+        spec.hostPattern,
+        '--header-name',
+        headerName,
+        '--value-format',
+        valueFormat,
+      ]);
+      return spec.existingSecretId;
+    } catch (err) {
+      if (!isOnecliNotFound(err)) throw err;
+      // Vault was reset / secret deleted — create a fresh secret (new id).
+      log.warn('OneCLI secret not found; creating a new one', {
+        existingSecretId: spec.existingSecretId,
+        name: spec.name,
+        hostPattern: spec.hostPattern,
+      });
+    }
+  }
+
+  return createAccessTokenSecret(spec, headerName, valueFormat);
+}
+
 export async function findAgentIdByIdentifier(identifier: string): Promise<string | null> {
-  // Default list page is small (~20); installs with many preview/draft agents
-  // otherwise miss the real agent and report "still missing after ensureAgent".
+  // Prefer HTTP (max=500). CLI list page is small and misses many draft agents.
+  try {
+    return await findAgentIdByIdentifierV1(identifier);
+  } catch (err) {
+    log.warn('OneCLI HTTP agent lookup failed; falling back to CLI', { err });
+  }
   const listed = await runOnecli(['agents', 'list', '--max', '500']);
   const agents = extractList(listed);
   for (const agent of agents) {
@@ -135,11 +158,11 @@ export async function findAgentIdByIdentifier(identifier: string): Promise<strin
 }
 
 /**
- * Ensure a secret is usable by a Gateway agent.
+ * Ensure a secret is usable by a Gateway agent via OneCLI grants.
  *
- * Prefer secret-mode `all` over `set-secrets`: OneCLI's `set-secrets` forces
- * selective mode and replaces the allow-list, which previously wiped Anthropic
- * access when we only assigned the Zoho MCP secret after OAuth.
+ * OneCLI 1.7+ removed secret-mode / set-secrets; use PUT
+ * /v1/agents/:id/grants/secrets/:secretId. ensureAgentV1 also grants the full
+ * vault (incl. Anthropic) so MCP assignment cannot strand Claude auth.
  *
  * Creates the OneCLI agent via ensureAgent when missing.
  */
@@ -164,13 +187,10 @@ export async function assignSecretToAgent(
     );
   }
 
-  // Mode "all" picks up this secret (and Anthropic) by host pattern — no
-  // selective allow-list to maintain. Avoid set-secrets: it flips the agent
-  // back to selective and can drop unrelated vault secrets.
-  log.info('Ensuring OneCLI agent secret mode all for gateway MCP access', {
+  log.info('Granting OneCLI vault secret to gateway agent', {
     agentId,
     agentIdentifier,
     secretId,
   });
-  await setAgentSecretModeAll(agentId);
+  await grantSecretToAgentV1(agentId, secretId);
 }

@@ -5,12 +5,25 @@
  * /api/agents and /api/container-config paths on the dashboard port.
  * Community 2.x serves those on the API (10256) under /v1.
  */
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 import { ONECLI_API_KEY, ONECLI_URL } from './config.js';
 import { log } from './log.js';
+
+/** True when ONECLI_URL points at this machine (loopback). */
+export function isLocalOnecliUrl(url = ONECLI_URL): boolean {
+  const raw = (url ?? '').trim();
+  if (!raw) return true;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '0.0.0.0';
+  } catch {
+    return /^(127\.0\.0\.1|localhost|::1)([:/]|$)/i.test(raw);
+  }
+}
 
 export class OnecliV1Error extends Error {
   constructor(
@@ -60,13 +73,41 @@ function authHeaders(): Record<string, string> {
   return headers;
 }
 
-/** Compose DNS `gateway` is not visible to NanoClaw agent containers on the host runtime. */
-function rewriteLocalProxyEnv(env: Record<string, string>): Record<string, string> {
+/**
+ * Shape proxy env for how the agent will reach OneCLI:
+ * - Local + join compose network → use Compose DNS `gateway:10255` (OneCLI stays on 127.0.0.1).
+ * - Remote OneCLI → leave container-config as returned (already a reachable host).
+ */
+function rewriteProxyEnvForAgent(
+  env: Record<string, string>,
+  mode: 'compose-network' | 'as-is',
+): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
-    out[key] = value.replace(/@gateway:10255\b/g, '@host.docker.internal:10255');
+    if (mode === 'compose-network') {
+      out[key] = value.replace(/@host\.docker\.internal:10255\b/g, '@gateway:10255');
+    } else {
+      out[key] = value;
+    }
   }
   return out;
+}
+
+/** Compose project network (default `onecli_onecli`). Override with ONECLI_AGENT_NETWORK. */
+export function resolveOnecliAgentNetwork(): string | null {
+  const fromEnv = (process.env.ONECLI_AGENT_NETWORK ?? '').trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const out = execFileSync(
+      'docker',
+      ['inspect', 'onecli-gateway', '--format', '{{range $k, $_ := .NetworkSettings.Networks}}{{$k}}{{end}}'],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+    if (out) return out.split(/\s+/)[0] ?? null;
+  } catch {
+    // fall through
+  }
+  return 'onecli_onecli';
 }
 
 async function v1Fetch(method: string, pathname: string, body?: unknown): Promise<Response> {
@@ -80,6 +121,85 @@ async function v1Fetch(method: string, pathname: string, body?: unknown): Promis
   return res;
 }
 
+interface OnecliAgentV1 {
+  id: string;
+  name?: string;
+  identifier?: string;
+}
+
+interface OnecliSecretV1 {
+  id: string;
+  name?: string;
+  type?: string;
+  hostPattern?: string | null;
+}
+
+function extractList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.data)) return obj.data as T[];
+  }
+  return [];
+}
+
+/** List vault secrets (Community 2.x grants model). */
+export async function listSecretsV1(): Promise<OnecliSecretV1[]> {
+  const res = await v1Fetch('GET', '/v1/secrets');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new OnecliV1Error(
+      `OneCLI list secrets failed (${res.status}) ${text.slice(0, 400)}`,
+      res.status,
+      `${onecliApiBase()}/v1/secrets`,
+    );
+  }
+  return extractList<OnecliSecretV1>(await res.json());
+}
+
+export async function findAgentIdByIdentifierV1(identifier: string): Promise<string | null> {
+  const res = await v1Fetch('GET', '/v1/agents?max=500');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new OnecliV1Error(
+      `OneCLI list agents failed (${res.status}) ${text.slice(0, 400)}`,
+      res.status,
+      `${onecliApiBase()}/v1/agents`,
+    );
+  }
+  const agents = extractList<OnecliAgentV1>(await res.json());
+  for (const agent of agents) {
+    if (agent.identifier === identifier || agent.id === identifier) {
+      return typeof agent.id === 'string' ? agent.id : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Grant a vault secret to an agent (OneCLI 1.7+).
+ * Replaces retired `set-secret-mode all` / `agents set-secrets`.
+ */
+export async function grantSecretToAgentV1(agentId: string, secretId: string): Promise<void> {
+  const res = await v1Fetch('PUT', `/v1/agents/${agentId}/grants/secrets/${secretId}`, {});
+  if (res.ok || res.status === 409) return;
+  const text = await res.text().catch(() => '');
+  throw new OnecliV1Error(
+    `OneCLI grant secret failed (${res.status}) ${text.slice(0, 400)}`,
+    res.status,
+    `${onecliApiBase()}/v1/agents/${agentId}/grants/secrets/${secretId}`,
+  );
+}
+
+/** Grant every vault secret to the agent (Anthropic + MCP/generic hosts). */
+export async function grantAllVaultSecretsToAgentV1(agentId: string): Promise<void> {
+  const secrets = await listSecretsV1();
+  for (const secret of secrets) {
+    if (!secret.id) continue;
+    await grantSecretToAgentV1(agentId, secret.id);
+  }
+}
+
 export async function ensureAgentV1(input: { name: string; identifier: string }): Promise<void> {
   if (!ONECLI_API_KEY) {
     throw new OnecliV1Error(
@@ -90,13 +210,32 @@ export async function ensureAgentV1(input: { name: string; identifier: string })
     name: input.name,
     identifier: input.identifier,
   });
-  if (res.ok || res.status === 409) return;
-  const text = await res.text().catch(() => '');
-  throw new OnecliV1Error(
-    `OneCLI ensureAgent failed (${res.status}) ${text.slice(0, 400)}`,
-    res.status,
-    `${onecliApiBase()}/v1/agents`,
-  );
+  if (!res.ok && res.status !== 409) {
+    const text = await res.text().catch(() => '');
+    throw new OnecliV1Error(
+      `OneCLI ensureAgent failed (${res.status}) ${text.slice(0, 400)}`,
+      res.status,
+      `${onecliApiBase()}/v1/agents`,
+    );
+  }
+
+  // OneCLI 1.7+ agents use grants only (secret-mode "all" is Gone). Without
+  // explicit grants, Anthropic injection fails and the container retries forever.
+  try {
+    const agentId = await findAgentIdByIdentifierV1(input.identifier);
+    if (agentId) {
+      await grantAllVaultSecretsToAgentV1(agentId);
+    } else {
+      log.warn('OneCLI agent missing after ensure; cannot grant vault secrets', {
+        identifier: input.identifier,
+      });
+    }
+  } catch (err) {
+    log.warn('OneCLI vault secret grants failed after ensureAgent', {
+      identifier: input.identifier,
+      err,
+    });
+  }
 }
 
 function writeCaCertificate(caCertificate: string): string {
@@ -174,7 +313,19 @@ export async function applyContainerConfigV1(
     );
   }
   const config = (await res.json()) as ContainerConfigV1;
-  for (const [key, value] of Object.entries(rewriteLocalProxyEnv(config.env ?? {}))) {
+
+  // Local OneCLI: join its compose network and talk to `gateway:10255` so the
+  // credential proxy can stay bound to 127.0.0.1. Remote OneCLI: use the proxy
+  // host from container-config unchanged (works when the vault runs elsewhere).
+  const joinComposeNetwork = isLocalOnecliUrl();
+  const network = joinComposeNetwork ? resolveOnecliAgentNetwork() : null;
+  if (joinComposeNetwork && network) {
+    args.push('--network', network);
+    log.info('OneCLI local: attaching agent container to compose network', { network });
+  }
+
+  const proxyMode = joinComposeNetwork && network ? 'compose-network' : 'as-is';
+  for (const [key, value] of Object.entries(rewriteProxyEnvForAgent(config.env ?? {}, proxyMode))) {
     args.push('-e', `${key}=${value}`);
   }
   if (config.caCertificate && config.caCertificateContainerPath) {
@@ -189,7 +340,8 @@ export async function applyContainerConfigV1(
       }
     }
   }
-  if (addHostMapping && process.platform === 'linux') {
+  // host.docker.internal mapping only needed when not on the OneCLI network.
+  if (addHostMapping && !joinComposeNetwork && process.platform === 'linux') {
     args.push('--add-host', 'host.docker.internal:host-gateway');
   }
   return true;

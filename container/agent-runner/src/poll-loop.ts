@@ -9,11 +9,13 @@ import {
   extractRouting,
   categorizeMessage,
   isClearCommand,
+  isMcpAuthReadyMessage,
   isRunnerCommand,
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { clearMcpNeedsAuthCache } from './mcp-needs-auth-cache.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -137,6 +139,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+
+    // Fresh query after Gateway OAuth: drop Claude's sticky needs-auth skip cache.
+    if (messages.some((m) => isMcpAuthReadyMessage(m))) {
+      clearMcpNeedsAuthCache(log);
+    }
 
     const routing = extractRouting(messages);
 
@@ -350,8 +357,18 @@ async function processQuery(
         // the SDK never runs them. End the stream and leave the rows
         // pending; the outer loop handles them on next iteration via the
         // canonical command path + formatMessagesWithCommands.
-        if (pending.some((m) => isRunnerCommand(m))) {
-          log('Pending slash command — ending stream so outer loop can process');
+        //
+        // [mcp-auth-ready] also needs a fresh query: remote MCP status is
+        // sticky from the first init (`needs-auth`). Ending + resume keeps
+        // conversation history while MCP reconnects with OneCLI injection.
+        if (pending.some((m) => isRunnerCommand(m) || isMcpAuthReadyMessage(m))) {
+          const mcpReady = pending.some((m) => isMcpAuthReadyMessage(m));
+          if (mcpReady) clearMcpNeedsAuthCache(log);
+          log(
+            mcpReady
+              ? 'Pending mcp-auth-ready — ending stream so MCP can reconnect'
+              : 'Pending slash command — ending stream so outer loop can process',
+          );
           endedForCommand = true;
           query.end();
           return;
