@@ -116,11 +116,14 @@ async function notifyWorkspaceChannels(workspaceId: string, text: string): Promi
 }
 
 /**
- * Rematerialize workspace MCP config (OneCLI placeholder headers) and wake the
- * agent with [mcp-auth-ready]. Do NOT kill containers — conversation resume
- * stays intact; the agent-runner ends the open SDK query so MCP reconnects.
+ * Rematerialize workspace MCP config, stop warm session containers so the next
+ * wake rebuilds the MCP client from disk, then enqueue [mcp-auth-ready].
+ *
+ * Conversation DBs / continuation ids stay on disk — only the Docker process
+ * is recycled. Sticky Claude MCP `failed`/`needs-auth` cannot be fixed by
+ * ending the SDK query alone.
  */
-async function refreshWorkspaceAfterMcpAuth(
+export async function refreshWorkspaceAfterMcpAuth(
   workspaceId: string,
   opts?: { mcpUrl?: string | null; mcpServerName?: string | null },
 ): Promise<void> {
@@ -133,10 +136,38 @@ async function refreshWorkspaceAfterMcpAuth(
   } catch (err) {
     log.warn('Failed to rematerialize workspace after MCP OAuth', { workspaceId, err });
   }
+
+  try {
+    const { listConversationsForWorkspace } = await import('../store/conversations.js');
+    const { stopContainersOnWorker } = await import('../worker-client.js');
+    const sessionIds = [
+      ...new Set(
+        listConversationsForWorkspace(workspaceId)
+          .map((c) => c.session_id)
+          .filter((id): id is string => Boolean(id?.trim())),
+      ),
+    ];
+    if (sessionIds.length > 0) {
+      const result = await stopContainersOnWorker({
+        workspace_id: workspaceId,
+        session_ids: sessionIds,
+        reason: 'mcp-auth-reconnect',
+      });
+      log.info('Stopped workspace containers after MCP OAuth', {
+        workspaceId,
+        stopped: result.stopped.length,
+        skipped: result.skipped.length,
+      });
+    }
+  } catch (err) {
+    // Still wake the agent — cold spawn / next message may recover.
+    log.warn('Failed to stop containers after MCP OAuth', { workspaceId, err });
+  }
+
   await enqueueMcpAuthReadyForWorkspace(workspaceId, opts);
 }
 
-/** Wake the bound agent so it reconnects MCP and retries tools (no container kill). */
+/** Wake the bound agent so it reconnects MCP and retries tools after respawn. */
 export async function enqueueMcpAuthReadyForWorkspace(
   workspaceId: string,
   opts?: { mcpUrl?: string | null; mcpServerName?: string | null },

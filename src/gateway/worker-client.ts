@@ -157,6 +157,51 @@ export async function destroyWorkspaceOnWorker(input: {
   }
 }
 
+/**
+ * Stop session containers without deleting workspace disk.
+ * Used after MCP OAuth so the next wake gets a fresh MCP client.
+ */
+export async function stopContainersOnWorker(input: {
+  workspace_id?: string;
+  session_ids: string[];
+  reason?: string;
+}): Promise<{ stopped: string[]; skipped: string[] }> {
+  if (input.session_ids.length === 0) {
+    return { stopped: [], skipped: [] };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    const res = await fetch(`${GATEWAY_WORKER_URL}/v1/sessions/stop-containers`, {
+      method: 'POST',
+      headers: workerHeaders(),
+      body: JSON.stringify(input),
+      signal: controller.signal,
+    });
+
+    const text = await res.text();
+    let body: { stopped?: string[]; skipped?: string[]; error?: string };
+    try {
+      body = JSON.parse(text) as { stopped?: string[]; skipped?: string[]; error?: string };
+    } catch {
+      throw new Error(`Worker returned non-JSON (${res.status}): ${text.slice(0, 200)}`);
+    }
+
+    if (!res.ok) {
+      throw new Error(body.error || `Worker HTTP ${res.status}`);
+    }
+
+    return {
+      stopped: body.stopped ?? [],
+      skipped: body.skipped ?? [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export type {
   WorkerMemoryPatch,
   WorkerPrepareWorkspaceRequest,

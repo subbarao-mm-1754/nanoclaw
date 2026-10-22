@@ -4,12 +4,11 @@
  */
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { log } from '../../log.js';
-import { invalidateWorkerWorkspaceCache } from '../agent-service.js';
 import { getWorkspace } from '../store/workspaces.js';
 import type { ContainerConfigSnapshot, McpServerConfig } from '../../container-config.js';
 import {
-  enqueueMcpAuthReadyForWorkspace,
   IntegrationError,
+  refreshWorkspaceAfterMcpAuth,
   startOAuthConnect,
 } from './broker.js';
 import { suggestMcpServerName } from './mcp-url.js';
@@ -121,23 +120,16 @@ export async function handleMcpAuthRequest(input: {
       workspaceId: workspace.workspace_id,
     });
 
-    invalidateWorkerWorkspaceCache(workspace.workspace_id);
-
     if (result.reused) {
-      try {
-        const { ensureWorkspaceOnWorker } = await import('../agent-service.js');
-        await ensureWorkspaceOnWorker(workspace.workspace_id);
-      } catch (err) {
-        log.warn('mcp-auth reused: failed to rematerialize workspace', { err });
-      }
-      await enqueueMcpAuthReadyForWorkspace(workspace.workspace_id, {
+      await refreshWorkspaceAfterMcpAuth(workspace.workspace_id, {
         mcpUrl: result.mcp_url ?? mcpUrl,
         mcpServerName: serverName,
       });
       const message =
         'Remote MCP is authorized for this agent (OneCLI will inject credentials). ' +
-        'A [mcp-auth-ready] wake was queued — after MCP reconnects, retry the real tools ' +
-        '(not authenticate). Do not invent or share authorize links.';
+        'The agent container was recycled and a [mcp-auth-ready] wake was queued — ' +
+        'after MCP reconnects, retry the real tools (not authenticate). ' +
+        'Do not invent or share authorize links.';
       if (input.notify) {
         await notifyChannel(
           input.notify,

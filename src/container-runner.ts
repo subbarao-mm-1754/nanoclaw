@@ -280,6 +280,34 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
 }
 
 /**
+ * Stop a session container and wait until the process exits (or timeout).
+ * Returns true when a container was running. Used for MCP reconnect so the
+ * next wake cannot race a still-registered activeContainers entry.
+ */
+export async function stopContainerSession(
+  sessionId: string,
+  reason: string,
+  timeoutMs = 20_000,
+): Promise<boolean> {
+  const entry = activeContainers.get(sessionId);
+  if (!entry) return false;
+
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    entry.process.once('close', done);
+    killContainer(sessionId, reason);
+  });
+  return true;
+}
+
+/**
  * Resolve the provider name for a session:
  *
  *   sessions.agent_provider

@@ -199,3 +199,15 @@ export interface WorkerDestroyWorkspaceResponse {
   status: 'destroyed';
   container_killed: boolean;
 }
+
+/** Stop session containers without deleting workspace disk (MCP reconnect). */
+export interface WorkerStopContainersRequest {
+  workspace_id?: string;
+  session_ids: string[];
+  reason?: string;
+}
+
+export interface WorkerStopContainersResponse {
+  stopped: string[];
+  skipped: string[];
+}

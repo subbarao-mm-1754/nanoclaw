@@ -299,3 +299,29 @@ export function parseDestroyWorkspaceRequest(body: unknown): {
   }
   return { workspace_id: workspaceId, session_id: sessionId };
 }
+
+export function parseStopContainersRequest(body: unknown): {
+  workspace_id?: string;
+  session_ids: string[];
+  reason?: string;
+} {
+  const root = requireObject(body, 'body');
+  if (!Array.isArray(root.session_ids) || root.session_ids.length === 0) {
+    throw new WorkerValidationError('body.session_ids must be a non-empty array');
+  }
+  const sessionIds = root.session_ids.map((id, i) => {
+    if (typeof id !== 'string' || id.trim() === '') {
+      throw new WorkerValidationError(`body.session_ids[${i}] must be a non-empty string`);
+    }
+    return id.trim();
+  });
+  let workspaceId: string | undefined;
+  if (root.workspace_id !== undefined) {
+    workspaceId = requireString(root, 'workspace_id', 'body');
+  }
+  let reason: string | undefined;
+  if (root.reason !== undefined) {
+    reason = requireString(root, 'reason', 'body');
+  }
+  return { workspace_id: workspaceId, session_ids: sessionIds, reason };
+}

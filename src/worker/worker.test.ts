@@ -10,6 +10,7 @@ import {
   mergeAgentFiles,
   parsePrepareWorkspaceRequest,
   parseProcessMessageRequest,
+  parseStopContainersRequest,
   WorkerValidationError,
 } from './validate.js';
 import { materializeWorkspace } from './workspace-materializer.js';
@@ -35,6 +36,7 @@ vi.mock('../container-runner.js', () => ({
   onContainerExit: vi.fn(() => () => {}),
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
+  stopContainerSession: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('../config.js', async () => {
@@ -140,6 +142,23 @@ afterEach(async () => {
   stopAllCollectorsForTests();
   await stopWorkerServer();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+});
+
+describe('parseStopContainersRequest', () => {
+  it('accepts session_ids with optional workspace_id', () => {
+    const req = parseStopContainersRequest({
+      workspace_id: 'ws-1',
+      session_ids: ['sess-a', 'sess-b'],
+      reason: 'mcp-auth-reconnect',
+    });
+    expect(req.workspace_id).toBe('ws-1');
+    expect(req.session_ids).toEqual(['sess-a', 'sess-b']);
+    expect(req.reason).toBe('mcp-auth-reconnect');
+  });
+
+  it('rejects empty session_ids', () => {
+    expect(() => parseStopContainersRequest({ session_ids: [] })).toThrow(WorkerValidationError);
+  });
 });
 
 describe('parsePrepareWorkspaceRequest', () => {

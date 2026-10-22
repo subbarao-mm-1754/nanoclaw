@@ -72,6 +72,22 @@ function isOnecliNotFound(err: unknown): boolean {
   return /"code"\s*:\s*"NOT_FOUND"|error"\s*:\s*"Not Found"|NOT_FOUND/i.test(message);
 }
 
+/** Update failed in a way that usually means recreate (missing, corrupt, or OneCLI 5xx). */
+function shouldRecreateSecretAfterUpdateFailure(err: unknown): boolean {
+  if (isOnecliNotFound(err)) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    /Internal Server Error/i.test(message) ||
+    /"code"\s*:\s*"ERROR"/i.test(message) ||
+    /updating secret:/i.test(message) ||
+    /\b5\d\d\b/.test(message)
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function createAccessTokenSecret(
   spec: OnecliSecretSpec,
   headerName: string,
@@ -100,10 +116,33 @@ async function createAccessTokenSecret(
   return id;
 }
 
+async function updateAccessTokenSecret(
+  secretId: string,
+  spec: OnecliSecretSpec,
+  headerName: string,
+  valueFormat: string,
+): Promise<void> {
+  await runOnecli([
+    'secrets',
+    'update',
+    '--id',
+    secretId,
+    '--value',
+    spec.value,
+    '--host-pattern',
+    spec.hostPattern,
+    '--header-name',
+    headerName,
+    '--value-format',
+    valueFormat,
+  ]);
+}
+
 /**
  * Create or update a OneCLI generic secret that injects the current access token.
  * Returns the OneCLI secret id (existing id on update, or a **new** id on create /
- * recreate-after-NOT_FOUND). Caller should persist the returned id.
+ * recreate-after-NOT_FOUND / recreate-after-OneCLI 5xx). Caller should persist
+ * the returned id and re-grant it to the agent.
  */
 export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<string> {
   const headerName = spec.headerName ?? 'Authorization';
@@ -111,28 +150,30 @@ export async function upsertAccessTokenSecret(spec: OnecliSecretSpec): Promise<s
 
   if (spec.existingSecretId) {
     try {
-      await runOnecli([
-        'secrets',
-        'update',
-        '--id',
-        spec.existingSecretId,
-        '--value',
-        spec.value,
-        '--host-pattern',
-        spec.hostPattern,
-        '--header-name',
-        headerName,
-        '--value-format',
-        valueFormat,
-      ]);
+      await updateAccessTokenSecret(spec.existingSecretId, spec, headerName, valueFormat);
       return spec.existingSecretId;
     } catch (err) {
-      if (!isOnecliNotFound(err)) throw err;
-      // Vault was reset / secret deleted — create a fresh secret (new id).
-      log.warn('OneCLI secret not found; creating a new one', {
+      // OneCLI occasionally returns Internal Server Error on update even when
+      // the secret still lists; one short retry covers transient vault blips.
+      if (shouldRecreateSecretAfterUpdateFailure(err) && !isOnecliNotFound(err)) {
+        try {
+          await sleep(400);
+          await updateAccessTokenSecret(spec.existingSecretId, spec, headerName, valueFormat);
+          return spec.existingSecretId;
+        } catch (retryErr) {
+          err = retryErr;
+        }
+      }
+
+      if (!shouldRecreateSecretAfterUpdateFailure(err)) throw err;
+
+      // Vault reset, corrupt secret, or persistent OneCLI update failure —
+      // create a fresh secret (new id). Caller re-grants via assignSecretToAgent.
+      log.warn('OneCLI secret update failed; creating a new one', {
         existingSecretId: spec.existingSecretId,
         name: spec.name,
         hostPattern: spec.hostPattern,
+        err,
       });
     }
   }

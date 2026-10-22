@@ -21,6 +21,10 @@ vi.mock('../agent-service.js', () => ({
   ensureWorkspaceOnWorker: vi.fn(async () => undefined),
 }));
 
+vi.mock('../worker-client.js', () => ({
+  stopContainersOnWorker: vi.fn(async () => ({ stopped: [], skipped: [] })),
+}));
+
 import { initGatewayTestDb, closeGatewayDb } from '../db/connection.js';
 import { createUser } from '../store/users.js';
 import { registerWorkspace } from '../store/workspaces.js';

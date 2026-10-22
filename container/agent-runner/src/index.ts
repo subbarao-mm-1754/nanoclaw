@@ -27,6 +27,7 @@ import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { clearMcpNeedsAuthCache } from './mcp-needs-auth-cache.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
@@ -44,6 +45,12 @@ async function main(): Promise<void> {
   const providerName = config.provider.toLowerCase() as ProviderName;
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
+
+  // Claude Code persists mcp-needs-auth across container respawns via the
+  // mounted .claude-shared home. Clear on every start so zclaw restart and
+  // post-OAuth respawn reconnect remote MCP instead of skipping with sticky
+  // needs-auth. Does not touch sessions, settings, or transcripts.
+  clearMcpNeedsAuthCache(log);
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module

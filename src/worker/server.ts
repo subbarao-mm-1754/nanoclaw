@@ -5,6 +5,7 @@ import { log } from '../log.js';
 import { runDestroyWorkspace } from './destroy-workspace.js';
 import { runProcessMessageJob } from './job-runner.js';
 import { runPrepareWorkspace } from './prepare-workspace.js';
+import { runStopContainers } from './stop-containers.js';
 import type {
   WorkerPrepareWorkspaceResponse,
   WorkerProcessMessageRequest,
@@ -16,6 +17,7 @@ import {
   parseDestroyWorkspaceRequest,
   parsePrepareWorkspaceRequest,
   parseProcessMessageRequest,
+  parseStopContainersRequest,
 } from './validate.js';
 
 let server: http.Server | null = null;
@@ -209,6 +211,45 @@ async function handleDestroyWorkspace(req: http.IncomingMessage, res: http.Serve
   }
 }
 
+async function handleStopContainers(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!authorize(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    jsonResponse(res, 400, { error: err instanceof Error ? err.message : 'Bad request' });
+    return;
+  }
+
+  let stopReq;
+  try {
+    stopReq = parseStopContainersRequest(body);
+  } catch (err) {
+    if (err instanceof WorkerValidationError) {
+      validationErrorResponse(res, err);
+      return;
+    }
+    throw err;
+  }
+
+  try {
+    const result = await runStopContainers(stopReq);
+    jsonResponse(res, 200, result);
+  } catch (err) {
+    log.error('Worker stop-containers failed', {
+      workspaceId: stopReq.workspace_id,
+      err,
+    });
+    jsonResponse(res, 500, {
+      error: err instanceof Error ? err.message : 'Internal error',
+    });
+  }
+}
+
 async function handleProcessMessage(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorize(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -283,6 +324,11 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   if (req.method === 'POST' && url.pathname === '/v1/workspaces/destroy') {
     await handleDestroyWorkspace(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/v1/sessions/stop-containers') {
+    await handleStopContainers(req, res);
     return;
   }
 
