@@ -15,6 +15,7 @@ import {
   GATEWAY_DEFAULT_WORKSPACE_ID,
   GATEWAY_DEFAULT_WORKSPACE_NAME,
   GATEWAY_PROCESS_INTERVAL_MS,
+  GATEWAY_SCHEDULER_INTERVAL_MS,
 } from '../config.js';
 import { log } from '../log.js';
 import { closeKnowledgePool, initKnowledgeSchema } from '../knowledge/store.js';
@@ -24,6 +25,11 @@ import { startMessageProcessor, stopMessageProcessor } from './processor.js';
 import { startGatewayServer, stopGatewayServer } from './server.js';
 import { getWorkspace, registerWorkspace } from './store/workspaces.js';
 import { startLangGraphNudgeLoop, stopLangGraphNudgeLoop } from './orchestration/langgraph/index.js';
+import { createGatewayScheduleExecutor } from './scheduling/executor.js';
+
+const scheduleExecutor = createGatewayScheduleExecutor({
+  intervalMs: GATEWAY_SCHEDULER_INTERVAL_MS,
+});
 
 function seedDefaultWorkspace(): void {
   if (!GATEWAY_DEFAULT_WORKSPACE_ID) return;
@@ -56,6 +62,7 @@ async function main(): Promise<void> {
   await startGatewayChannels();
   startMessageProcessor(GATEWAY_PROCESS_INTERVAL_MS);
   startLangGraphNudgeLoop();
+  scheduleExecutor.start();
 
   log.info('NanoClaw gateway ready');
 }
@@ -63,6 +70,7 @@ async function main(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   log.info('Gateway shutdown signal received', { signal });
   stopLangGraphNudgeLoop();
+  scheduleExecutor.stop();
   stopMessageProcessor();
   await stopGatewayChannels();
   await stopGatewayServer();

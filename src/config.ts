@@ -43,6 +43,7 @@ const envConfig = readEnvFile([
   'WORKER_JOB_TIMEOUT_MS',
   'CHATBOT_UI_ENABLED',
   'CHATBOT_UI_URL',
+  'GATEWAY_SCHEDULER_INTERVAL_MS',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -180,6 +181,12 @@ export const GATEWAY_WORKER_URL =
 export const GATEWAY_PUBLIC_URL =
   process.env.GATEWAY_PUBLIC_URL || `http://${GATEWAY_HOST}:${GATEWAY_PORT}`;
 export const GATEWAY_PROCESS_INTERVAL_MS = parseInt(process.env.GATEWAY_PROCESS_INTERVAL_MS || '1000', 10);
+/** How often the gateway checks for due agent schedules. */
+export const GATEWAY_SCHEDULER_INTERVAL_MS = Math.max(
+  1_000,
+  parseInt(process.env.GATEWAY_SCHEDULER_INTERVAL_MS || envConfig.GATEWAY_SCHEDULER_INTERVAL_MS || '30000', 10) ||
+    30_000,
+);
 export const GATEWAY_DEFAULT_WORKSPACE_ID = process.env.GATEWAY_DEFAULT_WORKSPACE_ID || '';
 export const GATEWAY_DEFAULT_AGENT_GROUP_ID = process.env.GATEWAY_DEFAULT_AGENT_GROUP_ID || '';
 export const GATEWAY_DEFAULT_WORKSPACE_NAME = process.env.GATEWAY_DEFAULT_WORKSPACE_NAME || 'Default Agent';

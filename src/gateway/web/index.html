@@ -187,6 +187,16 @@
             <p class="empty hidden" id="orch-events-empty">No events for the selected run.</p>
           </div>
 
+          <div id="schedules-panel" class="hidden">
+            <h2 style="margin-top: 1.5rem">Schedules</h2>
+            <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
+              Created in chat with this agent. Enable or disable them here.
+            </p>
+            <div id="schedules-error" class="error hidden"></div>
+            <ul id="schedule-list" class="orch-list"></ul>
+            <p class="empty hidden" id="schedules-empty">No schedules yet. Ask this agent in chat to create one.</p>
+          </div>
+
           <h2 style="margin-top: 1.5rem">MCP servers</h2>
           <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0">
             Optional MCP servers for the agent container. Saved with the agent and

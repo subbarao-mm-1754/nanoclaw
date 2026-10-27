@@ -147,6 +147,7 @@ Container logs are lost after exit (`--rm`).
 | Doc | Purpose |
 |-----|---------|
 | [docs/product-tree.md](docs/product-tree.md) | Gateway + worker product surface (source of truth) |
+| [docs/schedules.md](docs/schedules.md) | Agent schedules, end to end |
 | [docs/setup-install.md](docs/setup-install.md) | OS install matrix + optional features |
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | Node host + Bun container split |
 | [docs/architecture.md](docs/architecture.md) | Broader architecture (may still mention classic host in places) |

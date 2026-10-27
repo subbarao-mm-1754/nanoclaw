@@ -23,6 +23,7 @@ import type {
   WorkerOutboundCallbackPayload,
 } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
+import { handleScheduleSystemMessage } from './schedule-actions.js';
 import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
 import { handleMcpAuthSystemMessage } from './mcp-auth-actions.js';
 import { buildOutboundMultipartBody, type OutboundMultipartFilePart } from './outbound-multipart.js';
@@ -182,12 +183,20 @@ export async function drainOutboundBatch(
               rawContent: msg.content,
             });
             if (!handledMcpAuth) {
-              await handleKnowledgeSystemMessage({
+              const handledSchedule = await handleScheduleSystemMessage({
                 workspaceId,
                 agentGroupId,
                 sessionId,
                 rawContent: msg.content,
               });
+              if (!handledSchedule) {
+                await handleKnowledgeSystemMessage({
+                  workspaceId,
+                  agentGroupId,
+                  sessionId,
+                  rawContent: msg.content,
+                });
+              }
             }
           }
         } catch (err) {
@@ -637,10 +646,10 @@ export function startSessionCollector(target: SessionCollectorTarget): void {
 }
 
 /** Stop collector for one session (container removed / explicit). */
-export function stopSessionCollector(sessionId: string, reason = 'explicit'): void {
+export function stopSessionCollector(sessionId: string, reason = 'explicit'): Promise<void> {
   const collector = collectors.get(sessionId);
-  if (!collector) return;
-  void finalizeCollector(sessionId, reason);
+  if (!collector) return Promise.resolve();
+  return finalizeCollector(sessionId, reason);
 }
 
 /** Stop all collectors for a workspace (agent delete / workspace destroy). */

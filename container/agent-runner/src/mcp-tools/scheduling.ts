@@ -1,14 +1,13 @@
 /**
- * Scheduling MCP tools: schedule_task, list_tasks, cancel_task, pause_task, resume_task.
+ * Scheduling MCP tools backed by the gateway schedule store.
  *
- * With the two-DB split, the container cannot write to inbound.db (host-owned).
- * Scheduling operations are sent as system actions via messages_out — the host
- * reads them during delivery and applies the changes to inbound.db.
+ * The container cannot write gateway.db. Each tool writes a schedule_request
+ * system action; the worker calls the gateway and writes schedule_response.
  */
-import { getInboundDb } from '../db/connection.js';
+import { findScheduleResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
+import { TIMEZONE } from '../timezone.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -17,11 +16,7 @@ function log(msg: string): void {
 }
 
 function generateId(): string {
-  return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function routing() {
-  return getSessionRouting();
+  return `schedule-req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function ok(text: string) {
@@ -32,71 +27,97 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type ScheduleOp = 'create' | 'list' | 'update' | 'cancel' | 'pause' | 'resume';
+
+async function scheduleRoundTrip(
+  op: ScheduleOp,
+  fields: Record<string, unknown>,
+  timeoutMs = 60_000,
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  const requestId = generateId();
+  const routing = getSessionRouting();
+  writeMessageOut({
+    id: requestId,
+    kind: 'system',
+    platform_id: routing.platform_id,
+    channel_type: routing.channel_type,
+    thread_id: routing.thread_id,
+    content: JSON.stringify({
+      action: 'schedule_request',
+      requestId,
+      op,
+      timezone: TIMEZONE,
+      channelType: routing.channel_type,
+      platformId: routing.platform_id,
+      threadId: routing.thread_id,
+      ...fields,
+    }),
+  });
+
+  log(`schedule_request ${op}: ${requestId}`);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = findScheduleResponse(requestId);
+    if (response) {
+      markCompleted([response.id]);
+      try {
+        const parsed = JSON.parse(response.content) as {
+          ok?: boolean;
+          data?: unknown;
+          error?: string;
+        };
+        return { ok: Boolean(parsed.ok), data: parsed.data, error: parsed.error };
+      } catch {
+        return { ok: false, error: 'Invalid schedule_response JSON' };
+      }
+    }
+    await sleep(250);
+  }
+  return { ok: false, error: `Timed out waiting for schedule_response (${op})` };
+}
+
+function formatSchedule(schedule: Record<string, unknown>): string {
+  const enabled = schedule.enabled === false ? 'disabled' : 'enabled';
+  return `- ${schedule.id} [${enabled}] cron=${schedule.cron_expression} tz=${schedule.timezone} next=${schedule.next_run_at} → ${String(schedule.prompt ?? '').slice(0, 120)}`;
+}
+
+function resultText(result: { ok: boolean; data?: unknown; error?: string }, empty: string): ReturnType<typeof ok> {
+  if (!result.ok) return err(result.error || 'Schedule request failed');
+  if (Array.isArray(result.data)) {
+    if (result.data.length === 0) return ok(empty);
+    return ok(result.data.map((row) => formatSchedule(row as Record<string, unknown>)).join('\n'));
+  }
+  if (result.data && typeof result.data === 'object') return ok(formatSchedule(result.data as Record<string, unknown>));
+  return ok(empty);
+}
+
 export const scheduleTask: McpToolDefinition = {
   tool: {
     name: 'schedule_task',
     description:
-      `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
+      'Create a recurring schedule for this agent. Results are delivered back to the current chat. Cron is evaluated in the timezone from the <context timezone="..."/> header. Use list_tasks to see existing schedules before creating a duplicate.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        prompt: { type: 'string', description: 'Task instructions/prompt' },
-        processAfter: {
-          type: 'string',
-          description:
-            `ISO 8601 timestamp for the first run. Accepts either UTC (ending in "Z" or "+00:00") or a naive local timestamp (no offset) which is interpreted in the user's timezone (e.g. "2026-01-15T21:00:00" = 9pm user-local). Prefer naive local.`,
-        },
+        prompt: { type: 'string', description: 'What the agent should do on each run' },
         recurrence: {
           type: 'string',
-          description:
-            'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
+          description: 'Five-field cron expression, e.g. "0 9 * * 1-5" for weekdays at 9:00',
         },
-        script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
       },
-      required: ['prompt', 'processAfter'],
+      required: ['prompt', 'recurrence'],
     },
   },
   async handler(args) {
-    const prompt = args.prompt as string;
-    const processAfterIn = args.processAfter as string;
-    if (!prompt || !processAfterIn) return err('prompt and processAfter are required');
-
-    let processAfter: string;
-    try {
-      const d = parseZonedToUtc(processAfterIn, TIMEZONE);
-      if (Number.isNaN(d.getTime())) return err(`invalid processAfter: ${processAfterIn}`);
-      processAfter = d.toISOString();
-    } catch {
-      return err(`invalid processAfter: ${processAfterIn}`);
-    }
-
-    const id = generateId();
-    const r = routing();
-    const recurrence = (args.recurrence as string) || null;
-    const script = (args.script as string) || null;
-
-    // Write as a system action — host will insert into inbound.db
-    writeMessageOut({
-      id,
-      kind: 'system',
-      platform_id: r.platform_id,
-      channel_type: r.channel_type,
-      thread_id: r.thread_id,
-      content: JSON.stringify({
-        action: 'schedule_task',
-        taskId: id,
-        prompt,
-        script,
-        processAfter,
-        recurrence,
-        platformId: r.platform_id,
-        channelType: r.channel_type,
-        threadId: r.thread_id,
-      }),
-    });
-
-    log(`schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}`);
-    return ok(`Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''})`);
+    const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+    const recurrence = typeof args.recurrence === 'string' ? args.recurrence.trim() : '';
+    if (!prompt || !recurrence) return err('prompt and recurrence are required');
+    const result = await scheduleRoundTrip('create', { prompt, cronExpression: recurrence });
+    return resultText(result, 'Schedule created.');
   },
 };
 
@@ -104,139 +125,11 @@ export const listTasks: McpToolDefinition = {
   tool: {
     name: 'list_tasks',
     description:
-      'List scheduled tasks. Returns one row per series — the live (pending or paused) occurrence. The id shown is the series id, which is what update_task / cancel_task / pause_task / resume_task expect.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        status: { type: 'string', description: 'Filter by status: pending or paused (default: both)' },
-      },
-    },
+      'List this agent\'s schedules. The id is what update_task, pause_task, resume_task, and cancel_task expect.',
+    inputSchema: { type: 'object' as const, properties: {} },
   },
-  async handler(args) {
-    const status = args.status as string | undefined;
-    const db = getInboundDb();
-    // One row per series — the live (pending or paused) occurrence. Recurring
-    // tasks accumulate one completed row per firing plus one live follow-up;
-    // exposing the whole pile to the agent is noisy and confuses task identity
-    // ("which id do I cancel?"). The series_id is the stable handle.
-    //
-    // SQLite quirk: when MAX(seq) appears in the SELECT list of a GROUP BY
-    // query, the bare columns take values from the row that contains that max
-    // — that's how we pick "the latest live row per series" in one pass.
-    let rows;
-    if (status) {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status = ?
-            GROUP BY series_id
-            ORDER BY process_after ASC`,
-        )
-        .all(status);
-    } else {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status IN ('pending', 'paused')
-            GROUP BY series_id
-            ORDER BY process_after ASC`,
-        )
-        .all();
-    }
-
-    if ((rows as unknown[]).length === 0) return ok('No tasks found.');
-
-    const lines = (rows as Array<{ id: string; status: string; process_after: string | null; recurrence: string | null; content: string }>).map((r) => {
-      const content = JSON.parse(r.content);
-      const prompt = (content.prompt as string || '').slice(0, 80);
-      return `- ${r.id} [${r.status}] at=${r.process_after || 'now'} ${r.recurrence ? `recur=${r.recurrence} ` : ''}→ ${prompt}`;
-    });
-
-    return ok(lines.join('\n'));
-  },
-};
-
-export const cancelTask: McpToolDefinition = {
-  tool: {
-    name: 'cancel_task',
-    description: 'Cancel a scheduled task.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        taskId: { type: 'string', description: 'Task ID to cancel' },
-      },
-      required: ['taskId'],
-    },
-  },
-  async handler(args) {
-    const taskId = args.taskId as string;
-    if (!taskId) return err('taskId is required');
-
-    // Write as a system action — host will update inbound.db
-    writeMessageOut({
-      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'system',
-      content: JSON.stringify({ action: 'cancel_task', taskId }),
-    });
-
-    log(`cancel_task: ${taskId}`);
-    return ok(`Task cancellation requested: ${taskId}`);
-  },
-};
-
-export const pauseTask: McpToolDefinition = {
-  tool: {
-    name: 'pause_task',
-    description: 'Pause a scheduled task. It will not run until resumed.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        taskId: { type: 'string', description: 'Task ID to pause' },
-      },
-      required: ['taskId'],
-    },
-  },
-  async handler(args) {
-    const taskId = args.taskId as string;
-    if (!taskId) return err('taskId is required');
-
-    writeMessageOut({
-      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'system',
-      content: JSON.stringify({ action: 'pause_task', taskId }),
-    });
-
-    log(`pause_task: ${taskId}`);
-    return ok(`Task pause requested: ${taskId}`);
-  },
-};
-
-export const resumeTask: McpToolDefinition = {
-  tool: {
-    name: 'resume_task',
-    description: 'Resume a paused task.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        taskId: { type: 'string', description: 'Task ID to resume' },
-      },
-      required: ['taskId'],
-    },
-  },
-  async handler(args) {
-    const taskId = args.taskId as string;
-    if (!taskId) return err('taskId is required');
-
-    writeMessageOut({
-      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'system',
-      content: JSON.stringify({ action: 'resume_task', taskId }),
-    });
-
-    log(`resume_task: ${taskId}`);
-    return ok(`Task resume requested: ${taskId}`);
+  async handler() {
+    return resultText(await scheduleRoundTrip('list', {}), 'No schedules.');
   },
 };
 
@@ -244,59 +137,81 @@ export const updateTask: McpToolDefinition = {
   tool: {
     name: 'update_task',
     description:
-      'Update a scheduled task. Pass the series id from list_tasks. Any field omitted is left unchanged. Use this instead of cancel + reschedule when adjusting an existing task.',
+      'Change an existing schedule. Pass the id from list_tasks. Omitted fields stay unchanged.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        taskId: { type: 'string', description: 'Series id of the task to update (as shown by list_tasks)' },
-        prompt: { type: 'string', description: 'New task prompt (optional)' },
-        recurrence: {
-          type: 'string',
-          description: 'New cron expression (optional). Pass empty string to clear and make the task one-shot.',
-        },
-        processAfter: {
-          type: 'string',
-          description:
-            `New ISO 8601 timestamp for the next run (optional). Accepts either UTC (ending in "Z" / "+00:00") or a naive local timestamp interpreted in the user's timezone.`,
-        },
-        script: {
-          type: 'string',
-          description: 'New pre-agent script (optional). Pass empty string to clear.',
-        },
+        taskId: { type: 'string', description: 'Schedule id from list_tasks' },
+        prompt: { type: 'string', description: 'New instructions' },
+        recurrence: { type: 'string', description: 'New five-field cron expression' },
       },
       required: ['taskId'],
     },
   },
   async handler(args) {
-    const taskId = args.taskId as string;
+    const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : '';
     if (!taskId) return err('taskId is required');
-
-    const update: Record<string, unknown> = { taskId };
-    if (typeof args.prompt === 'string') update.prompt = args.prompt;
-    if (typeof args.processAfter === 'string') {
-      try {
-        const d = parseZonedToUtc(args.processAfter, TIMEZONE);
-        if (Number.isNaN(d.getTime())) return err(`invalid processAfter: ${args.processAfter}`);
-        update.processAfter = d.toISOString();
-      } catch {
-        return err(`invalid processAfter: ${args.processAfter}`);
-      }
+    const fields: Record<string, unknown> = { scheduleId: taskId };
+    if (typeof args.prompt === 'string' && args.prompt.trim()) fields.prompt = args.prompt.trim();
+    if (typeof args.recurrence === 'string' && args.recurrence.trim()) {
+      fields.cronExpression = args.recurrence.trim();
     }
-    // Empty string clears recurrence/script; undefined leaves them as-is.
-    if (typeof args.recurrence === 'string') update.recurrence = args.recurrence === '' ? null : args.recurrence;
-    if (typeof args.script === 'string') update.script = args.script === '' ? null : args.script;
-
-    if (Object.keys(update).length === 1) return err('at least one field to update is required');
-
-    writeMessageOut({
-      id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'system',
-      content: JSON.stringify({ action: 'update_task', ...update }),
-    });
-
-    log(`update_task: ${taskId}`);
-    return ok(`Task update requested: ${taskId}`);
+    if (Object.keys(fields).length === 1) return err('prompt or recurrence is required');
+    return resultText(await scheduleRoundTrip('update', fields), 'Schedule updated.');
   },
 };
 
-registerTools([scheduleTask, listTasks, updateTask, cancelTask, pauseTask, resumeTask]);
+export const pauseTask: McpToolDefinition = {
+  tool: {
+    name: 'pause_task',
+    description: 'Disable a schedule so it will not run until resumed.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: { taskId: { type: 'string', description: 'Schedule id from list_tasks' } },
+      required: ['taskId'],
+    },
+  },
+  async handler(args) {
+    const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : '';
+    if (!taskId) return err('taskId is required');
+    return resultText(await scheduleRoundTrip('pause', { scheduleId: taskId }), 'Schedule paused.');
+  },
+};
+
+export const resumeTask: McpToolDefinition = {
+  tool: {
+    name: 'resume_task',
+    description: 'Enable a paused schedule.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: { taskId: { type: 'string', description: 'Schedule id from list_tasks' } },
+      required: ['taskId'],
+    },
+  },
+  async handler(args) {
+    const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : '';
+    if (!taskId) return err('taskId is required');
+    return resultText(await scheduleRoundTrip('resume', { scheduleId: taskId }), 'Schedule resumed.');
+  },
+};
+
+export const cancelTask: McpToolDefinition = {
+  tool: {
+    name: 'cancel_task',
+    description: 'Delete a schedule. This does not affect the current chat.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: { taskId: { type: 'string', description: 'Schedule id from list_tasks' } },
+      required: ['taskId'],
+    },
+  },
+  async handler(args) {
+    const taskId = typeof args.taskId === 'string' ? args.taskId.trim() : '';
+    if (!taskId) return err('taskId is required');
+    const result = await scheduleRoundTrip('cancel', { scheduleId: taskId });
+    if (!result.ok) return err(result.error || 'Schedule request failed');
+    return ok(`Schedule cancelled: ${taskId}`);
+  },
+};
+
+registerTools([scheduleTask, listTasks, updateTask, pauseTask, resumeTask, cancelTask]);

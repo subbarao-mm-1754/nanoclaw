@@ -12,6 +12,7 @@ The files in this directory are original design documents and developer referenc
 | [setup-install.md](setup-install.md) | What setup installs per OS + optional skills (local reference) |
 | [setup-flow.md](setup-flow.md) | Setup logging / step contract |
 | [product-tree.md](product-tree.md) | Gateway + worker product surface |
+| [schedules.md](schedules.md) | Agent schedules: chat, Studio, gateway clock, worker run |
 | [skills-as-branches.md](skills-as-branches.md) | [Skills system](https://docs.nanoclaw.dev/integrations/skills-system) |
 | [docker-sandboxes.md](docker-sandboxes.md) | [Docker Sandboxes](https://docs.nanoclaw.dev/advanced/docker-sandboxes) |
 | [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | [Container runtime](https://docs.nanoclaw.dev/advanced/container-runtime) |

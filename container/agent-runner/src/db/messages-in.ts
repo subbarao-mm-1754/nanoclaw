@@ -288,6 +288,11 @@ export function findMcpAuthResponse(requestId: string): MessageInRow | undefined
   return findSystemResponseByType(requestId, 'mcp_auth_response');
 }
 
+/** Find a pending schedule_response for a requestId. */
+export function findScheduleResponse(requestId: string): MessageInRow | undefined {
+  return findSystemResponseByType(requestId, 'schedule_response');
+}
+
 function findSystemResponseByType(requestId: string, typeName: string): MessageInRow | undefined {
   const inbound = openInboundDb();
   const outbound = getOutboundDb();

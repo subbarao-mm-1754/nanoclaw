@@ -17,7 +17,7 @@ import { materializeWorkspace } from './workspace-materializer.js';
 import { startWorkerServer, stopWorkerServer } from './server.js';
 import { collectOutboundMessages, waitForInboundTurn } from './outbound-collector.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
-import { loadWorkspaceManifest, saveWorkspaceManifest } from './workspace-store.js';
+import { loadWorkspaceManifest, saveWorkspaceManifest, workerWorkspacePaths } from './workspace-store.js';
 import { WORKER_PORT } from '../config.js';
 import type { WorkerWorkspaceManifest } from './types.js';
 import { stopAllCollectorsForTests } from './outbound-collector.js';
@@ -502,6 +502,128 @@ describe('runProcessMessageJob', () => {
     } finally {
       db.close();
     }
+  });
+
+  it('clears a previous schedule session before writing the next task', async () => {
+    prepareTestWorkspace();
+    const first = parseProcessMessageRequest(
+      sampleProcessBody({
+        job_id: 'job-schedule-1',
+        inbound: {
+          id: 'schedule-message-1',
+          kind: 'task',
+          timestamp: '2026-10-27T09:00:00.000Z',
+          content: { prompt: 'First run', scheduleId: 'schedule-daily', runId: 'run-1' },
+        },
+      }),
+    );
+    await runProcessMessageJob(first);
+
+    const outbound = openOutboundDbRw(first.session.agent_group_id, first.session.id);
+    try {
+      outbound
+        .prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, datetime(\'now\'))')
+        .run('continuation:claude', 'claude-session-old');
+    } finally {
+      outbound.close();
+    }
+    const transcriptDir = path.join(
+      workerWorkspacePaths(first.workspace_id).claude_shared_dir,
+      'projects',
+      'agent',
+    );
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    const transcriptPath = path.join(transcriptDir, 'claude-session-old.jsonl');
+    fs.writeFileSync(transcriptPath, '{"old":true}\n');
+
+    const second = parseProcessMessageRequest(
+      sampleProcessBody({
+        job_id: 'job-schedule-2',
+        inbound: {
+          id: 'schedule-message-2',
+          kind: 'task',
+          timestamp: '2026-10-28T09:00:00.000Z',
+          content: { prompt: 'Second run', scheduleId: 'schedule-daily', runId: 'run-2' },
+        },
+      }),
+    );
+    await runProcessMessageJob(second);
+
+    const db = openInboundDb(second.session.agent_group_id, second.session.id);
+    try {
+      const rows = db.prepare('SELECT id, content FROM messages_in ORDER BY seq').all() as Array<{
+        id: string;
+        content: string;
+      }>;
+      expect(rows.map((row) => row.id)).toEqual(['schedule-message-2']);
+      expect(JSON.parse(rows[0]!.content).prompt).toBe('Second run');
+    } finally {
+      db.close();
+    }
+    const state = openOutboundDbRw(second.session.agent_group_id, second.session.id);
+    try {
+      const continuation = state
+        .prepare('SELECT value FROM session_state WHERE key = ?')
+        .get('continuation:claude');
+      expect(continuation).toBeUndefined();
+    } finally {
+      state.close();
+    }
+    expect(fs.existsSync(transcriptPath)).toBe(false);
+  });
+
+  it('keeps the existing session when the next message is chat', async () => {
+    prepareTestWorkspace();
+    const first = parseProcessMessageRequest(sampleProcessBody());
+    await runProcessMessageJob(first);
+
+    const outbound = openOutboundDbRw(first.session.agent_group_id, first.session.id);
+    try {
+      outbound
+        .prepare("INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+        .run('continuation:claude', 'claude-chat-session');
+    } finally {
+      outbound.close();
+    }
+    const transcriptDir = path.join(
+      workerWorkspacePaths(first.workspace_id).claude_shared_dir,
+      'projects',
+      'agent',
+    );
+    fs.mkdirSync(transcriptDir, { recursive: true });
+    const transcriptPath = path.join(transcriptDir, 'claude-chat-session.jsonl');
+    fs.writeFileSync(transcriptPath, '{"chat":true}\n');
+
+    const followUp = parseProcessMessageRequest(
+      sampleProcessBody({
+        job_id: 'job-chat-2',
+        inbound: {
+          id: 'msg-2',
+          kind: 'chat',
+          timestamp: '2026-10-27T10:00:00.000Z',
+          content: { text: 'Continue this conversation', scheduleId: 'schedule-daily' },
+        },
+      }),
+    );
+    await runProcessMessageJob(followUp);
+
+    const db = openInboundDb(followUp.session.agent_group_id, followUp.session.id);
+    try {
+      const ids = db.prepare('SELECT id FROM messages_in ORDER BY seq').all() as Array<{ id: string }>;
+      expect(ids.map((row) => row.id)).toEqual(['msg-1', 'msg-2']);
+    } finally {
+      db.close();
+    }
+    const state = openOutboundDbRw(followUp.session.agent_group_id, followUp.session.id);
+    try {
+      const continuation = state
+        .prepare('SELECT value FROM session_state WHERE key = ?')
+        .get('continuation:claude') as { value: string } | undefined;
+      expect(continuation?.value).toBe('claude-chat-session');
+    } finally {
+      state.close();
+    }
+    expect(fs.existsSync(transcriptPath)).toBe(true);
   });
 
   it('serializes structured inbound content into text when text is omitted', async () => {

@@ -80,6 +80,46 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
 }
 
+export function sessionContainsMessage(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+): boolean {
+  const dbPath = inboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return false;
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    const row = db.prepare('SELECT 1 FROM messages_in WHERE id = ?').get(messageId);
+    return Boolean(row);
+  } finally {
+    db.close();
+  }
+}
+
+/** Continuation ids stored by the container so a later wake resumes the same transcript. */
+export function listSessionContinuations(agentGroupId: string, sessionId: string): string[] {
+  const dbPath = outboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(dbPath)) return [];
+  const db = openOutboundDbRw(agentGroupId, sessionId);
+  try {
+    const rows = db
+      .prepare(
+        `SELECT value FROM session_state
+          WHERE key = 'sdk_session_id' OR key LIKE 'continuation:%'`,
+      )
+      .all() as Array<{ value: string }>;
+    return rows.map((row) => row.value).filter((value) => value.trim().length > 0);
+  } finally {
+    db.close();
+  }
+}
+
+/** Drop a session's conversation files and recreate an empty pair of databases. */
+export function resetSessionFolder(agentGroupId: string, sessionId: string): void {
+  fs.rmSync(sessionDir(agentGroupId, sessionId), { recursive: true, force: true });
+  initSessionFolder(agentGroupId, sessionId);
+}
+
 /** Write default reply routing from an explicit delivery address (worker / gateway path). */
 export function writeSessionRoutingFromJob(
   agentGroupId: string,

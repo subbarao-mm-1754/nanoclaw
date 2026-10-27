@@ -93,6 +93,15 @@ import { listUserAgents } from './store/agent-select.js';
 import { ensureMasterAgentForUser } from './store/master-agent.js';
 import { getActiveBuildJobForUser } from './store/builds.js';
 import {
+  createGatewaySchedule,
+  deleteGatewaySchedule,
+  getGatewaySchedule,
+  listGatewayScheduleRuns,
+  listGatewaySchedules,
+  setGatewayScheduleEnabled,
+} from './scheduling/store.js';
+import { applyScheduleAction, type ScheduleActionOp } from './scheduling/actions.js';
+import {
   getActiveRunSummary,
   getOrchestrationOverview,
   getOrchestrationRun,
@@ -145,6 +154,93 @@ function requireAdminSession(req: http.IncomingMessage): GatewayUser {
     throw new AuthError('Admin access required', 403);
   }
   return user;
+}
+
+function requireUserAgent(req: http.IncomingMessage, res: http.ServerResponse, workspaceId: string) {
+  const user = requireUserSession(req);
+  const agent = getAgentForUser(workspaceId, user.id);
+  if (!agent) {
+    jsonResponse(res, 404, { error: 'Agent not found' });
+    return null;
+  }
+  return agent;
+}
+
+async function handleAgentSchedules(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+): Promise<void> {
+  if (!requireUserAgent(req, res, workspaceId)) return;
+
+  if (req.method === 'GET') {
+    jsonResponse(res, 200, { schedules: listGatewaySchedules(workspaceId) });
+    return;
+  }
+  if (req.method !== 'POST') {
+    jsonResponse(res, 405, { error: 'Method not allowed' });
+    return;
+  }
+
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const delivery = body.delivery;
+  if (!delivery || typeof delivery !== 'object' || Array.isArray(delivery)) {
+    jsonResponse(res, 400, { error: 'delivery must be an object' });
+    return;
+  }
+  try {
+    const schedule = createGatewaySchedule({
+      workspace_id: workspaceId,
+      prompt: requireString(body, 'prompt'),
+      cron_expression: requireString(body, 'cron_expression'),
+      timezone: requireString(body, 'timezone'),
+      delivery: {
+        channel_type: requireString(delivery as Record<string, unknown>, 'channel_type'),
+        platform_id: requireString(delivery as Record<string, unknown>, 'platform_id'),
+        thread_id:
+          typeof (delivery as Record<string, unknown>).thread_id === 'string'
+            ? ((delivery as Record<string, unknown>).thread_id as string)
+            : null,
+      },
+    });
+    jsonResponse(res, 201, { schedule });
+  } catch (err) {
+    jsonResponse(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function handleAgentScheduleItem(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  workspaceId: string,
+  scheduleId: string,
+): Promise<void> {
+  if (!requireUserAgent(req, res, workspaceId)) return;
+  const schedule = getGatewaySchedule(scheduleId);
+  if (!schedule || schedule.workspace_id !== workspaceId) {
+    jsonResponse(res, 404, { error: 'Schedule not found' });
+    return;
+  }
+  if (req.method === 'GET') {
+    jsonResponse(res, 200, { schedule, runs: listGatewayScheduleRuns(schedule.id) });
+    return;
+  }
+  if (req.method === 'PATCH') {
+    const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+    if (typeof body.enabled !== 'boolean') {
+      jsonResponse(res, 400, { error: 'enabled must be a boolean' });
+      return;
+    }
+    setGatewayScheduleEnabled(schedule.id, body.enabled);
+    jsonResponse(res, 200, { schedule: getGatewaySchedule(schedule.id) });
+    return;
+  }
+  if (req.method === 'DELETE') {
+    deleteGatewaySchedule(schedule.id);
+    jsonResponse(res, 204, {});
+    return;
+  }
+  jsonResponse(res, 405, { error: 'Method not allowed' });
 }
 
 function cliqOAuthAppForViewer(user: GatewayUser) {
@@ -1423,6 +1519,29 @@ async function handleInternalMcpAuthRequest(
   jsonResponse(res, result.ok ? 200 : 400, result);
 }
 
+async function handleInternalSchedule(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const op = requireString(body, 'op') as ScheduleActionOp;
+  const delivery =
+    body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery)
+      ? (body.delivery as { channel_type?: string; platform_id?: string; thread_id?: string | null })
+      : undefined;
+  const result = applyScheduleAction({
+    workspaceId: requireString(body, 'workspaceId'),
+    op,
+    scheduleId: typeof body.scheduleId === 'string' ? body.scheduleId : undefined,
+    prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
+    cronExpression: typeof body.cronExpression === 'string' ? body.cronExpression : undefined,
+    timezone: typeof body.timezone === 'string' ? body.timezone : undefined,
+    delivery,
+  });
+  jsonResponse(res, result.ok ? 200 : 400, result);
+}
+
 async function handleInternalKnowledge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorizeWorkerCallback(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -1651,6 +1770,23 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
       return;
     }
 
+    const agentScheduleItemMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/schedules\/([^/]+)$/);
+    if (agentScheduleItemMatch) {
+      await handleAgentScheduleItem(
+        req,
+        res,
+        decodeURIComponent(agentScheduleItemMatch[1]!),
+        decodeURIComponent(agentScheduleItemMatch[2]!),
+      );
+      return;
+    }
+
+    const agentSchedulesMatch = pathname.match(/^\/v1\/agents\/([^/]+)\/schedules$/);
+    if (agentSchedulesMatch) {
+      await handleAgentSchedules(req, res, decodeURIComponent(agentSchedulesMatch[1]!));
+      return;
+    }
+
     const agentMatch = pathname.match(/^\/v1\/agents\/([^/]+)$/);
     if (agentMatch) {
       const workspaceId = decodeURIComponent(agentMatch[1]!);
@@ -1738,6 +1874,11 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     if (req.method === 'POST' && pathname === '/v1/worker/callbacks/outbound') {
       await handleWorkerOutboundCallbackHttp(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/internal/schedules') {
+      await handleInternalSchedule(req, res);
       return;
     }
 

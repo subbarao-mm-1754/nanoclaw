@@ -4,7 +4,7 @@ This fork’s **product** is two separately deployable services:
 
 | Process | Entry | Responsibility |
 |---------|-------|----------------|
-| **Gateway** | `dist/gateway/index.js` | Channels, HTTP API, message queue, builder/orchestration, callbacks |
+| **Gateway** | `dist/gateway/index.js` | Channels, HTTP API, message queue, builder/orchestration, schedules, callbacks |
 | **Worker** | `dist/worker/index.js` | Workspace materialization, container spawn, outbound collection |
 
 They communicate over HTTP (`GATEWAY_WORKER_URL` / `GATEWAY_PUBLIC_URL`) so they can run on the **same machine** or **different machines**.
@@ -32,6 +32,7 @@ See [setup-install.md](setup-install.md).
 - Container runtime + Node + pnpm — see [setup-install.md](setup-install.md) for OS-specific packages (macOS: Desktop or Colima; Linux/WSL2: Podman)
 - `setup/services/` + `bin/zclaw` — install & start/stop
 - Channel you use today: Zoho Cliq (`src/channels/zoho-cliq.ts`, gateway multi-account)
+- Agent schedules — gateway clock, chat tools, Studio enable/disable. See [schedules.md](schedules.md)
 
 ## Optional (install when needed — do not treat as default product)
 

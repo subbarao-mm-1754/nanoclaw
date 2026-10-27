@@ -427,6 +427,43 @@ export function initGatewaySchema(db: Database.Database): void {
       ON customer_messages(created_at)
       WHERE direction = 'outbound' AND status = 'pending';
 
+    -- Schedule definitions are gateway-owned. Each uses a dedicated conversation
+    -- so periodic tasks never share agent context with a user's live chat.
+    CREATE TABLE IF NOT EXISTS gateway_schedules (
+      id                TEXT PRIMARY KEY,
+      workspace_id      TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      conversation_id   TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      prompt            TEXT NOT NULL,
+      cron_expression   TEXT NOT NULL,
+      timezone          TEXT NOT NULL,
+      channel_type      TEXT NOT NULL,
+      platform_id       TEXT NOT NULL,
+      thread_id         TEXT,
+      enabled           INTEGER NOT NULL DEFAULT 1,
+      next_run_at       TEXT NOT NULL,
+      active_run_id     TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_schedules_due
+      ON gateway_schedules(next_run_at)
+      WHERE enabled = 1 AND active_run_id IS NULL;
+
+    CREATE TABLE IF NOT EXISTS gateway_schedule_runs (
+      id                TEXT PRIMARY KEY,
+      schedule_id       TEXT NOT NULL REFERENCES gateway_schedules(id) ON DELETE CASCADE,
+      inbound_message_id TEXT NOT NULL UNIQUE,
+      scheduled_for     TEXT NOT NULL,
+      status            TEXT NOT NULL CHECK(status IN ('claimed', 'enqueued', 'completed', 'failed')),
+      error             TEXT,
+      created_at        TEXT NOT NULL,
+      updated_at        TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_gateway_schedule_runs_schedule
+      ON gateway_schedule_runs(schedule_id, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS http_responses (
       inbound_id      TEXT PRIMARY KEY,
       platform_id     TEXT NOT NULL,

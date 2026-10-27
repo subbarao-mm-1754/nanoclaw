@@ -38,9 +38,13 @@ async function processOneInbound(): Promise<boolean> {
   const content = JSON.parse(inbound.content_json) as Record<string, unknown>;
 
   try {
-    // Slash commands never reach here (/use skips decision routing). Stay-or-switch for normal chat.
-    const routed = await applyAutoAgentRoute({ conversation, inbound });
-    conversation = routed.conversation;
+    // Scheduled work is explicitly bound to its workspace. It must not be
+    // redirected by conversational auto-routing based on the task prompt.
+    if (inbound.kind !== 'task') {
+      // Slash commands never reach here (/use skips decision routing). Stay-or-switch for normal chat.
+      const routed = await applyAutoAgentRoute({ conversation, inbound });
+      conversation = routed.conversation;
+    }
 
     const { ensureOrchestrationRunForUserMessage, extraDestinationsForWorkspace } =
       await import('./orchestration/index.js');

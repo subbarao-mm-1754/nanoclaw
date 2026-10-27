@@ -105,6 +105,36 @@ export interface InboundEnqueueInput {
   timestamp: string;
 }
 
+export interface GatewaySchedule {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  prompt: string;
+  cron_expression: string;
+  timezone: string;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  enabled: boolean;
+  next_run_at: string;
+  active_run_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type GatewayScheduleRunStatus = 'claimed' | 'enqueued' | 'completed' | 'failed';
+
+export interface GatewayScheduleRun {
+  id: string;
+  schedule_id: string;
+  inbound_message_id: string;
+  scheduled_for: string;
+  status: GatewayScheduleRunStatus;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Full agent-build unit of work (one job per build or edit; never reused). */
 export type BuildJobStatus = 'in_progress' | 'waiting_for_user' | 'completed' | 'failed';
 

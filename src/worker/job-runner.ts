@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 
 import {
   WORKER_BUILD_PROGRESS_INTERVAL_MS,
@@ -8,11 +9,14 @@ import {
   WORKER_JOB_TIMEOUT_MS,
   WORKER_OUTBOUND_POST_STOP_GRACE_MS,
 } from '../config.js';
-import { wakeContainer, type WorkerSpawnContext } from '../container-runner.js';
+import { stopContainerSession, wakeContainer, type WorkerSpawnContext } from '../container-runner.js';
 import {
   ensureSessionWorkspace,
   inboundDbPath,
+  listSessionContinuations,
   outboundDbPath,
+  resetSessionFolder,
+  sessionContainsMessage,
   writeSessionMessageIfAbsent,
   countPendingSessionInbound,
   writeSessionRoutingFromJob,
@@ -33,6 +37,51 @@ import { loadWorkspaceManifest, workerWorkspacePaths } from './workspace-store.j
 import type { WorkerProcessMessageRequest, WorkerProcessMessageResponse } from './types.js';
 import type { Session } from '../types.js';
 import { WorkerValidationError } from './validate.js';
+
+function isScheduleTask(job: WorkerProcessMessageRequest): boolean {
+  // Chat, chat-sdk, webhook, and system messages keep their session history.
+  if (job.inbound.kind !== 'task') return false;
+  const scheduleId = job.inbound.content.scheduleId;
+  return typeof scheduleId === 'string' && scheduleId.trim().length > 0;
+}
+
+function removeContinuationTranscripts(claudeSharedDir: string, continuationIds: string[]): void {
+  const projectsDir = path.join(claudeSharedDir, 'projects');
+  if (!fs.existsSync(projectsDir)) return;
+  const names = new Set(
+    continuationIds
+      .filter((id) => /^[A-Za-z0-9_-]{8,128}$/.test(id))
+      .map((id) => `${id}.jsonl`),
+  );
+  if (names.size === 0) return;
+  for (const relativePath of fs.readdirSync(projectsDir, { recursive: true })) {
+    if (typeof relativePath !== 'string' || !names.has(path.basename(relativePath))) continue;
+    fs.rmSync(path.join(projectsDir, relativePath), { force: true });
+  }
+}
+
+/**
+ * A schedule firing is a new task. Drop the previous session transcript before
+ * writing it, unless this exact message was already stored (a retry).
+ */
+async function resetScheduleSessionIfNew(
+  job: WorkerProcessMessageRequest,
+  agentGroupId: string,
+  sessionId: string,
+  claudeSharedDir: string,
+): Promise<void> {
+  if (!isScheduleTask(job)) return;
+  if (sessionContainsMessage(agentGroupId, sessionId, job.inbound.id)) return;
+  const continuations = listSessionContinuations(agentGroupId, sessionId);
+  await stopContainerSession(sessionId, 'schedule-session-reset');
+  await stopSessionCollector(sessionId, 'schedule-session-reset');
+  removeContinuationTranscripts(claudeSharedDir, continuations);
+  resetSessionFolder(agentGroupId, sessionId);
+  log.info('Cleared schedule session before new run', {
+    sessionId,
+    scheduleId: job.inbound.content.scheduleId,
+  });
+}
 
 function buildInboundContent(job: WorkerProcessMessageRequest): string {
   const content: Record<string, unknown> = { ...job.inbound.content };
@@ -156,6 +205,7 @@ export async function runProcessMessageJob(
 
   const memoryBaseline = captureMemoryBaseline(paths.group_dir);
 
+  await resetScheduleSessionIfNew(job, agentGroupId, sessionId, paths.claude_shared_dir);
   ensureSessionWorkspace(agentGroupId, sessionId);
   writeSessionRoutingFromJob(agentGroupId, sessionId, job.delivery);
   const extraDestinations = (job.extra_destinations ?? []).map((d) => ({

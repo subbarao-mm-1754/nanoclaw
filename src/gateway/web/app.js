@@ -566,8 +566,65 @@ function showOrchestrationPanel(workspaceId) {
   }, 4000);
 }
 
+async function loadAgentSchedules(workspaceId) {
+  const panel = $('schedules-panel');
+  const list = $('schedule-list');
+  const empty = $('schedules-empty');
+  const error = $('schedules-error');
+  show(panel);
+  hide(error);
+  list.innerHTML = '';
+  try {
+    const data = await api(`/v1/agents/${encodeURIComponent(workspaceId)}/schedules`);
+    const schedules = data.schedules || [];
+    if (!schedules.length) {
+      show(empty);
+      return;
+    }
+    hide(empty);
+    for (const schedule of schedules) {
+      const li = document.createElement('li');
+      const enabled = Boolean(schedule.enabled);
+      li.innerHTML = `
+        <div>
+          <strong>${escapeHtml(schedule.prompt)}</strong>
+          <span class="badge ${enabled ? 'default' : 'failed'}">${enabled ? 'enabled' : 'disabled'}</span>
+          <div class="agent-meta">${escapeHtml(schedule.cron_expression)} · ${escapeHtml(schedule.timezone)} · next ${escapeHtml(schedule.next_run_at)}</div>
+        </div>
+        <div class="agent-actions">
+          <button type="button" class="secondary schedule-toggle-btn">${enabled ? 'Disable' : 'Enable'}</button>
+        </div>
+      `;
+      li.querySelector('.schedule-toggle-btn').addEventListener('click', () => {
+        void setScheduleEnabled(workspaceId, schedule.id, !enabled);
+      });
+      list.appendChild(li);
+    }
+  } catch (err) {
+    error.textContent = err.message || 'Failed to load schedules';
+    show(error);
+    show(empty);
+  }
+}
+
+async function setScheduleEnabled(workspaceId, scheduleId, enabled) {
+  const error = $('schedules-error');
+  hide(error);
+  try {
+    await api(
+      `/v1/agents/${encodeURIComponent(workspaceId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: 'PATCH', body: JSON.stringify({ enabled }) },
+    );
+    await loadAgentSchedules(workspaceId);
+  } catch (err) {
+    error.textContent = err.message || 'Failed to update schedule';
+    show(error);
+  }
+}
+
 function resetEditor() {
   hideOrchestrationPanel();
+  hide($('schedules-panel'));
   editingWorkspaceId = null;
   editingContainerConfig = null;
   $('editor-title').textContent = 'New agent';
@@ -618,6 +675,7 @@ function fillEditor(agent) {
   } else {
     hideOrchestrationPanel();
   }
+  void loadAgentSchedules(agent.workspace_id);
 }
 
 async function loadAgents() {
