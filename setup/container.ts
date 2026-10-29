@@ -164,6 +164,27 @@ function colimaGuestDnsBroken(): boolean {
   return !hasIpv4 || servers.includes('::1');
 }
 
+function restartColimaWithIpv4Dns(): void {
+  log.info('Restarting Colima with IPv4 DNS', { dns: [...COLIMA_DNS] });
+  execSync('colima stop', { stdio: 'inherit', timeout: 120_000 });
+  execSync(colimaStartCommand(), { stdio: 'inherit', timeout: 300_000 });
+  ensureColimaDockerHost();
+}
+
+/**
+ * `docker info` can succeed while the guest resolver is still `::1`.
+ * That is the state after a timed-out `colima start`: the socket is up, so
+ * a later setup skips starting Colima and the image pull fails the same way.
+ */
+function ensureColimaIpv4Dns(): void {
+  if (!preferColimaOnMac()) return;
+  const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
+  const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
+  const running = status.status === 0 && /is running/i.test(out);
+  if (!running || !colimaGuestDnsBroken()) return;
+  restartColimaWithIpv4Dns();
+}
+
 function startMacosRuntime(): void {
   if (macosDockerDesktopInstalled()) {
     log.info('Starting Docker Desktop');
@@ -174,17 +195,17 @@ function startMacosRuntime(): void {
     const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
     const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
     const running = status.status === 0 && /is running/i.test(out);
-    if (running && !colimaGuestDnsBroken()) {
-      log.info('Colima already running');
-      ensureColimaDockerHost();
+    if (running) {
+      if (colimaGuestDnsBroken()) {
+        restartColimaWithIpv4Dns();
+      } else {
+        log.info('Colima already running');
+        ensureColimaDockerHost();
+      }
       return;
     }
-    if (running) {
-      log.info('Restarting Colima with IPv4 DNS', { dns: COLIMA_DNS });
-      execSync('colima stop', { stdio: 'inherit', timeout: 120_000 });
-    }
     // Blocks until the VM is ready (first start can take several minutes).
-    log.info('Starting Colima', { dns: COLIMA_DNS });
+    log.info('Starting Colima', { dns: [...COLIMA_DNS] });
     execSync(colimaStartCommand(), {
       stdio: 'inherit',
       timeout: 300_000,
@@ -422,6 +443,15 @@ export async function run(args: string[]): Promise<void> {
   if (!(await debianHttpReachable())) {
     buildArgs.push('--build-arg APT_USE_HTTPS=true');
     log.info('Debian HTTP (port 80) unreachable — using HTTPS apt mirrors in the image build');
+  }
+
+  // Colima can already answer `docker info` and still resolve via [::1].
+  if (preferColimaOnMac()) {
+    try {
+      ensureColimaIpv4Dns();
+    } catch (err) {
+      log.warn('Colima DNS restart failed', { err });
+    }
   }
 
   // Build — stdio inherit so the parent setup runner can tail docker's
