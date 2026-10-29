@@ -145,10 +145,24 @@ function usePodmanUserSocket(): void {
  * `lookup registry-1.docker.io on [::1]:53: connection refused`.
  * Linux/Podman is unchanged — it uses the host resolver.
  */
-const COLIMA_DNS = ['1.1.1.1', '8.8.8.8'] as const;
+/**
+ * IPv4 resolvers the VM can actually query. Prefer the Mac's own non-loopback
+ * servers (the ones that already resolve Debian on the host). Append public
+ * resolvers so a laptop off its usual network still has a fallback.
+ */
+function ipv4DnsServers(): string[] {
+  const found: string[] = [];
+  const res = spawnSync('scutil', ['--dns'], { encoding: 'utf-8' });
+  for (const match of `${res.stdout ?? ''}`.matchAll(/nameserver\[\d+\]\s*:\s*([0-9.]+)/g)) {
+    const ip = match[1];
+    if (!ip.startsWith('127.')) found.push(ip);
+  }
+  found.push('1.1.1.1', '8.8.8.8');
+  return [...new Set(found)].slice(0, 3);
+}
 
-function colimaStartCommand(): string {
-  return `colima start ${COLIMA_DNS.map((ip) => `--dns ${ip}`).join(' ')}`;
+function colimaStartCommand(servers: string[]): string {
+  return `colima start ${servers.map((ip) => `--dns ${ip}`).join(' ')}`;
 }
 
 function colimaIsRunning(): boolean {
@@ -157,23 +171,31 @@ function colimaIsRunning(): boolean {
   return status.status === 0 && /is running/i.test(out);
 }
 
-function startColimaVm(): void {
-  log.info('Starting Colima', { dns: [...COLIMA_DNS] });
-  execSync(colimaStartCommand(), { stdio: 'inherit', timeout: 300_000 });
+function startColimaVm(servers: string[]): void {
+  log.info('Starting Colima', { dns: servers });
+  execSync(colimaStartCommand(servers), { stdio: 'inherit', timeout: 300_000 });
   ensureColimaDockerHost();
 }
 
-/** Point the guest and dockerd at IPv4 resolvers. Lima often keeps `::1`. */
-function pinColimaDns(): void {
+/**
+ * Replace the guest resolver. Colima's /etc/resolv.conf is often a symlink to
+ * systemd-resolved, so writing through it leaves lookups on [::1].
+ */
+function pinColimaDns(servers: string[]): void {
+  const nameservers = servers.map((ip) => `nameserver ${ip}\\n`).join('');
+  const daemonJson = JSON.stringify({ dns: servers });
   const script = [
     'chattr -i /etc/resolv.conf 2>/dev/null || true',
-    "printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > /etc/resolv.conf",
-    'chattr +i /etc/resolv.conf 2>/dev/null || true',
-    'mkdir -p /etc/docker',
-    "printf '%s\\n' '{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"]}' > /etc/docker/daemon.json",
-    'if command -v systemctl >/dev/null 2>&1; then systemctl restart docker || true; else service docker restart || true; fi',
-  ].join('\n');
-  log.info('Pinning Colima DNS', { dns: [...COLIMA_DNS] });
+    'rm -f /etc/resolv.conf',
+    `printf '${nameservers}' > /etc/resolv.conf`,
+    'chmod 644 /etc/resolv.conf',
+    'mkdir -p /etc/systemd/resolved.conf.d /etc/docker',
+    `printf '[Resolve]\\nDNS=${servers.join(' ')}\\n' > /etc/systemd/resolved.conf.d/nanoclaw.conf`,
+    `printf '%s\\n' '${daemonJson}' > /etc/docker/daemon.json`,
+    'systemctl restart systemd-resolved >/dev/null 2>&1 || true',
+    'systemctl restart docker >/dev/null 2>&1 || service docker restart >/dev/null 2>&1 || true',
+  ].join(' && ');
+  log.info('Pinning Colima DNS', { dns: servers });
   const res = spawnSync('colima', ['ssh', '--', 'sudo', 'sh', '-c', script], {
     encoding: 'utf-8',
     timeout: 90_000,
@@ -195,11 +217,24 @@ function waitForDocker(seconds = 20): void {
 
 /** True when the VM itself can resolve Debian. Apt uses this resolver with --network=host. */
 function colimaCanResolveDebian(): boolean {
-  const res = spawnSync('colima', ['ssh', '--', 'getent', 'ahostsv4', 'deb.debian.org'], {
-    encoding: 'utf-8',
-    timeout: 30_000,
+  const res = spawnSync(
+    'colima',
+    [
+      'ssh',
+      '--',
+      'sh',
+      '-c',
+      'getent ahostsv4 deb.debian.org || curl -4 -fsS -o /dev/null --max-time 20 http://deb.debian.org/debian/',
+    ],
+    { encoding: 'utf-8', timeout: 30_000 },
+  );
+  if (res.status === 0) return true;
+  log.warn('Colima could not resolve deb.debian.org', {
+    status: res.status,
+    stdout: (res.stdout ?? '').slice(0, 300),
+    stderr: (res.stderr ?? '').slice(0, 300),
   });
-  return res.status === 0 && /\d+\.\d+\.\d+\.\d+/.test(res.stdout ?? '');
+  return false;
 }
 
 /**
@@ -210,18 +245,17 @@ function colimaCanResolveDebian(): boolean {
  */
 function ensureColimaIpv4Dns(): void {
   if (!preferColimaOnMac()) return;
-  if (!colimaIsRunning()) startColimaVm();
-  pinColimaDns();
+  const servers = ipv4DnsServers();
+  if (!colimaIsRunning()) startColimaVm(servers);
+  pinColimaDns(servers);
   ensureColimaDockerHost();
   waitForDocker();
   if (colimaCanResolveDebian()) return;
 
-  log.warn('Colima cannot resolve deb.debian.org; recreating the VM', {
-    dns: [...COLIMA_DNS],
-  });
+  log.warn('Colima cannot resolve deb.debian.org; recreating the VM', { dns: servers });
   execSync('colima delete -f', { stdio: 'inherit', timeout: 180_000 });
-  startColimaVm();
-  pinColimaDns();
+  startColimaVm(servers);
+  pinColimaDns(servers);
   ensureColimaDockerHost();
   waitForDocker();
   if (!colimaCanResolveDebian()) {
