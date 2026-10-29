@@ -10,7 +10,7 @@ NanoClaw runs a split stack: the host is Node + pnpm, the agent container is Bun
 Host and container each have their own package tree:
 
 ```
-/                             pnpm + Node 22
+/                             pnpm + Node 26.13.0+
   pnpm-lock.yaml              host deps (channels, Chat SDK, Baileys, better-sqlite3, etc.)
   pnpm-workspace.yaml         minimumReleaseAge + onlyBuiltDependencies policy
 
@@ -37,7 +37,7 @@ Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — a
 
 ## Image build surface
 
-`container/Dockerfile` is a single-stage build on `node:22-slim`:
+`container/Dockerfile` is a single-stage build on `node:26.13.0-slim`:
 
 - **Pinned ARGs** — `BUN_VERSION`, `CLAUDE_CODE_VERSION`, `AGENT_BROWSER_VERSION`, `VERCEL_VERSION`. Bump deliberately in PRs.
 - **CJK fonts** — `ARG INSTALL_CJK_FONTS=false`. `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through. Default build saves ~200MB; opt in when the user works with Chinese/Japanese/Korean content.

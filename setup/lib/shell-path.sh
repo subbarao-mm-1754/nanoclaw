@@ -82,10 +82,13 @@ nanoclaw_export_local_bin_path() {
   local local_bin="${HOME:-}/.local/bin"
   [ -n "${HOME:-}" ] || return 0
   mkdir -p "$local_bin" 2>/dev/null || true
-  case ":${PATH:-}:" in
-    *":${local_bin}:"*) ;;
-    *) export PATH="${local_bin}:${PATH:-}" ;;
-  esac
+  # Always first. A prebuilt Node unpacked into ~/.local/bin must win over
+  # an older node earlier on PATH (system package, nvm, Homebrew).
+  local stripped=":${PATH:-}:"
+  stripped=${stripped//":${local_bin}:"/:}
+  stripped=${stripped#:}
+  stripped=${stripped%:}
+  export PATH="${local_bin}${stripped:+:}${stripped}"
 }
 
 nanoclaw_persist_local_bin_path() {

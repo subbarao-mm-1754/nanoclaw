@@ -107,7 +107,7 @@ Skills we'd like to see:
 ## Requirements
 
 - macOS or Linux (Windows via WSL2)
-- Node.js 20+ and pnpm 10+ (the installer will install both if missing)
+- Node.js 26.13.0+ and pnpm 10+ (the installer downloads the official Node prebuilt binary if missing or older)
 - A container runtime the installer can use or install:
   - **macOS:** existing [Docker Desktop](https://docker.com/products/docker-desktop) if present; otherwise [Colima](https://github.com/abiosoft/colima) + Docker CLI (setup installs Colima — not Desktop)
   - **Linux / WSL2:** [Podman](https://podman.io/) + `podman-docker` CLI shim (not Docker Engine)

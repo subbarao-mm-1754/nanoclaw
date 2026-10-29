@@ -149,13 +149,14 @@ This should be rare. When a zero-day fix or critical dependency requires an imme
 
 `onlyBuiltDependencies` restricts which packages can execute install/postinstall scripts. Only packages on this list are permitted to run build scripts during `pnpm install`. Currently allowed:
 
-- `better-sqlite3` — compiles native SQLite bindings
 - `esbuild` — downloads platform-specific binary
 - `protobufjs` — generates protobuf bindings (used by Baileys/libsignal)
 - `sharp` — downloads platform-specific image processing binary
+
+`better-sqlite3` is not on this list. The host depends on 13.0.3, which ships prebuilt `.node` files inside the npm package and has no install script, so `pnpm install` does not compile SQLite.
 
 Adding a package to this list requires human approval — build scripts execute arbitrary code with the installing user's permissions.
 
 ### `.npmrc` Safety Net
 
-The `.npmrc` file contains `minReleaseAge=3d` as a fallback. The authoritative setting is in `pnpm-workspace.yaml`, but `.npmrc` provides defense-in-depth if npm is ever invoked directly (e.g. by a tool that doesn't respect pnpm).
+The `.npmrc` file contains `minReleaseAge=3d` as a fallback. The authoritative setting is in `pnpm-workspace.yaml`, but `.npmrc` provides defense-in-depth if npm is ever invoked directly (e.g. by a tool that doesn't respect pnpm). It also sets `build-from-source=false` so lifecycle scripts download published binaries instead of compiling.

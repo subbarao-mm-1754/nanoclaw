@@ -75,15 +75,23 @@ probe_os() {
 }
 
 probe_host_deps() {
-  local node_modules="$PROJECT_ROOT/node_modules"
-  local native="$node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-  # `better-sqlite3`'s compiled native binding is the canonical proof that
-  # `pnpm install` ran AND the native build step succeeded.
-  if [[ -d "$node_modules" && -f "$native" ]]; then
-    echo "ok"
-  else
-    echo "missing"
+  local pkg="$PROJECT_ROOT/node_modules/better-sqlite3"
+  local prebuild
+  # v13 ships one prebuild per platform (prebuilds/darwin-arm64.node,
+  # prebuilds/linux-x64.node, …). A build/Release file means a source compile.
+  if [[ -d "$pkg/prebuilds" ]]; then
+    for prebuild in "$pkg"/prebuilds/*.node; do
+      if [[ -f "$prebuild" ]]; then
+        echo "ok"
+        return
+      fi
+    done
   fi
+  if [[ -f "$pkg/build/Release/better_sqlite3.node" ]]; then
+    echo "ok"
+    return
+  fi
+  echo "missing"
 }
 
 # Sets DOCKER_STATUS and IMAGE_PRESENT as globals.

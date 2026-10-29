@@ -10,7 +10,9 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
-FROM node:22-slim
+# Official prebuilt Node image. The agent runtime is Bun; this Node is for
+# global CLIs (claude-code, agent-browser, vercel).
+FROM node:26.13.0-slim
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.

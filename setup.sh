@@ -6,6 +6,11 @@ set -euo pipefail
 # This is the only bash script in the setup flow.
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=setup/lib/node-version.sh
+source "$PROJECT_ROOT/setup/lib/node-version.sh"
+if [ -n "${HOME:-}" ]; then
+  export PATH="${HOME}/.local/bin:${PATH:-}"
+fi
 
 # Where verbose bootstrap logs go. zclaw.sh captures setup.sh's stdout to
 # the per-step raw log, but legacy code in this script + install-node.sh
@@ -56,12 +61,10 @@ check_node() {
   if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    local major
-    major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 20 ] 2>/dev/null; then
+    if [ -n "$NODE_VERSION" ] && nanoclaw_version_ge "$NODE_VERSION" "$NANOCLAW_MIN_NODE_VERSION"; then
       NODE_OK="true"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
+    log "Node $NODE_VERSION at $NODE_PATH_FOUND (required>=${NANOCLAW_MIN_NODE_VERSION}, ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -111,7 +114,7 @@ install_deps() {
     log "corepack not available — will fall back to npm-install pnpm"
   fi
 
-  # Fallback: some Node installs (older nvm, node@22 keg-only, minimal
+  # Fallback: some Node installs (older nvm, keg-only Homebrew, minimal
   # distro packages) don't include corepack. Install pnpm into ~/.local
   # so we never need sudo npm -g against /usr.
   if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
@@ -135,6 +138,10 @@ install_deps() {
     log "pnpm not on PATH after corepack + npm fallback"
     return
   fi
+
+  # Prefer published binaries. better-sqlite3 13 loads a prebuild from the
+  # package; this flag stops lifecycle scripts that would compile instead.
+  export npm_config_build_from_source=false
 
   log "Running pnpm install --frozen-lockfile"
   if pnpm install --frozen-lockfile >> "$LOG_FILE" 2>&1; then
@@ -181,8 +188,8 @@ detect_platform
 
 check_node
 if [ "$NODE_OK" = "false" ]; then
-  log "Node missing or too old — running setup/install-node.sh"
-  echo "Node not found — installing via setup/install-node.sh"
+  log "Node missing or older than ${NANOCLAW_MIN_NODE_VERSION} — running setup/install-node.sh"
+  echo "Node ${NANOCLAW_MIN_NODE_VERSION}+ required — installing prebuilt binary via setup/install-node.sh"
   if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
     hash -r 2>/dev/null || true
     check_node

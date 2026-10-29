@@ -10,8 +10,8 @@ Windows is supported via **WSL2** (treat as Linux below).
 
 | Component | macOS | Linux / WSL2 | Notes |
 |-----------|--------|--------------|--------|
-| **Homebrew** | Installed if missing (prompted in `zclaw.sh`) | — | Needed for Node / Colima / Docker CLI formulae |
-| **Node.js 20+** | Installed if missing | Installed if missing | `setup/install-node.sh` |
+| **Homebrew** | Installed if missing (prompted in `zclaw.sh`) | — | Needed for Colima / Docker CLI formulae. Node is a nodejs.org prebuilt tarball, not a Homebrew build |
+| **Node.js 26.13.0+** | Installed if missing or older | Installed if missing or older | `setup/install-node.sh` downloads the official prebuilt tarball (does not compile Node) |
 | **pnpm** + `node_modules` | Yes | Yes | `setup.sh` / `pnpm install --frozen-lockfile` |
 | **Container runtime** | See [macOS runtime](#macos-container-runtime) (Colima path also installs `docker-buildx`) | See [Linux runtime](#linux-wsl2-container-runtime) | Worker spawns agent containers via `docker` CLI |
 | **Agent image** | Built (`nanoclaw-agent…:latest`) | Built | `setup/container.ts` / `container/build.sh` |
