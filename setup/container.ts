@@ -139,6 +139,31 @@ function usePodmanUserSocket(): void {
   }
 }
 
+/**
+ * IPv4 resolvers for the Colima VM. macOS often publishes `::1` as its DNS
+ * server. Lima copies that into the guest, and image pulls then fail with
+ * `lookup registry-1.docker.io on [::1]:53: connection refused`.
+ * Linux/Podman is unchanged — it uses the host resolver.
+ */
+const COLIMA_DNS = ['1.1.1.1', '8.8.8.8'] as const;
+
+function colimaStartCommand(): string {
+  return `colima start ${COLIMA_DNS.map((ip) => `--dns ${ip}`).join(' ')}`;
+}
+
+/** True when the guest resolver is IPv6 localhost or has no IPv4 nameserver. */
+function colimaGuestDnsBroken(): boolean {
+  const res = spawnSync('colima', ['ssh', '--', 'cat', '/etc/resolv.conf'], {
+    encoding: 'utf-8',
+    timeout: 30_000,
+  });
+  if (res.status !== 0) return false;
+  const servers = [...`${res.stdout ?? ''}`.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
+  if (servers.length === 0) return false;
+  const hasIpv4 = servers.some((s) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s));
+  return !hasIpv4 || servers.includes('::1');
+}
+
 function startMacosRuntime(): void {
   if (macosDockerDesktopInstalled()) {
     log.info('Starting Docker Desktop');
@@ -148,14 +173,19 @@ function startMacosRuntime(): void {
   if (commandExists('colima')) {
     const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
     const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
-    if (status.status === 0 && /is running/i.test(out)) {
+    const running = status.status === 0 && /is running/i.test(out);
+    if (running && !colimaGuestDnsBroken()) {
       log.info('Colima already running');
       ensureColimaDockerHost();
       return;
     }
+    if (running) {
+      log.info('Restarting Colima with IPv4 DNS', { dns: COLIMA_DNS });
+      execSync('colima stop', { stdio: 'inherit', timeout: 120_000 });
+    }
     // Blocks until the VM is ready (first start can take several minutes).
-    log.info('Starting Colima');
-    execSync('colima start', {
+    log.info('Starting Colima', { dns: COLIMA_DNS });
+    execSync(colimaStartCommand(), {
       stdio: 'inherit',
       timeout: 300_000,
     });
