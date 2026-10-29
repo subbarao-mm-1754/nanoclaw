@@ -151,38 +151,84 @@ function colimaStartCommand(): string {
   return `colima start ${COLIMA_DNS.map((ip) => `--dns ${ip}`).join(' ')}`;
 }
 
-/** True when the guest resolver is IPv6 localhost or has no IPv4 nameserver. */
-function colimaGuestDnsBroken(): boolean {
-  const res = spawnSync('colima', ['ssh', '--', 'cat', '/etc/resolv.conf'], {
-    encoding: 'utf-8',
-    timeout: 30_000,
-  });
-  if (res.status !== 0) return false;
-  const servers = [...`${res.stdout ?? ''}`.matchAll(/^nameserver\s+(\S+)/gm)].map((m) => m[1]);
-  if (servers.length === 0) return false;
-  const hasIpv4 = servers.some((s) => /^\d{1,3}(\.\d{1,3}){3}$/.test(s));
-  return !hasIpv4 || servers.includes('::1');
+function colimaIsRunning(): boolean {
+  const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
+  const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
+  return status.status === 0 && /is running/i.test(out);
 }
 
-function restartColimaWithIpv4Dns(): void {
-  log.info('Restarting Colima with IPv4 DNS', { dns: [...COLIMA_DNS] });
-  execSync('colima stop', { stdio: 'inherit', timeout: 120_000 });
+function startColimaVm(): void {
+  log.info('Starting Colima', { dns: [...COLIMA_DNS] });
   execSync(colimaStartCommand(), { stdio: 'inherit', timeout: 300_000 });
   ensureColimaDockerHost();
 }
 
+/** Point the guest and dockerd at IPv4 resolvers. Lima often keeps `::1`. */
+function pinColimaDns(): void {
+  const script = [
+    'chattr -i /etc/resolv.conf 2>/dev/null || true',
+    "printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > /etc/resolv.conf",
+    'chattr +i /etc/resolv.conf 2>/dev/null || true',
+    'mkdir -p /etc/docker',
+    "printf '%s\\n' '{\"dns\":[\"1.1.1.1\",\"8.8.8.8\"]}' > /etc/docker/daemon.json",
+    'if command -v systemctl >/dev/null 2>&1; then systemctl restart docker || true; else service docker restart || true; fi',
+  ].join('\n');
+  log.info('Pinning Colima DNS', { dns: [...COLIMA_DNS] });
+  const res = spawnSync('colima', ['ssh', '--', 'sudo', 'sh', '-c', script], {
+    encoding: 'utf-8',
+    timeout: 90_000,
+  });
+  if (res.status !== 0) {
+    log.warn('Could not pin Colima DNS', {
+      status: res.status,
+      stderr: (res.stderr ?? '').slice(0, 500),
+    });
+  }
+}
+
+function waitForDocker(seconds = 20): void {
+  for (let i = 0; i < seconds; i++) {
+    if (dockerStatus() === 'ok') return;
+    spawnSync('sleep', ['1']);
+  }
+}
+
+/** True when the VM itself can resolve Debian. Apt uses this resolver with --network=host. */
+function colimaCanResolveDebian(): boolean {
+  const res = spawnSync('colima', ['ssh', '--', 'getent', 'ahostsv4', 'deb.debian.org'], {
+    encoding: 'utf-8',
+    timeout: 30_000,
+  });
+  return res.status === 0 && /\d+\.\d+\.\d+\.\d+/.test(res.stdout ?? '');
+}
+
 /**
- * `docker info` can succeed while the guest resolver is still `::1`.
- * That is the state after a timed-out `colima start`: the socket is up, so
- * a later setup skips starting Colima and the image pull fails the same way.
+ * `docker info` can succeed while the guest resolver is still `::1`, so apt
+ * inside the image build reports "Temporary failure resolving deb.debian.org".
+ * Pin DNS in place. If the existing VM still cannot resolve, recreate it.
+ * Linux/Podman does not use this path.
  */
 function ensureColimaIpv4Dns(): void {
   if (!preferColimaOnMac()) return;
-  const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
-  const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
-  const running = status.status === 0 && /is running/i.test(out);
-  if (!running || !colimaGuestDnsBroken()) return;
-  restartColimaWithIpv4Dns();
+  if (!colimaIsRunning()) startColimaVm();
+  pinColimaDns();
+  ensureColimaDockerHost();
+  waitForDocker();
+  if (colimaCanResolveDebian()) return;
+
+  log.warn('Colima cannot resolve deb.debian.org; recreating the VM', {
+    dns: [...COLIMA_DNS],
+  });
+  execSync('colima delete -f', { stdio: 'inherit', timeout: 180_000 });
+  startColimaVm();
+  pinColimaDns();
+  ensureColimaDockerHost();
+  waitForDocker();
+  if (!colimaCanResolveDebian()) {
+    throw new Error(
+      'Colima DNS cannot resolve deb.debian.org. Image builds need that name for apt.',
+    );
+  }
 }
 
 function startMacosRuntime(): void {
@@ -192,25 +238,7 @@ function startMacosRuntime(): void {
     return;
   }
   if (commandExists('colima')) {
-    const status = spawnSync('colima', ['status'], { encoding: 'utf-8' });
-    const out = `${status.stdout ?? ''}\n${status.stderr ?? ''}`;
-    const running = status.status === 0 && /is running/i.test(out);
-    if (running) {
-      if (colimaGuestDnsBroken()) {
-        restartColimaWithIpv4Dns();
-      } else {
-        log.info('Colima already running');
-        ensureColimaDockerHost();
-      }
-      return;
-    }
-    // Blocks until the VM is ready (first start can take several minutes).
-    log.info('Starting Colima', { dns: [...COLIMA_DNS] });
-    execSync(colimaStartCommand(), {
-      stdio: 'inherit',
-      timeout: 300_000,
-    });
-    ensureColimaDockerHost();
+    ensureColimaIpv4Dns();
     return;
   }
   // Last resort — user may have Desktop without the usual app path.
@@ -446,12 +474,23 @@ export async function run(args: string[]): Promise<void> {
     log.info('Debian HTTP (port 80) unreachable — using HTTPS apt mirrors in the image build');
   }
 
-  // Colima can already answer `docker info` and still resolve via [::1].
+  // Colima can already answer `docker info` and still fail apt name lookup.
   if (preferColimaOnMac()) {
     try {
       ensureColimaIpv4Dns();
     } catch (err) {
-      log.warn('Colima DNS restart failed', { err });
+      log.error('Colima DNS repair failed', { err });
+      emitStatus('SETUP_CONTAINER', {
+        RUNTIME: runtime,
+        IMAGE: image,
+        BUILD_OK: false,
+        TEST_OK: false,
+        STATUS: 'failed',
+        ENGINE: macosEngineLabel(),
+        ERROR: 'colima_dns',
+        LOG: 'logs/setup.log',
+      });
+      process.exit(1);
     }
   }
 

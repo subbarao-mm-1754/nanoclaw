@@ -68,7 +68,7 @@ Preference order in `setup/install-docker.sh`:
 At container-step start time (`setup/container.ts`):
 
 - Desktop present → `open -a Docker`
-- Else Colima → `colima start --dns 1.1.1.1 --dns 8.8.8.8` (blocks until ready). Explicit IPv4 DNS avoids the macOS `::1` resolver, which the VM cannot query and which breaks Docker Hub pulls (`docker/dockerfile` and the agent base image). A VM already running with `nameserver ::1` is restarted once with those resolvers. Linux/Podman does not use this path.
+- Else Colima → `colima start --dns 1.1.1.1 --dns 8.8.8.8`, then setup writes those resolvers into the guest (`/etc/resolv.conf` and dockerd) and checks that the VM can resolve `deb.debian.org`. If an existing VM still cannot, setup runs `colima delete -f` and creates it again. Linux/Podman does not use this path.
 
 ---
 
