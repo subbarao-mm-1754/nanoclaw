@@ -128,8 +128,10 @@ ENV PATH="$PNPM_HOME:$PATH"
 # silently skips claude-code's native-binary postinstall and agent-browser's
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
+# Node 25+ dropped corepack from the distribution, so node:26-slim has npm
+# and no corepack binary. Install the pinned pnpm with npm.
 ARG PNPM_VERSION=10.33.0
-RUN --network=host corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+RUN --network=host npm install -g "pnpm@${PNPM_VERSION}"
 
 RUN --network=host \
     --mount=type=cache,target=/root/.cache/pnpm \
