@@ -431,10 +431,11 @@ export async function run(args: string[]): Promise<void> {
   }
 
   const extraBuildFlags: string[] = [];
-  // Rootless Podman often cannot reach the internet via pasta/slirp (apt
-  // times out to deb.debian.org). Host network matches a normal `curl` on
-  // the machine. Docker Desktop / Colima on macOS should not use this.
-  if (getPlatform() === 'linux') {
+  // The default build sandbox often has no working DNS: rootless Podman via
+  // pasta/slirp, and Colima's embedded resolver (::1). Host network is the
+  // Linux machine, or the Colima/Docker Desktop VM, which can already pull
+  // images. Dockerfile RUN steps that download also set --network=host.
+  if (getPlatform() === 'linux' || getPlatform() === 'macos') {
     extraBuildFlags.push('--network=host');
   }
 

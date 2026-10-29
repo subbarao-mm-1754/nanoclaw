@@ -36,8 +36,13 @@ ARG APT_USE_HTTPS=false
 # Apt: IPv4 always. HTTP unless the host installer passed APT_USE_HTTPS=true
 # (port 80 blocked). HTTPS verify is off only for this RUN — node:slim has no
 # CA store until ca-certificates is installed.
+#
+# --network=host: the build sandbox DNS on Colima (and rootless Podman) often
+# cannot resolve deb.debian.org even when the VM itself can. Host network is
+# the VM on Colima/Docker Desktop and the machine on Linux.
 ARG APT_USE_HTTPS=false
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+RUN --network=host \
+    --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     printf '%s\n' \
       'Acquire::ForceIPv4 "true";' \
@@ -92,7 +97,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
+RUN --network=host curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
     rm -rf /root/.bun
 
@@ -103,7 +108,8 @@ WORKDIR /app
 
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
-RUN --mount=type=cache,target=/root/.bun/install/cache \
+RUN --network=host \
+    --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
@@ -123,17 +129,20 @@ ENV PATH="$PNPM_HOME:$PATH"
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
 ARG PNPM_VERSION=10.33.0
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+RUN --network=host corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
+RUN --network=host \
+    --mount=type=cache,target=/root/.cache/pnpm \
     echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
     echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc && \
     pnpm install -g "vercel@${VERCEL_VERSION}"
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
+RUN --network=host \
+    --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
+RUN --network=host \
+    --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
