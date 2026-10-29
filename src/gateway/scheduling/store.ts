@@ -1,3 +1,4 @@
+import { platformMessageIdFromSession } from '../../session-message-id.js';
 import { getGatewayDb } from '../db/connection.js';
 import { getOrCreateConversation } from '../store/conversations.js';
 import { getWorkspace } from '../store/workspaces.js';
@@ -157,7 +158,12 @@ export function deleteGatewaySchedule(id: string): boolean {
   return result.changes > 0;
 }
 
-/** Clear terminal runs so their schedules may fire again. */
+/**
+ * Release a schedule only after its task turn is actually finished.
+ * A delivered chat reply is not enough: the container may still be using tools.
+ * Spawn failures are the exception — the gateway marks that inbound row failed
+ * before a container turn exists.
+ */
 export function reconcileGatewayScheduleRuns(): void {
   const db = getGatewayDb();
   const ts = now();
@@ -165,19 +171,10 @@ export function reconcileGatewayScheduleRuns(): void {
     db.prepare(
       `UPDATE gateway_schedule_runs
           SET status = 'failed', error = COALESCE(error, 'Gateway message processing failed'), updated_at = ?
-        WHERE status = 'enqueued'
+        WHERE status IN ('claimed', 'enqueued')
           AND EXISTS (
             SELECT 1 FROM customer_messages m
              WHERE m.id = gateway_schedule_runs.inbound_message_id AND m.status = 'failed'
-          )`,
-    ).run(ts);
-    db.prepare(
-      `UPDATE gateway_schedule_runs
-          SET status = 'completed', updated_at = ?
-        WHERE status = 'enqueued'
-          AND NOT EXISTS (
-            SELECT 1 FROM customer_messages m
-             WHERE m.id = gateway_schedule_runs.inbound_message_id
           )`,
     ).run(ts);
     db.prepare(
@@ -188,6 +185,44 @@ export function reconcileGatewayScheduleRuns(): void {
         )`,
     ).run(ts);
   })();
+}
+
+/**
+ * Worker report that the schedule container finished this inbound task.
+ * The worker sends the session id (`${gatewayId}:${agentGroupId}`). The run
+ * row stores the gateway id.
+ */
+export function finishGatewayScheduleRun(
+  inboundMessageId: string,
+  status: 'completed' | 'failed',
+  error?: string,
+): boolean {
+  const db = getGatewayDb();
+  const gatewayMessageId = platformMessageIdFromSession(inboundMessageId);
+  const run = db
+    .prepare(
+      `SELECT id, status, inbound_message_id FROM gateway_schedule_runs
+        WHERE inbound_message_id = ? OR inbound_message_id = ?`,
+    )
+    .get(inboundMessageId, gatewayMessageId) as
+    | { id: string; status: string; inbound_message_id: string }
+    | undefined;
+  if (!run) return false;
+  if (run.status === 'completed' || run.status === 'failed') return true;
+
+  const ts = now();
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE gateway_schedule_runs
+          SET status = ?, error = ?, updated_at = ?
+        WHERE id = ? AND status IN ('claimed', 'enqueued')`,
+    ).run(status, error ?? null, ts, run.id);
+    db.prepare(
+      `UPDATE gateway_schedules SET active_run_id = NULL, updated_at = ? WHERE active_run_id = ?`,
+    ).run(ts, run.id);
+    db.prepare('DELETE FROM customer_messages WHERE id = ?').run(run.inbound_message_id);
+  })();
+  return true;
 }
 
 export interface ClaimedGatewaySchedule {

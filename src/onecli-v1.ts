@@ -200,16 +200,41 @@ export async function grantAllVaultSecretsToAgentV1(agentId: string): Promise<vo
   }
 }
 
+const ENSURE_AGENT_RETRY_DELAYS_MS = [2000, 4000, 8000];
+
+/** OneCLI can briefly lose its database (e.g. container network churn); retry 5xx and network errors. */
+async function postAgentWithRetry(input: { name: string; identifier: string }): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    let res: Response | null = null;
+    let fetchErr: unknown = null;
+    try {
+      res = await v1Fetch('POST', '/v1/agents', { name: input.name, identifier: input.identifier });
+    } catch (err) {
+      fetchErr = err;
+    }
+    const transient = fetchErr !== null || (res !== null && res.status >= 500);
+    const delay = ENSURE_AGENT_RETRY_DELAYS_MS[attempt];
+    if (!transient || delay === undefined) {
+      if (fetchErr !== null) throw fetchErr;
+      return res!;
+    }
+    log.warn('OneCLI ensureAgent transient failure — retrying', {
+      identifier: input.identifier,
+      status: res?.status,
+      attempt: attempt + 1,
+      delayMs: delay,
+    });
+    await new Promise((r) => setTimeout(r, delay));
+  }
+}
+
 export async function ensureAgentV1(input: { name: string; identifier: string }): Promise<void> {
   if (!ONECLI_API_KEY) {
     throw new OnecliV1Error(
       'ONECLI_API_KEY is not set. Re-run NanoClaw setup so it can write the local vault key, then restart gateway and worker.',
     );
   }
-  const res = await v1Fetch('POST', '/v1/agents', {
-    name: input.name,
-    identifier: input.identifier,
-  });
+  const res = await postAgentWithRetry(input);
   if (!res.ok && res.status !== 409) {
     const text = await res.text().catch(() => '');
     throw new OnecliV1Error(

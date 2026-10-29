@@ -295,6 +295,7 @@ export async function runProcessMessageJob(
       jobId: job.job_id,
       buildJobId: job.build_job_id,
       groupDir: paths.group_dir,
+      scheduleInboundMessageId: isScheduleTask(job) ? job.inbound.id : undefined,
     });
   }
 

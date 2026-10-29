@@ -95,6 +95,7 @@ import { getActiveBuildJobForUser } from './store/builds.js';
 import {
   createGatewaySchedule,
   deleteGatewaySchedule,
+  finishGatewayScheduleRun,
   getGatewaySchedule,
   listGatewayScheduleRuns,
   listGatewaySchedules,
@@ -1519,6 +1520,28 @@ async function handleInternalMcpAuthRequest(
   jsonResponse(res, result.ok ? 200 : 400, result);
 }
 
+async function handleInternalScheduleFinish(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  const body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  const status = body.status === 'failed' ? 'failed' : body.status === 'completed' ? 'completed' : null;
+  if (!status) {
+    jsonResponse(res, 400, { error: 'status must be completed or failed' });
+    return;
+  }
+  const finished = finishGatewayScheduleRun(
+    requireString(body, 'inboundMessageId'),
+    status,
+    typeof body.error === 'string' ? body.error : undefined,
+  );
+  jsonResponse(res, finished ? 200 : 404, { ok: finished });
+}
+
 async function handleInternalSchedule(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorizeWorkerCallback(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -1874,6 +1897,11 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     if (req.method === 'POST' && pathname === '/v1/worker/callbacks/outbound') {
       await handleWorkerOutboundCallbackHttp(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/internal/schedules/finish') {
+      await handleInternalScheduleFinish(req, res);
       return;
     }
 

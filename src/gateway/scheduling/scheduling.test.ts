@@ -7,6 +7,7 @@ import { nextCronOccurrence } from './cron.js';
 import { createGatewayScheduleExecutor } from './executor.js';
 import {
   createGatewaySchedule,
+  finishGatewayScheduleRun,
   getGatewaySchedule,
   listGatewayScheduleRuns,
 } from './store.js';
@@ -139,5 +140,34 @@ describe('gateway scheduling', () => {
       timezone: 'UTC',
       delivery: { channel_type: 'zoho-cliq', platform_id: 'chat-1' },
     }).ok).toBe(false);
+  });
+
+  it('keeps a schedule locked after its reply is delivered until the turn finishes', async () => {
+    const schedule = createGatewaySchedule({
+      id: 'schedule-lock',
+      workspace_id: 'ws-schedule',
+      prompt: 'Do the scheduled work.',
+      cron_expression: '* * * * *',
+      timezone: 'UTC',
+      delivery: { channel_type: 'zoho-cliq', platform_id: 'chat-1' },
+    });
+    getGatewayDb()
+      .prepare('UPDATE gateway_schedules SET next_run_at = ? WHERE id = ?')
+      .run('2026-10-27T09:15:00.000Z', schedule.id);
+
+    const executor = createGatewayScheduleExecutor({ intervalMs: 60_000, now: () => tickAt });
+    expect(await executor.tick()).toBe(1);
+    const run = listGatewayScheduleRuns(schedule.id)[0]!;
+    getGatewayDb().prepare('DELETE FROM customer_messages WHERE id = ?').run(run.inbound_message_id);
+
+    expect(await executor.tick()).toBe(0);
+    expect(getGatewaySchedule(schedule.id)?.active_run_id).toBe(run.id);
+    expect(listGatewayScheduleRuns(schedule.id)).toHaveLength(1);
+
+    expect(
+      finishGatewayScheduleRun(`${run.inbound_message_id}:ag-schedule`, 'completed'),
+    ).toBe(true);
+    expect(getGatewaySchedule(schedule.id)?.active_run_id).toBeNull();
+    expect(listGatewayScheduleRuns(schedule.id)[0]?.status).toBe('completed');
   });
 });

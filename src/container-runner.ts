@@ -38,7 +38,10 @@ import type { AgentGroup, Session } from './types.js';
 
 
 /** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const activeContainers = new Map<
+  string,
+  { process: ChildProcess; containerName: string; stopReason?: string }
+>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -237,10 +240,18 @@ async function spawnContainer(session: Session, spawnContext: WorkerSpawnContext
   container.stdout?.on('data', () => {});
 
   container.on('close', (code) => {
+    const stopReason = activeContainers.get(session.id)?.stopReason;
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     notifyContainerStopped(session.id);
-    if (code !== 0 && code !== null) {
+    if (stopReason) {
+      log.info('Container stopped', {
+        sessionId: session.id,
+        code,
+        containerName,
+        reason: stopReason,
+      });
+    } else if (code !== 0 && code !== null) {
       const detail = stderrBuf.trim().slice(0, 2000);
       log.warn('Container exited with error', {
         sessionId: session.id,
@@ -271,6 +282,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     entry.process.once('close', onExit);
   }
 
+  entry.stopReason = reason;
   log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
   try {
     stopContainer(entry.containerName);

@@ -80,6 +80,28 @@ export async function handleScheduleSystemMessage(opts: {
   return true;
 }
 
+/** Tell the gateway a schedule container turn reached a terminal processing_ack. */
+export async function reportScheduleRunFinished(input: {
+  inboundMessageId: string;
+  status: 'completed' | 'failed';
+  error?: string;
+}): Promise<'ok' | 'missing'> {
+  const url = `${GATEWAY_PUBLIC_URL.replace(/\/$/, '')}/v1/internal/schedules/finish`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (WORKER_AUTH_TOKEN) headers.Authorization = `Bearer ${WORKER_AUTH_TOKEN}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(input),
+  });
+  if (res.status === 404) return 'missing';
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Schedule finish HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return 'ok';
+}
+
 async function callGatewaySchedule(body: Record<string, unknown>): Promise<{
   ok: boolean;
   data?: unknown;

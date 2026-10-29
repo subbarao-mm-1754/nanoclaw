@@ -13,7 +13,7 @@ import {
 } from '../db/session-db.js';
 import { log } from '../log.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from '../session-manager.js';
-import { isContainerRunning, onContainerExit } from '../container-runner.js';
+import { isContainerRunning, onContainerExit, stopContainerSession } from '../container-runner.js';
 import { captureMemoryBaseline, collectMemoryPatch } from './memory-sync.js';
 import { workerWorkspacePaths } from './workspace-store.js';
 import type {
@@ -23,7 +23,7 @@ import type {
   WorkerOutboundCallbackPayload,
 } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
-import { handleScheduleSystemMessage } from './schedule-actions.js';
+import { handleScheduleSystemMessage, reportScheduleRunFinished } from './schedule-actions.js';
 import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
 import { handleMcpAuthSystemMessage } from './mcp-auth-actions.js';
 import { buildOutboundMultipartBody, type OutboundMultipartFilePart } from './outbound-multipart.js';
@@ -42,6 +42,8 @@ export interface SessionCollectorTarget {
   buildJobId?: string;
   /** When set, collector captures memory patch on stop. */
   groupDir?: string;
+  /** Schedule task inbound id. Its processing_ack releases the gateway run lock. */
+  scheduleInboundMessageId?: string;
 }
 
 interface ActiveCollector extends SessionCollectorTarget {
@@ -51,6 +53,7 @@ interface ActiveCollector extends SessionCollectorTarget {
   stopTimer: ReturnType<typeof setTimeout> | null;
   unsubscribeExit: (() => void) | null;
   stopping: boolean;
+  scheduleRunReported: boolean;
 }
 
 const collectors = new Map<string, ActiveCollector>();
@@ -492,6 +495,7 @@ async function tickCollector(collector: ActiveCollector): Promise<void> {
     } else {
       collector.emptyPolls += 1;
     }
+    await reportScheduleTurnIfFinished(collector);
   } finally {
     collector.inflight = false;
     inflightSessions.delete(collector.sessionId);
@@ -572,6 +576,14 @@ async function finalizeCollector(sessionId: string, reason: string): Promise<voi
   collectors.delete(sessionId);
   stopLoopIfIdle();
   log.info('Worker outbound collector stopped', { sessionId, reason });
+  if (!collector.scheduleRunReported && collector.scheduleInboundMessageId) {
+    const ack = readProcessingAckStatus(
+      collector.agentGroupId,
+      collector.sessionId,
+      collector.scheduleInboundMessageId,
+    );
+    await reportScheduleTurn(collector, ack === 'completed' ? 'completed' : 'failed', reason);
+  }
 }
 
 /**
@@ -586,6 +598,13 @@ export function startSessionCollector(target: SessionCollectorTarget): void {
     existing.conversationId = target.conversationId ?? existing.conversationId;
     existing.jobId = target.jobId ?? existing.jobId;
     existing.buildJobId = target.buildJobId ?? existing.buildJobId;
+    if (
+      target.scheduleInboundMessageId &&
+      target.scheduleInboundMessageId !== existing.scheduleInboundMessageId
+    ) {
+      existing.scheduleInboundMessageId = target.scheduleInboundMessageId;
+      existing.scheduleRunReported = false;
+    }
     existing.workspaceId = target.workspaceId;
     existing.agentGroupId = target.agentGroupId;
     if (target.groupDir && !existing.memoryBaseline) {
@@ -621,6 +640,7 @@ export function startSessionCollector(target: SessionCollectorTarget): void {
     stopTimer: null,
     unsubscribeExit: null,
     stopping: false,
+    scheduleRunReported: false,
   };
 
   collector.unsubscribeExit = onContainerExit(target.sessionId, () => {
@@ -692,6 +712,52 @@ export function stopOutboundCollectorRuntime(): void {
 }
 
 export type InboundTurnWaitResult = 'completed' | 'failed' | 'timeout' | 'container-stopped';
+
+async function reportScheduleTurn(
+  collector: ActiveCollector,
+  status: 'completed' | 'failed',
+  error?: string,
+): Promise<void> {
+  const inboundMessageId = collector.scheduleInboundMessageId;
+  if (!inboundMessageId || collector.scheduleRunReported) return;
+  collector.scheduleRunReported = true;
+  try {
+    const result = await reportScheduleRunFinished({ inboundMessageId, status, error });
+    if (result === 'missing') {
+      log.warn('Schedule run not found; stopped reporting this turn', {
+        sessionId: collector.sessionId,
+        inboundMessageId,
+      });
+      return;
+    }
+    log.info('Worker reported schedule turn finished', {
+      sessionId: collector.sessionId,
+      inboundMessageId,
+      status,
+    });
+  } catch (err) {
+    collector.scheduleRunReported = false;
+    log.error('Worker failed reporting schedule turn', {
+      sessionId: collector.sessionId,
+      inboundMessageId,
+      err,
+    });
+  }
+}
+
+async function reportScheduleTurnIfFinished(collector: ActiveCollector): Promise<void> {
+  const inboundMessageId = collector.scheduleInboundMessageId;
+  if (!inboundMessageId || collector.scheduleRunReported) return;
+  const ack = readProcessingAckStatus(collector.agentGroupId, collector.sessionId, inboundMessageId);
+  if (ack !== 'completed' && ack !== 'failed') return;
+  await reportScheduleTurn(collector, ack);
+  if (!collector.scheduleRunReported) return;
+  // Each firing starts a fresh session, so the idle container has no further use.
+  // Stopping it now keeps the next firing from killing it right before a spawn.
+  void stopContainerSession(collector.sessionId, 'schedule-turn-finished').catch((err) => {
+    log.warn('Failed to stop finished schedule container', { sessionId: collector.sessionId, err });
+  });
+}
 
 function readProcessingAckStatus(
   agentGroupId: string,

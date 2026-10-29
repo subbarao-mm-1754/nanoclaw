@@ -215,7 +215,10 @@ export async function handleWorkerOutboundCallback(
     if (useHttp) endHttpDelivery();
   }
 
-  if (processingInbound && deliveredIds.length > 0) {
+  // Schedule runs stay locked until the worker reports the task turn finished.
+  // Delivering an intermediate reply must not delete the inbound row.
+  const scheduleTurn = conversation.channel_type === 'schedule';
+  if (processingInbound && deliveredIds.length > 0 && !scheduleTurn) {
     updateMessageStatus(processingInbound.id, 'delivered', { worker_status: 'completed' });
     deleteMessages([processingInbound.id, ...deliveredIds]);
   } else if (deliveredIds.length > 0) {

@@ -72,11 +72,13 @@ Studio does not create, edit, or delete schedules. Do that in chat.
 
 Each tick does two things.
 
-**Close finished runs.** For a run still marked `enqueued`:
+**Close finished runs.** A delivered chat reply does not finish a schedule run. The agent may still be using tools after the first message. The lock stays until one of these happens:
 
-- If its inbound message is `failed`, the run becomes `failed`.
-- If its inbound message is gone, the run becomes `completed`. The processor deletes a message after a successful delivery.
-- Either result clears `active_run_id`, which is the lock that blocks the next firing of that schedule.
+- The worker reports that this task's `processing_ack` is `completed` or `failed`. That report is `POST /v1/internal/schedules/finish`.
+- The gateway inbound row is `failed` (the worker never started the container). Reconcile marks that run `failed`.
+- The container exits without a terminal ack. The worker reports the run `failed` so the lock cannot stick.
+
+Any of those clears `active_run_id`, which is the lock that blocks the next firing of that schedule. Deleting the inbound row early does not count as completion.
 
 **Fire what is due.** The tick asks SQLite for one row that is enabled, has no active run, and whose `next_run_at` is already due. It does not load every schedule. The claim is one transaction:
 
@@ -97,7 +99,7 @@ The run status becomes `enqueued`. The tick repeats until no due, unlocked sched
 
 If the gateway was down past a slot, that overdue row fires once on the next tick. `next_run_at` then jumps to the next future match. Missed hours in between are not replayed.
 
-While a run's message is still `pending` or `processing`, `active_run_id` stays set. A later cron minute for that same schedule does not enqueue another run. A different schedule on the same agent has its own lock and can still fire.
+While `active_run_id` is set, a later cron minute for that same schedule does not enqueue another run. A different schedule on the same agent has its own lock and can still fire.
 
 ## Gateway message processor
 
@@ -134,7 +136,7 @@ Check overnight errors and post a short summary.
 
 `scheduleId` and `runId` stay in the JSON and are not shown to the model. The model uses the same tools and workspace as a chat turn. It replies with a normal `messages_out` chat row. Routing copied from the task sends that reply to the delivery chat.
 
-The worker collector pushes the reply to the gateway. The gateway delivers it on the stored channel. When that callback deletes the inbound message, the scheduler's next reconcile marks the run `completed` and releases `active_run_id`.
+The worker collector pushes each reply to the gateway, and the gateway delivers it on the stored channel. For a schedule conversation that delivery does not delete the inbound task or release the lock. The collector watches `processing_ack` for that task id. When the ack is `completed` or `failed`, it tells the gateway, which then marks the run and clears `active_run_id`. The next firing is allowed only after that, so clearing the previous session cannot stop a container that is still in the turn.
 
 The container is started with `--rm` and exits after the idle timeout (`IDLE_TIMEOUT`, default 30 minutes). A schedule that is waiting for tomorrow does not hold an agent process in memory.
 
