@@ -22,7 +22,7 @@ Windows is supported via **WSL2** (treat as Linux below).
 | **Gateway + worker OS services** | launchd | systemd (or nohup fallback) | `./bin/zclaw service install` |
 | **`zclaw` CLI symlink** | `~/.local/bin/zclaw` | `~/.local/bin/zclaw` | Lifecycle: start/stop/status/logs |
 
-On **`nanoclaw start` / `restart` / `service install`**, local OneCLI is
+On **`zclaw start` / `restart` / `service install`**, local OneCLI is
 ensured first: if `ONECLI_URL` already responds healthy → skip; else run
 `onecli start` and wait briefly. Remote OneCLI URLs are probed only.
 
@@ -63,7 +63,7 @@ Preference order in `setup/install-docker.sh`:
 
 **Why Buildx:** the agent `Dockerfile` uses BuildKit cache mounts. Recent Docker CLIs need the `docker-buildx` plugin for `docker build` when BuildKit is the default; Homebrew’s `docker` formula does not include it.
 
-**Docker Desktop is never installed by NanoClaw setup.** Only reused if the user already has it.
+**Docker Desktop is never installed by ZClaw setup.** Only reused if the user already has it.
 
 At container-step start time (`setup/container.ts`):
 

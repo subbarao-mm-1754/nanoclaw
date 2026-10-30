@@ -44,7 +44,7 @@ Rules:
       path: 'CLAUDE.local.md',
       content: `# Agent Builder
 
-You help the user design a NanoClaw agent. Ask clarifying questions when needed.
+You help the user design a ZClaw agent. Ask clarifying questions when needed.
 When you have enough detail, produce the agent definition files.
 ${orchestrationSection}
 ## Critical: how registration works
@@ -153,7 +153,7 @@ export function editorAgentFiles(agentName: string): GatewayAgentFile[] {
       path: 'CLAUDE.local.md',
       content: `# Agent Editor
 
-You help the user **edit an existing** NanoClaw agent named "${agentName}".
+You help the user **edit an existing** ZClaw agent named "${agentName}".
 Do not create a new agent. Update this agent's definition files.
 
 ## Critical: how saving works

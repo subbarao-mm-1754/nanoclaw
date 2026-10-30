@@ -2,9 +2,9 @@
 
 ## Overview
 
-This document covers **feature skills** — skills that add capabilities via git branch merges. This is the most complex skill type and the primary way NanoClaw is extended.
+This document covers **feature skills** — skills that add capabilities via git branch merges. This is the most complex skill type and the primary way ZClaw is extended.
 
-NanoClaw has four types of skills overall. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full taxonomy:
+ZClaw has four types of skills overall:
 
 | Type | Location | How it works |
 |------|----------|-------------|
@@ -25,7 +25,7 @@ This replaces the previous `skills-engine/` system (three-way file merging, `.na
 
 The upstream repo (`nanocoai/nanoclaw`) maintains:
 
-- `main` — core NanoClaw (no skill code)
+- `main` — core ZClaw (no skill code)
 - `skill/discord` — main + Discord integration
 - `skill/telegram` — main + Telegram integration
 - `skill/slack` — main + Slack integration
@@ -70,7 +70,7 @@ Dependent skills (e.g., `telegram-swarm` depends on `telegram`) are only offered
 
 ### Marketplace configuration
 
-NanoClaw's `.claude/settings.json` registers the official marketplace:
+ZClaw's `.claude/settings.json` registers the official marketplace:
 
 ```json
 {
@@ -323,7 +323,7 @@ Standard fork contribution workflow. Their custom changes stay on their main and
 
 ## Contributing a Skill
 
-The flow below is for **feature skills** (branch-based). For utility skills (self-contained tools) and container skills, the contributor opens a PR that adds files directly to `.claude/skills/<name>/` or `container/skills/<name>/` — no branch extraction needed. See [CONTRIBUTING.md](../CONTRIBUTING.md) for all skill types.
+The flow below is for **feature skills** (branch-based). For utility skills (self-contained tools) and container skills, the contributor opens a PR that adds files directly to `.claude/skills/<name>/` or `container/skills/<name>/` — no branch extraction needed. The four skill types are listed at the top of this document.
 
 ### Contributor flow (feature skills)
 
@@ -374,13 +374,13 @@ Anyone can maintain their own fork with skill branches and their own marketplace
 
 A community contributor:
 
-1. Maintains a fork of NanoClaw (e.g., `alice/nanoclaw`)
+1. Maintains a fork of ZClaw (e.g., `alice/nanoclaw`)
 2. Creates `skill/*` branches on their fork with their custom skills
 3. Creates a marketplace repo (e.g., `alice/nanoclaw-skills`) with a `.claude-plugin/marketplace.json` and plugin structure
 
 ### Adding a community marketplace
 
-If the community contributor is trusted, they can open a PR to add their marketplace to NanoClaw's `.claude/settings.json`:
+If the community contributor is trusted, they can open a PR to add their marketplace to ZClaw's `.claude/settings.json`:
 
 ```json
 {
@@ -401,7 +401,7 @@ If the community contributor is trusted, they can open a PR to add their marketp
 }
 ```
 
-Once merged, all NanoClaw users automatically discover the community marketplace alongside the official one.
+Once merged, all ZClaw users automatically discover the community marketplace alongside the official one.
 
 ### Installing community skills
 
@@ -430,7 +430,7 @@ Users can also browse and install community plugins manually via `/plugin`.
 
 ## Flavors
 
-A flavor is a curated fork of NanoClaw — a combination of skills, custom changes, and configuration tailored for a specific use case (e.g., "NanoClaw for Sales," "NanoClaw Minimal," "NanoClaw for Developers").
+A flavor is a curated fork of ZClaw — a combination of skills, custom changes, and configuration tailored for a specific use case (e.g., "ZClaw for Sales," "ZClaw Minimal," "ZClaw for Developers").
 
 ### Creating a flavor
 
@@ -443,10 +443,10 @@ A flavor is a curated fork of NanoClaw — a combination of skills, custom chang
 
 During `/setup`, users are offered a choice of flavors before any configuration happens. The setup skill reads `flavors.yaml` from the repo (shipped with upstream, always up to date) and presents options:
 
-AskUserQuestion: "Start with a flavor or default NanoClaw?"
-- Default NanoClaw
-- NanoClaw for Sales — Gmail + Slack + CRM (maintained by alice)
-- NanoClaw Minimal — Telegram-only, lightweight (maintained by bob)
+AskUserQuestion: "Start with a flavor or default ZClaw?"
+- Default ZClaw
+- ZClaw for Sales — Gmail + Slack + CRM (maintained by alice)
+- ZClaw Minimal — Telegram-only, lightweight (maintained by bob)
 
 If a flavor is chosen:
 
@@ -480,12 +480,12 @@ The flavor maintainer keeps their fork updated (merging upstream, updating skill
 
 ```yaml
 flavors:
-  - name: NanoClaw for Sales
+  - name: ZClaw for Sales
     repo: alice/nanoclaw
     description: Gmail + Slack + CRM integration, daily pipeline summaries
     maintainer: alice
 
-  - name: NanoClaw Minimal
+  - name: ZClaw Minimal
     repo: bob/nanoclaw
     description: Telegram-only, no container overhead
     maintainer: bob
@@ -538,8 +538,8 @@ Operational skills (`setup`, `debug`, `update-nanoclaw`, `customize`, `update-sk
 
 Before:
 ```bash
-git clone https://github.com/nanocoai/NanoClaw.git
-cd NanoClaw
+git clone https://github.com/nanocoai/ZClaw.git
+cd ZClaw
 claude
 ```
 
@@ -639,7 +639,7 @@ Users only need to re-merge a skill branch if the skill itself was updated (not 
 
 > **Skills are now git branches**
 >
-> We've simplified how skills work in NanoClaw. Instead of a custom skills engine, skills are now git branches that you merge in.
+> We've simplified how skills work in ZClaw. Instead of a custom skills engine, skills are now git branches that you merge in.
 >
 > **What this means for you:**
 > - Applying a skill: `git fetch upstream skill/discord && git merge upstream/skill/discord`
@@ -674,4 +674,4 @@ Users only need to re-merge a skill branch if the skill itself was updated (not 
 >
 > That's it. We'll create a `skill/<name>` branch from your PR, add you to CONTRIBUTORS.md, and add the SKILL.md to the marketplace. CI automatically keeps skill branches merged-forward with `main` using Claude to resolve any conflicts.
 >
-> **Want to run your own skill marketplace?** Maintain skill branches on your fork and create a marketplace repo. Open a PR to add it to NanoClaw's auto-discovered marketplaces — or users can add it manually via `/plugin marketplace add`.
+> **Want to run your own skill marketplace?** Maintain skill branches on your fork and create a marketplace repo. Open a PR to add it to ZClaw's auto-discovered marketplaces — or users can add it manually via `/plugin marketplace add`.

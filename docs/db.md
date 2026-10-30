@@ -1,4 +1,4 @@
-# NanoClaw Database Architecture — Overview
+# ZClaw Database Architecture — Overview
 
 > **Partially superseded.** This product uses **gateway.db** + per-session
 > `inbound.db`/`outbound.db`. Classic central `data/v2.db` is removed.
@@ -14,7 +14,7 @@ sections below are historical.
 
 ## 1. The three databases
 
-NanoClaw uses **three kinds of SQLite database**, all on the host filesystem:
+ZClaw uses **three kinds of SQLite database**, all on the host filesystem:
 
 | DB | Location | Writer | Readers | Purpose |
 |----|----------|--------|---------|---------|

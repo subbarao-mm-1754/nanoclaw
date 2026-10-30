@@ -6,7 +6,7 @@
 - [ ] **Operational/container skill** - adds a workflow or agent skill (SKILL.md only, no source changes)
 - [ ] **Fix** - bug fix or security fix to source code
 - [ ] **Simplification** - reduces or simplifies source code
-- [ ] **Documentation** - docs, README, or CONTRIBUTING changes only
+- [ ] **Documentation** - docs or README changes only
 
 ## Description
 

@@ -1,6 +1,6 @@
 # Setup flow
 
-This document is the contract for NanoClaw's end-to-end scripted setup
+This document is the contract for ZClaw's end-to-end scripted setup
 (`bash zclaw.sh` → `pnpm run setup:auto`). Read it before adding a new
 step, fixing a regression, or changing how output is rendered.
 

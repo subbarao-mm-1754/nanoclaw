@@ -1,4 +1,4 @@
-# NanoClaw product tree (gateway + worker)
+# ZClaw product tree (gateway + worker)
 
 This fork’s **product** is two separately deployable services:
 

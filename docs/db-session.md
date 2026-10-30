@@ -1,4 +1,4 @@
-# NanoClaw — Per-Session DB Schema
+# ZClaw — Per-Session DB Schema
 
 > Still current for gateway+worker. Host/worker writes `inbound.db`; container
 > writes `outbound.db`. Classic central `v2.db` is unrelated and removed —

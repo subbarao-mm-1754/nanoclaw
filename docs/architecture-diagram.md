@@ -1,4 +1,4 @@
-# NanoClaw Architecture Diagram
+# ZClaw Architecture Diagram
 
 ## System Overview
 

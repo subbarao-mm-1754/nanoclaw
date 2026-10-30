@@ -23,4 +23,4 @@ The right frame is: does this agent need its own memory and context that builds 
 
 ### Writing good `instructions`
 
-Cover: the agent's role, who it takes tasks from (you, by name), how it should report back (on completion only? with milestones for long work?), and any domain-specific rules. Don't restate NanoClaw base behavior — the shared base is already loaded on the agent's end.
+Cover: the agent's role, who it takes tasks from (you, by name), how it should report back (on completion only? with milestones for long work?), and any domain-specific rules. Don't restate ZClaw base behavior — the shared base is already loaded on the agent's end.

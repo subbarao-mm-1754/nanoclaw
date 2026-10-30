@@ -1,4 +1,4 @@
-# NanoClaw — Central DB Schema
+# ZClaw — Central DB Schema
 
 > **Historical / classic host.** This document describes `data/v2.db` and
 > `src/db/migrations/`, which are **not** part of the gateway+worker product.
@@ -256,7 +256,7 @@ Writer: `recordDroppedMessage()` in `src/db/dropped-messages.ts`. On conflict, b
 
 ### 1.13 Chat SDK bridge tables
 
-State backing the `SqliteStateAdapter` used by the Chat SDK bridge (see [api-details.md](api-details.md)). NanoClaw code rarely touches these directly — they're owned by `src/state-sqlite.ts`.
+State backing the `SqliteStateAdapter` used by the Chat SDK bridge (see [api-details.md](api-details.md)). ZClaw code rarely touches these directly — they're owned by `src/state-sqlite.ts`.
 
 ```sql
 CREATE TABLE chat_sdk_kv (
