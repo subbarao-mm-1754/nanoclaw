@@ -23,6 +23,7 @@ import type {
   WorkerOutboundCallbackPayload,
 } from './types.js';
 import { handleKnowledgeSystemMessage } from './knowledge-actions.js';
+import { handleArtifactSystemMessage } from './artifact-actions.js';
 import { handleScheduleSystemMessage, reportScheduleRunFinished } from './schedule-actions.js';
 import { handleBrowserSessionSystemMessage } from './browser-session-actions.js';
 import { handleMcpAuthSystemMessage } from './mcp-auth-actions.js';
@@ -193,12 +194,20 @@ export async function drainOutboundBatch(
                 rawContent: msg.content,
               });
               if (!handledSchedule) {
-                await handleKnowledgeSystemMessage({
+                const handledKnowledge = await handleKnowledgeSystemMessage({
                   workspaceId,
                   agentGroupId,
                   sessionId,
                   rawContent: msg.content,
                 });
+                if (!handledKnowledge) {
+                  await handleArtifactSystemMessage({
+                    workspaceId,
+                    agentGroupId,
+                    sessionId,
+                    rawContent: msg.content,
+                  });
+                }
               }
             }
           }

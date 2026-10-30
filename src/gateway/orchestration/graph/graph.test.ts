@@ -13,9 +13,9 @@ import {
 } from '../store.js';
 import {
   HANDLE_USER_NODE,
-  _resetLangGraphRuntimeForTests,
-  compileOrchestratorLangGraph,
-  isLangGraphOrchestrator,
+  _resetGraphRuntimeForTests,
+  compileOrchestratorGraph,
+  isGraphOrchestrator,
   onOrchestratorDecision,
   onOrchestratorUserMessage,
   onSpecialistReply,
@@ -35,12 +35,12 @@ vi.mock('./a2a.js', async (importOriginal) => {
 beforeEach(() => {
   initGatewayTestDb();
   deleteGatewaySetting(ORCHESTRATION_SETTING_KEY);
-  _resetLangGraphRuntimeForTests();
+  _resetGraphRuntimeForTests();
 });
 
 afterEach(() => {
   closeGatewayDb();
-  _resetLangGraphRuntimeForTests();
+  _resetGraphRuntimeForTests();
 });
 
 const sampleGraph: OrchestratorGraph = {
@@ -53,9 +53,9 @@ const sampleGraph: OrchestratorGraph = {
   loops: [{ from: 'write', to: 'research', max_iterations: 2, when: 'retry' }],
 };
 
-describe('LangGraph orchestration', () => {
+describe('Graph orchestration', () => {
   it('compiles a builder graph with handle_user hub', () => {
-    const compiled = compileOrchestratorLangGraph(sampleGraph);
+    const compiled = compileOrchestratorGraph(sampleGraph);
     expect(compiled).not.toBeNull();
     expect(compiled!.entry).toBe('research');
     expect(compiled!.isTaskNode('research')).toBe(true);
@@ -65,8 +65,8 @@ describe('LangGraph orchestration', () => {
   });
 
   it('returns null for empty graphs (soft mode)', () => {
-    expect(compileOrchestratorLangGraph({ nodes: [] })).toBeNull();
-    expect(compileOrchestratorLangGraph(null)).toBeNull();
+    expect(compileOrchestratorGraph({ nodes: [] })).toBeNull();
+    expect(compileOrchestratorGraph(null)).toBeNull();
   });
 
   it('auto-advances parallel fan-out and join (research → images/logistics → assemble)', () => {
@@ -173,7 +173,7 @@ describe('LangGraph orchestration', () => {
       },
     ]);
     saveOrchestratorGraph(orch.workspace_id, sampleGraph);
-    expect(isLangGraphOrchestrator(orch.workspace_id)).toBe(true);
+    expect(isGraphOrchestrator(orch.workspace_id)).toBe(true);
 
     const runA = await onOrchestratorUserMessage({
       workspaceId: orch.workspace_id,
@@ -192,8 +192,8 @@ describe('LangGraph orchestration', () => {
     expect(runB?.id).toBeTruthy();
     expect(runA!.id).not.toBe(runB!.id);
     expect(runA!.status).toBe('waiting');
-    expect(parseRunState(runA!).langgraph).toMatchObject({
-      engine: 'langgraph',
+    expect(parseRunState(runA!).graph).toMatchObject({
+      engine: 'graph',
       thread_id: runA!.id,
     });
 
@@ -371,7 +371,7 @@ describe('LangGraph orchestration', () => {
     expect(finalResults.research?.status).toBe('completed');
     expect(finalResults.research?.text).toContain('Sources');
     // Interrupt cleared / run left waiting-for-specialist.
-    const lg = parseRunState(runAfter).langgraph as { interrupt?: { kind?: string } | null } | undefined;
+    const lg = parseRunState(runAfter).graph as { interrupt?: { kind?: string } | null } | undefined;
     expect(lg?.interrupt?.kind === 'await_specialist').toBe(false);
     expect(['completed', 'waiting', 'running']).toContain(runAfter.status);
     if (runAfter.status === 'waiting') {
@@ -440,7 +440,7 @@ describe('LangGraph orchestration', () => {
     const ctx = await startResearchRun('restart');
 
     // Restart drops in-process caches; the checkpoint lives in gateway.db.
-    _resetLangGraphRuntimeForTests();
+    _resetGraphRuntimeForTests();
 
     const handled = await onSpecialistReply({
       orchestratorWorkspaceId: ctx.orch.workspace_id,
@@ -459,7 +459,7 @@ describe('LangGraph orchestration', () => {
     expect(run.current_node).toBe('write');
     const results = parseRunState(run).results as Record<string, { text?: string }>;
     expect(results.research?.text).toContain('Sources');
-    const lg = parseRunState(run).langgraph as { interrupt?: { kind?: string; agent?: string } };
+    const lg = parseRunState(run).graph as { interrupt?: { kind?: string; agent?: string } };
     expect(lg.interrupt).toMatchObject({ kind: 'await_specialist', agent: 'writer' });
   });
 
@@ -468,7 +468,7 @@ describe('LangGraph orchestration', () => {
     getGatewayDb()
       .prepare('DELETE FROM gateway_orchestration_checkpoints WHERE thread_id = ?')
       .run(ctx.runId);
-    _resetLangGraphRuntimeForTests();
+    _resetGraphRuntimeForTests();
 
     await onSpecialistReply({
       orchestratorWorkspaceId: ctx.orch.workspace_id,
@@ -503,7 +503,7 @@ describe('LangGraph orchestration', () => {
   });
 
   it('compiles graphs whose node ids match state fields', () => {
-    const compiled = compileOrchestratorLangGraph({
+    const compiled = compileOrchestratorGraph({
       entry: 'status',
       nodes: [
         { id: 'status', agent: 'researcher', type: 'task' },
@@ -513,5 +513,39 @@ describe('LangGraph orchestration', () => {
     });
     expect(compiled).not.toBeNull();
     expect(compiled!.isTaskNode('results')).toBe(true);
+  });
+
+  it('stores a large specialist result as an artifact and hands the next agent only a ref', async () => {
+    const ctx = await startResearchRun('handover');
+    const marker = 'DAY2-MARKER';
+    const text = `${'a'.repeat(2500)}${marker}${'b'.repeat(2500)}`;
+    const handled = await onSpecialistReply({
+      orchestratorWorkspaceId: ctx.orch.workspace_id,
+      conversationId: ctx.conversationId,
+      orchestratorSessionId: ctx.sessionId,
+      fromWorkspaceId: ctx.researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text,
+      messageId: 'msg-big',
+    });
+    expect(handled).toBe(true);
+
+    const { getOrchestrationRun, getAuthorizedOrchestrationArtifact } = await import('../store.js');
+    const run = getOrchestrationRun(ctx.runId)!;
+    const results = parseRunState(run).results as Record<string, { text?: string; artifact_id?: string }>;
+    const artifactId = results.research?.artifact_id;
+    expect(artifactId).toMatch(/^oart-/);
+    expect(results.research?.text).not.toContain(marker);
+    expect(JSON.stringify(parseRunState(run))).not.toContain(marker);
+
+    const lg = parseRunState(run).graph as { interrupt?: { task_packet?: string; agent?: string } };
+    expect(lg.interrupt?.agent).toBe('writer');
+    expect(lg.interrupt?.task_packet).toContain(artifactId);
+    expect(lg.interrupt?.task_packet).toContain('orchestration_read_artifact');
+    expect(lg.interrupt?.task_packet).not.toContain(marker);
+
+    const visible = getAuthorizedOrchestrationArtifact(artifactId!, ctx.researcher.workspace_id);
+    expect(visible?.content_text).toContain(marker);
+    expect(visible?.content_text).toHaveLength(text.length);
   });
 });

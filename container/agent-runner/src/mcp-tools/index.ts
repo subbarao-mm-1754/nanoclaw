@@ -11,6 +11,7 @@ import './interactive.js';
 import './agents.js';
 import './self-mod.js';
 import './knowledge.js';
+import './orchestration.js';
 import './browser-session.js';
 import './mcp-auth.js';
 import { startMcpServer } from './server.js';

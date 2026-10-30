@@ -12,7 +12,7 @@ function formatGraph(graph: OrchestratorGraph | undefined): string {
     ].join(' ');
   }
 
-  const lines: string[] = ['### Registered graph (LangGraph-enforced)', ''];
+  const lines: string[] = ['### Registered graph (gateway-enforced)', ''];
   if (graph.entry) lines.push(`- Entry node: \`${graph.entry}\``);
   lines.push('- Nodes:');
   for (const n of graph.nodes) {
@@ -75,7 +75,7 @@ ${specialistReplyProtocolDocs()}
 2. Delegate tasks with \`send_message\` to a specialist destination name above.
 3. ${
     hasGraph
-      ? 'The Gateway runs this graph with LangGraph. You may choose among **allowed** next branches (edge `when` labels / node ids / specialist names) and update the plan in conversation. You **must not** invent new nodes, change edges, raise loop limits, or ignore max_iterations.'
+      ? 'The Gateway runs this graph. You may choose among **allowed** next branches (edge `when` labels / node ids / specialist names) and update the plan in conversation. You **must not** invent new nodes, change edges, raise loop limits, or ignore max_iterations.'
       : 'Follow the graph and loop limits. Prefer reuse of prior specialist results over re-asking.'
   }
 4. Treat specialist \`ack\` / \`progress\` as "still working" — do **not** advance your plan or tell the user the step is done until you see a terminal status (\`completed\` / \`blocked\` / \`failed\` / \`partial\`).

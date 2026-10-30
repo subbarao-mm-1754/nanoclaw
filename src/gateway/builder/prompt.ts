@@ -116,7 +116,7 @@ Omit \`specialists\` / \`graph\` for single agents. Default \`agent_kind\` is \`
 
 ### Specialist ↔ orchestrator reply protocol (orchestrators only)
 
-The Gateway LangGraph runner advances a node **only** when a specialist sends a
+The Gateway graph runner advances a node **only** when a specialist sends a
 **terminal** status. Teach every create-specialist to:
 
 1. Reply only to destination \`orchestrator\` (agent), never \`client\` / user channels.

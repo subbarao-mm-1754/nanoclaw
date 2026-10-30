@@ -42,7 +42,7 @@ See [setup-install.md](setup-install.md).
 | Knowledge DB (Postgres) | **Not installed by setup.** Set `KNOWLEDGE_DATABASE_URL` (or `DATABASE_URL`) on the gateway to your own Postgres. Required for `knowledge_*` tools. Separate from OneCLI’s Postgres — see [setup-install.md](setup-install.md#agent-knowledge-store-knowledge_database_url) |
 | Live browser streaming | `LIVE_BROWSER_ENABLED=true` |
 | Browser chat UI | Set `CHATBOT_UI_ENABLED=true` — gateway serves `/chat`; Studio **Open chat** with user ticket |
-| Multi-agent LangGraph orchestration | On by default; disable with `MULTI_AGENT_ORCHESTRATION_ENABLED=false` |
+| Multi-agent graph orchestration | On by default; disable with `MULTI_AGENT_ORCHESTRATION_ENABLED=false` |
 | Ollama / OpenCode / Codex providers | Provider skills |
 | Mount allowlist tooling | `/manage-mounts` |
 | Apple Container | `/convert-to-apple-container` |
@@ -55,7 +55,7 @@ Full default-vs-optional install matrix: [setup-install.md](setup-install.md).
 |------|--------|
 | Classic single-process host (`src/index.ts`, router, host delivery, host-sweep) | **Removed** — gateway + worker replace it |
 | Host `ncl` / `scripts/chat.ts` / CLI-agent setup | **Removed** — use `./bin/zclaw` + gateway APIs / Studio |
-| Classic `src/modules/agent-to-agent` (central `agent_destinations`) | **Removed** — LangGraph uses gateway A2A (`src/gateway/orchestration/`) |
+| Classic `src/modules/agent-to-agent` (central `agent_destinations`) | **Removed** — The graph runner uses gateway A2A (`src/gateway/orchestration/`) |
 | Classic typing-refresh module (`src/modules/typing`) | **Removed** — no host router/delivery to drive it |
 | Classic channel setup drivers (`setup/channels/*`, `init-first-agent`) | **Removed** — install adapters via skills / `setup/add-zoho-cliq.sh` as needed |
 | Classic host modules (approvals/permissions/scheduling/self-mod host wiring) | **Removed** — not on the gateway/worker path |

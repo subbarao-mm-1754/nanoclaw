@@ -119,11 +119,11 @@ export async function handleWorkerOutboundCallback(
     }
   }
 
-  // Orchestrator chat reply completes intake/assemble self-nodes in LangGraph.
+  // Orchestrator chat reply completes intake/assemble self-nodes in the graph runner.
   if (chatOutbound.length > 0) {
     try {
       const { onOrchestratorSelfTaskComplete } = await import(
-        './orchestration/langgraph/index.js'
+        './orchestration/graph/index.js'
       );
       const text = chatOutbound
         .map((o) =>
@@ -144,14 +144,14 @@ export async function handleWorkerOutboundCallback(
           messageId: chatOutbound[0]?.id,
         });
         if (done) {
-          log.info('LangGraph: orchestrator self-task completed via chat outbound', {
+          log.info('Graph: orchestrator self-task completed via chat outbound', {
             sessionId: payload.session_id,
             conversationId: conversation.id,
           });
         }
       }
     } catch (err) {
-      log.warn('LangGraph self-task complete hook failed', {
+      log.warn('Graph self-task complete hook failed', {
         sessionId: payload.session_id,
         err,
       });

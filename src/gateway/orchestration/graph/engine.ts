@@ -121,7 +121,7 @@ export class MemoryCheckpointer implements Checkpointer {
   }
 }
 
-export class StateGraph<S extends object> {
+export class GraphBuilder<S extends object> {
   private readonly nodes = new Map<string, NodeFn<S>>();
   private readonly edges = new Map<string, string>();
   private readonly routers = new Map<string, RouterFn<S>>();
@@ -147,7 +147,7 @@ export class StateGraph<S extends object> {
     return this;
   }
 
-  compile(options: { checkpointer: Checkpointer; recursionLimit?: number }): CompiledStateGraph<S> {
+  compile(options: { checkpointer: Checkpointer; recursionLimit?: number }): CompiledGraph<S> {
     const entry = this.edges.get(START);
     if (entry === undefined) throw new Error('Graph must have an edge from START.');
     for (const [from, to] of this.edges) {
@@ -157,7 +157,7 @@ export class StateGraph<S extends object> {
     for (const from of this.routers.keys()) {
       if (from !== START && !this.nodes.has(from)) throw new Error(`Edge source \`${from}\` is not a node.`);
     }
-    return new CompiledStateGraph<S>({
+    return new CompiledGraph<S>({
       channels: this.channels,
       nodes: new Map(this.nodes),
       edges: new Map(this.edges),
@@ -174,7 +174,7 @@ export class StateGraph<S extends object> {
   }
 }
 
-export class CompiledStateGraph<S extends object> {
+export class CompiledGraph<S extends object> {
   private readonly channels: StateChannels<S>;
   private readonly nodes: Map<string, NodeFn<S>>;
   private readonly edges: Map<string, string>;

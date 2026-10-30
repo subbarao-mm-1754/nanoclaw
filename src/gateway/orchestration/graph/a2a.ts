@@ -1,5 +1,5 @@
 /**
- * A2A wake helpers used by the LangGraph runner (same Worker path as soft routing).
+ * A2A wake helpers used by the graph runner (same Worker path as soft routing).
  */
 import { createHash } from 'node:crypto';
 import { generateId } from '../../auth.js';
@@ -56,7 +56,7 @@ export async function wakeAgentWithText(input: {
 }): Promise<boolean> {
   const target = getWorkspace(input.targetWorkspaceId);
   if (!target) {
-    log.warn('LangGraph A2A: target workspace missing', {
+    log.warn('Graph A2A: target workspace missing', {
       targetWorkspaceId: input.targetWorkspaceId,
     });
     return false;
@@ -115,7 +115,7 @@ export async function wakeAgentWithText(input: {
     }
     return true;
   } catch (err) {
-    log.error('LangGraph A2A wake failed', {
+    log.error('Graph A2A wake failed', {
       targetWorkspaceId: target.workspace_id,
       err,
     });
@@ -189,11 +189,11 @@ export async function wakeWorkspaceSession(input: {
         content: {
           text: input.text,
           sender: 'system',
-          senderId: 'system:langgraph',
+          senderId: 'system:graph',
         },
         sender: {
-          id: 'system:langgraph',
-          display_name: 'LangGraph',
+          id: 'system:graph',
+          display_name: 'Orchestration',
         },
       },
       options: {
@@ -213,7 +213,7 @@ export async function wakeWorkspaceSession(input: {
     }
     return true;
   } catch (err) {
-    log.error('LangGraph session wake failed', { workspaceId: input.workspaceId, err });
+    log.error('Graph session wake failed', { workspaceId: input.workspaceId, err });
     return false;
   }
 }

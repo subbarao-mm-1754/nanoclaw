@@ -105,6 +105,7 @@ import { applyScheduleAction, type ScheduleActionOp } from './scheduling/actions
 import {
   getActiveRunSummary,
   getOrchestrationOverview,
+  getAuthorizedOrchestrationArtifact,
   getOrchestrationRun,
   listOrchestrationEvents,
   listOrchestrationRuns,
@@ -1565,6 +1566,48 @@ async function handleInternalSchedule(req: http.IncomingMessage, res: http.Serve
   jsonResponse(res, result.ok ? 200 : 400, result);
 }
 
+async function handleInternalOrchestrationArtifact(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  if (!authorizeWorkerCallback(req)) {
+    jsonResponse(res, 401, { error: 'Unauthorized' });
+    return;
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = (await readJsonBody(req, WORKER_MAX_BODY_BYTES)) as Record<string, unknown>;
+  } catch (err) {
+    jsonResponse(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  let workspaceId: string;
+  let artifactId: string;
+  try {
+    workspaceId = requireString(body, 'workspace_id');
+    artifactId = requireString(body, 'artifact_id');
+  } catch (err) {
+    jsonResponse(res, 400, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  const artifact = getAuthorizedOrchestrationArtifact(artifactId, workspaceId);
+  if (!artifact) {
+    jsonResponse(res, 404, { ok: false, error: 'Artifact not found' });
+    return;
+  }
+  jsonResponse(res, 200, {
+    ok: true,
+    data: {
+      id: artifact.id,
+      node_id: artifact.node_id,
+      content_type: artifact.content_type,
+      summary: artifact.summary,
+      byte_size: artifact.byte_size,
+      content: artifact.content_text,
+    },
+  });
+}
+
 async function handleInternalKnowledge(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   if (!authorizeWorkerCallback(req)) {
     jsonResponse(res, 401, { error: 'Unauthorized' });
@@ -1912,6 +1955,11 @@ async function route(req: http.IncomingMessage, res: http.ServerResponse): Promi
 
     if (req.method === 'POST' && pathname === '/v1/internal/knowledge') {
       await handleInternalKnowledge(req, res);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/v1/internal/orchestration-artifacts') {
+      await handleInternalOrchestrationArtifact(req, res);
       return;
     }
 

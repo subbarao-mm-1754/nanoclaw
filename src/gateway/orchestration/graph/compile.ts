@@ -1,12 +1,12 @@
 /**
- * Compile a builder-stored OrchestratorGraph into an executable StateGraph.
+ * Compile a builder-stored OrchestratorGraph into an executable graph.
  *
  * The registered graph / loops / rules are fixed at compile time. The orchestrator
  * may only choose among allowed branches (edge `when` labels / successor node ids)
  * and set soft skip flags — it cannot mutate the graph structure.
  */
 import type { OrchestratorGraph, OrchestratorGraphEdge, OrchestratorGraphLoop } from '../types.js';
-import { END, START, StateGraph, interrupt } from './engine.js';
+import { END, START, GraphBuilder, interrupt } from './engine.js';
 import {
   OrchestrationStateChannels,
   type InterruptPayload,
@@ -68,9 +68,22 @@ function allowedBranches(graph: OrchestratorGraph, from: string): string[] {
 function resultsSummary(state: OrchestrationGraphState): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(state.results ?? {})) {
-    out[k] = (v.text || '').slice(0, 400);
+    const summary = v.artifact_summary || (v.text || '').slice(0, 400);
+    out[k] = v.artifact_id ? `ref=${v.artifact_id} — ${summary}` : summary;
   }
   return out;
+}
+
+function artifactLines(state: OrchestrationGraphState): string[] {
+  const lines: string[] = [];
+  for (const [id, r] of Object.entries(state.results ?? {})) {
+    if (id.startsWith('_') || !r.artifact_id) continue;
+    lines.push(
+      `- ${id} (${r.from_agent}): ref=${r.artifact_id}, ${r.artifact_byte_size ?? 0} bytes — ${r.artifact_summary || (r.text || '').slice(0, 400)}`,
+    );
+  }
+  if (!lines.length) return [];
+  return ['Prior specialist artifacts (read the full data with orchestration_read_artifact):', ...lines];
 }
 
 function predecessors(graph: OrchestratorGraph, nodeId: string): string[] {
@@ -238,21 +251,17 @@ function nodeAgent(graph: OrchestratorGraph, nodeId: string): string | undefined
 }
 
 function buildTaskPacket(graph: OrchestratorGraph, nodeId: string, state: OrchestrationGraphState): string {
-  if (state.decision?.task_packet?.trim()) return state.decision.task_packet.trim();
+  const manifest = artifactLines(state);
+  const custom = state.decision?.task_packet?.trim();
+  if (custom) return [custom, ...manifest].filter(Boolean).join('\n');
   const n = graph.nodes.find((x) => x.id === nodeId);
   const parts = [
     `Orchestration task for node "${nodeId}"` + (n?.agent ? ` (agent: ${n.agent})` : ''),
     state.goal ? `Goal: ${state.goal}` : '',
     n?.description ? `Description: ${n.description}` : '',
     state.last_user_message ? `Latest user request: ${state.last_user_message}` : '',
+    ...manifest,
   ];
-  const prior = Object.entries(state.results ?? {});
-  if (prior.length) {
-    parts.push('Prior specialist results:');
-    for (const [id, r] of prior) {
-      parts.push(`- ${id} (${r.from_agent}): ${r.text.slice(0, 800)}`);
-    }
-  }
   parts.push(
     'Reply to the orchestrator using the specialist reply protocol:',
     '- Mid-work: status "ack" or "progress" (does NOT finish this node).',
@@ -283,14 +292,14 @@ function applyDecisionResume(
 }
 
 /**
- * Build a compiled LangGraph app from stored orchestrator graph JSON.
+ * Build a compiled graph from stored orchestrator graph JSON.
  * Returns null when there is no executable graph (soft / free-form mode).
  */
-export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | undefined) {
+export function compileOrchestratorGraph(graph: OrchestratorGraph | null | undefined) {
   if (!graph?.nodes?.length) return null;
 
   const entry = graph.entry?.trim() || graph.nodes[0]!.id;
-  const builder = new StateGraph<OrchestrationGraphState>(OrchestrationStateChannels);
+  const builder = new GraphBuilder<OrchestrationGraphState>(OrchestrationStateChannels);
 
   // --- handle_user: orchestrator decision hub (user-facing) ---
   builder.addNode(HANDLE_USER_NODE, async (state: OrchestrationGraphState) => {
@@ -347,6 +356,9 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
       const result: SpecialistResult = {
         text: resume.text,
         from_agent: resume.from_agent,
+        artifact_id: resume.artifact_id,
+        artifact_summary: resume.artifact_summary,
+        artifact_byte_size: resume.artifact_byte_size,
         message_id: resume.message_id,
         at: new Date().toISOString(),
         partial: resume.partial || resume.status === 'partial',
@@ -444,6 +456,9 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
           const result: SpecialistResult = {
             text: resume.text,
             from_agent: resume.from_agent || agent,
+            artifact_id: resume.artifact_id,
+            artifact_summary: resume.artifact_summary,
+            artifact_byte_size: resume.artifact_byte_size,
             message_id: resume.message_id,
             at: new Date().toISOString(),
             partial: resume.partial || resume.status === 'partial',
@@ -587,7 +602,7 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
 }
 
 export type CompiledOrchestratorGraph = NonNullable<
-  ReturnType<typeof compileOrchestratorLangGraph>
+  ReturnType<typeof compileOrchestratorGraph>
 >;
 
 /** Stable hash so we can cache compiled graphs per workspace. */

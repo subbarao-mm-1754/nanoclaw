@@ -24,12 +24,36 @@ import { initGatewayDb, closeGatewayDb } from './db/connection.js';
 import { startMessageProcessor, stopMessageProcessor } from './processor.js';
 import { startGatewayServer, stopGatewayServer } from './server.js';
 import { getWorkspace, registerWorkspace } from './store/workspaces.js';
-import { startLangGraphNudgeLoop, stopLangGraphNudgeLoop } from './orchestration/langgraph/index.js';
+import { startGraphNudgeLoop, stopGraphNudgeLoop } from './orchestration/graph/index.js';
+import { purgeExpiredOrchestrationArtifacts } from './orchestration/store.js';
 import { createGatewayScheduleExecutor } from './scheduling/executor.js';
 
 const scheduleExecutor = createGatewayScheduleExecutor({
   intervalMs: GATEWAY_SCHEDULER_INTERVAL_MS,
 });
+
+const ARTIFACT_PURGE_INTERVAL_MS = 60 * 60 * 1000;
+let artifactPurgeTimer: ReturnType<typeof setInterval> | null = null;
+
+function startArtifactPurge(): void {
+  const run = () => {
+    try {
+      const removed = purgeExpiredOrchestrationArtifacts();
+      if (removed > 0) log.info('Purged expired orchestration artifacts', { removed });
+    } catch (err) {
+      log.warn('Orchestration artifact purge failed', { err });
+    }
+  };
+  run();
+  artifactPurgeTimer = setInterval(run, ARTIFACT_PURGE_INTERVAL_MS);
+  artifactPurgeTimer.unref?.();
+}
+
+function stopArtifactPurge(): void {
+  if (!artifactPurgeTimer) return;
+  clearInterval(artifactPurgeTimer);
+  artifactPurgeTimer = null;
+}
 
 function seedDefaultWorkspace(): void {
   if (!GATEWAY_DEFAULT_WORKSPACE_ID) return;
@@ -61,7 +85,8 @@ async function main(): Promise<void> {
   await startGatewayServer();
   await startGatewayChannels();
   startMessageProcessor(GATEWAY_PROCESS_INTERVAL_MS);
-  startLangGraphNudgeLoop();
+  startGraphNudgeLoop();
+  startArtifactPurge();
   scheduleExecutor.start();
 
   log.info('NanoClaw gateway ready');
@@ -69,7 +94,8 @@ async function main(): Promise<void> {
 
 async function shutdown(signal: string): Promise<void> {
   log.info('Gateway shutdown signal received', { signal });
-  stopLangGraphNudgeLoop();
+  stopGraphNudgeLoop();
+  stopArtifactPurge();
   scheduleExecutor.stop();
   stopMessageProcessor();
   await stopGatewayChannels();

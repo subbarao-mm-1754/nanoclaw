@@ -1,5 +1,5 @@
 /**
- * Specialist ↔ orchestrator reply protocol for LangGraph runs.
+ * Specialist ↔ orchestrator reply protocol for orchestration runs.
  *
  * Specialists must signal status explicitly so the Gateway does not treat
  * "On it…" acknowledgments as node completions.
@@ -211,6 +211,7 @@ Statuses:
 
 Rules:
 - Never send specialist traffic to the user channel. Reply only to \`orchestrator\` (agent).
+- Full specialist results are stored as run-scoped artifacts. When a task lists \`ref=oart-...\`, read that payload with \`orchestration_read_artifact\`. Do not expect the full payload inside the task text.
 - Do **not** claim the task is done with a bare "On it" — that is \`ack\` only.
 - One terminal reply per assigned task is enough; further chatter should be \`progress\` or stay silent.`;
 }

@@ -121,6 +121,27 @@ function migrateGatewaySchema(db: Database.Database): void {
       interrupt_json  TEXT,
       updated_at      TEXT NOT NULL
     );
+
+    -- Full specialist outputs are data-plane artifacts. Graph state keeps only
+    -- compact manifests, so results cannot cross orchestration-run boundaries.
+    CREATE TABLE IF NOT EXISTS gateway_orchestration_artifacts (
+      id                        TEXT PRIMARY KEY,
+      run_id                    TEXT NOT NULL REFERENCES gateway_orchestration_runs(id) ON DELETE CASCADE,
+      orchestrator_workspace_id TEXT NOT NULL REFERENCES gateway_workspaces(workspace_id) ON DELETE CASCADE,
+      producer_workspace_id     TEXT REFERENCES gateway_workspaces(workspace_id) ON DELETE SET NULL,
+      node_id                   TEXT NOT NULL,
+      content_type              TEXT NOT NULL DEFAULT 'text/plain',
+      content_text              TEXT NOT NULL,
+      summary                   TEXT NOT NULL,
+      byte_size                 INTEGER NOT NULL,
+      sha256                    TEXT NOT NULL,
+      expires_at                TEXT,
+      created_at                TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_orch_artifacts_run_node
+      ON gateway_orchestration_artifacts(run_id, node_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orch_artifacts_expiry
+      ON gateway_orchestration_artifacts(expires_at) WHERE expires_at IS NOT NULL;
   `);
 
   if (tableExists(db, 'build_jobs')) {

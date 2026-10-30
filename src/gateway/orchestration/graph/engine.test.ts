@@ -7,7 +7,7 @@ import {
   MemoryCheckpointer,
   MissingCheckpointError,
   START,
-  StateGraph,
+  GraphBuilder,
   UnknownPendingNodeError,
   interrupt,
   isInterrupted,
@@ -28,7 +28,7 @@ const cfg = (thread: string) => ({ configurable: { thread_id: thread } });
 
 describe('graph engine', () => {
   it('applies reducers to input and node updates, ignoring unknown keys', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', (s) => ({ n: s.n + 1, log: ['a'], zzz: 1 }) as Partial<S>)
       .addEdge(START, 'a')
       .addEdge('a', END)
@@ -39,7 +39,7 @@ describe('graph engine', () => {
   });
 
   it('pauses on interrupt and resumes the same node with the resume value', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ log: ['a'] }))
       .addNode('b', () => {
         const v = interrupt<number>({ ask: 'b' });
@@ -62,7 +62,7 @@ describe('graph engine', () => {
 
   it('gives the resume value only to the resumed node', async () => {
     let skipFirst = false;
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => {
         if (!skipFirst) interrupt('a');
         return { log: ['a'] };
@@ -83,7 +83,7 @@ describe('graph engine', () => {
   });
 
   it('ends the run when a router returns an unknown node', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ n: 1 }))
       .addEdge(START, 'a')
       .addConditionalEdges('a', () => 'missing')
@@ -94,7 +94,7 @@ describe('graph engine', () => {
   });
 
   it('merges fresh input into an existing thread and restarts from START', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', (s) => {
         const v = interrupt<number>({ n: s.n });
         return { n: v, log: ['a'] };
@@ -112,7 +112,7 @@ describe('graph engine', () => {
   });
 
   it('throws when resuming a thread with no checkpoint', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ n: interrupt<number>('a') }))
       .addEdge(START, 'a')
       .addEdge('a', END)
@@ -125,14 +125,14 @@ describe('graph engine', () => {
 
   it('throws when the pending node is no longer in the graph', async () => {
     const checkpointer = new MemoryCheckpointer();
-    const first = new StateGraph<S>(channels)
+    const first = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ n: interrupt<number>('a') }))
       .addEdge(START, 'a')
       .addEdge('a', END)
       .compile({ checkpointer });
     await first.invoke({}, cfg('t'));
 
-    const second = new StateGraph<S>(channels)
+    const second = new GraphBuilder<S>(channels)
       .addNode('b', () => ({ n: 2 }))
       .addEdge(START, 'b')
       .addEdge('b', END)
@@ -143,7 +143,7 @@ describe('graph engine', () => {
   });
 
   it('returns stored state when resuming a finished thread', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ n: 1, log: ['a'] }))
       .addEdge(START, 'a')
       .addEdge('a', END)
@@ -155,7 +155,7 @@ describe('graph engine', () => {
 
   it('keeps the failed node pending after a node error', async () => {
     let fail = true;
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', () => ({ n: 1, log: ['a'] }))
       .addNode('b', () => {
         if (fail) throw new Error('boom');
@@ -174,7 +174,7 @@ describe('graph engine', () => {
   it('stops runaway loops after 25 node runs, or 27 when resuming', async () => {
     let count = 0;
     let pauseAt = -1;
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', (s) => {
         count++;
         if (count === pauseAt) interrupt('p');
@@ -200,20 +200,20 @@ describe('graph engine', () => {
   });
 
   it('rejects reserved and duplicate node ids and a missing entry edge', () => {
-    expect(() => new StateGraph<S>(channels).addNode(START, () => ({}))).toThrow('reserved');
-    expect(() => new StateGraph<S>(channels).addNode(END, () => ({}))).toThrow('reserved');
+    expect(() => new GraphBuilder<S>(channels).addNode(START, () => ({}))).toThrow('reserved');
+    expect(() => new GraphBuilder<S>(channels).addNode(END, () => ({}))).toThrow('reserved');
     expect(() =>
-      new StateGraph<S>(channels).addNode('a', () => ({})).addNode('a', () => ({})),
+      new GraphBuilder<S>(channels).addNode('a', () => ({})).addNode('a', () => ({})),
     ).toThrow('already present');
     expect(() =>
-      new StateGraph<S>(channels).addNode('a', () => ({})).compile({
+      new GraphBuilder<S>(channels).addNode('a', () => ({})).compile({
         checkpointer: new MemoryCheckpointer(),
       }),
     ).toThrow('edge from START');
   });
 
   it('accepts node ids that match state keys or contain : and |', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('n', () => ({ log: ['n'] }))
       .addNode('a:b|c', () => ({ log: ['abc'] }))
       .addEdge(START, 'n')
@@ -225,7 +225,7 @@ describe('graph engine', () => {
   });
 
   it('isolates threads on one checkpointer', async () => {
-    const app = new StateGraph<S>(channels)
+    const app = new GraphBuilder<S>(channels)
       .addNode('a', (s) => ({ n: interrupt<number>(s.n) }))
       .addEdge(START, 'a')
       .addEdge('a', END)

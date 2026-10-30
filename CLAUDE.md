@@ -42,10 +42,10 @@ Exactly one writer per file. Heartbeat is a file touch at `/workspace/.heartbeat
 
 | File | Purpose |
 |------|---------|
-| `src/gateway/index.ts` | Gateway entry: DB, channels, HTTP server, message processor, LangGraph nudge loop |
+| `src/gateway/index.ts` | Gateway entry: DB, channels, HTTP server, message processor, orchestration nudge loop |
 | `src/worker/index.ts` | Worker entry: container runtime, outbound collector, HTTP API |
 | `src/gateway/processor.ts` | Queue → worker process-message → delivery / A2A routing |
-| `src/gateway/orchestration/` | Multi-agent LangGraph + gateway A2A (`channel_type=agent`) |
+| `src/gateway/orchestration/` | Multi-agent graph runner + gateway A2A (`channel_type=agent`) |
 | `src/session-manager.ts` | Session folders; open `inbound.db` / `outbound.db`; job routing/destinations |
 | `src/container-runner.ts` | Spawns containers from worker `WorkerSpawnContext` + OneCLI `ensureAgent` |
 | `src/container-runtime.ts` | Runtime selection (Docker/Podman/Apple), orphan cleanup |
@@ -55,7 +55,7 @@ Exactly one writer per file. Heartbeat is a file touch at `/workspace/.heartbeat
 | `container/skills/` | Container skills (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, …) |
 | `bin/zclaw` + `setup/services/` | Install/start/stop gateway + worker as OS services |
 
-## Multi-agent / LangGraph
+## Multi-agent orchestration
 
 Optional but **on by default** (`MULTI_AGENT_ORCHESTRATION_ENABLED`). Orchestrators coordinate specialists via **gateway** agent-to-agent routing (`src/gateway/orchestration/`), not the removed classic `src/modules/agent-to-agent` / central `agent_destinations` path.
 

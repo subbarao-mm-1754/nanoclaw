@@ -12,6 +12,7 @@ import { getWorkspace } from '../../store/workspaces.js';
 import { isMultiAgentOrchestrationEnabled } from '../config.js';
 import {
   appendOrchestrationEvent,
+  createOrchestrationArtifact,
   createOrchestrationRun,
   getActiveOrchestrationRun,
   getOrchestrationRun,
@@ -23,10 +24,10 @@ import {
 import type { OrchestrationRun } from '../types.js';
 import { resolveMemberByLocalName, wakeAgentWithText, wakeWorkspaceSession } from './a2a.js';
 import { orchestrationCheckpointer } from './checkpoints.js';
-import { Command, isInterrupted, type CompiledStateGraph } from './engine.js';
+import { Command, isInterrupted, type CompiledGraph } from './engine.js';
 import {
   HANDLE_USER_NODE,
-  compileOrchestratorLangGraph,
+  compileOrchestratorGraph,
   graphFingerprint,
   type CompiledOrchestratorGraph,
 } from './compile.js';
@@ -45,7 +46,7 @@ import {
 interface CachedCompile {
   fingerprint: string;
   compiled: CompiledOrchestratorGraph;
-  app: CompiledStateGraph<OrchestrationGraphState>;
+  app: CompiledGraph<OrchestrationGraphState>;
 }
 
 const compileCache = new Map<string, CachedCompile>();
@@ -53,8 +54,8 @@ const compileCache = new Map<string, CachedCompile>();
 /** In-flight invoke locks per run id (avoid concurrent resume races). */
 const runTails = new Map<string, Promise<unknown>>();
 
-export interface LangGraphRunMeta {
-  engine: 'langgraph';
+export interface GraphRunMeta {
+  engine: 'graph';
   thread_id: string;
   fingerprint: string;
   orchestrator_session_id?: string;
@@ -111,7 +112,7 @@ function getCompiled(orchestratorWorkspaceId: string): CachedCompile | null {
   const cached = compileCache.get(orchestratorWorkspaceId);
   if (cached && cached.fingerprint === fingerprint) return cached;
 
-  const compiled = compileOrchestratorLangGraph(graph);
+  const compiled = compileOrchestratorGraph(graph);
   if (!compiled) return null;
   const app = compiled.stateGraph.compile({ checkpointer: orchestrationCheckpointer });
   const entry: CachedCompile = { fingerprint, compiled, app };
@@ -145,11 +146,11 @@ function mergeRunState(
   return { ...parseRunState(run), ...patch };
 }
 
-function metaFromRun(run: OrchestrationRun): LangGraphRunMeta | null {
+function metaFromRun(run: OrchestrationRun): GraphRunMeta | null {
   const state = parseRunState(run);
-  const lg = state.langgraph;
+  const lg = state.graph;
   if (!lg || typeof lg !== 'object') return null;
-  return lg as LangGraphRunMeta;
+  return lg as GraphRunMeta;
 }
 
 function persistInterrupt(
@@ -158,8 +159,8 @@ function persistInterrupt(
   extra?: Record<string, unknown>,
 ): void {
   const prev = metaFromRun(run);
-  const meta: LangGraphRunMeta = {
-    engine: 'langgraph',
+  const meta: GraphRunMeta = {
+    engine: 'graph',
     thread_id: run.id,
     fingerprint: prev?.fingerprint ?? '',
     interrupt,
@@ -192,7 +193,7 @@ function persistInterrupt(
     status: interrupt ? 'waiting' : run.status === 'waiting' ? 'running' : run.status,
     current_node: interrupt?.node_id ?? run.current_node,
     state: mergeRunState(run, {
-      langgraph: meta,
+      graph: meta,
       pending_wait: pending,
       ...(extra ?? {}),
     }),
@@ -230,7 +231,7 @@ async function handleInterruptSideEffects(input: {
           node_id: interrupt.node_id,
         });
         const text = [
-          `[LangGraph] Your turn — node "${interrupt.node_id}" (you are the assigned agent).`,
+          `[Graph] Your turn — node "${interrupt.node_id}" (you are the assigned agent).`,
           `Goal: ${interrupt.goal || '(none)'}`,
           '',
           interrupt.task_packet,
@@ -250,7 +251,7 @@ async function handleInterruptSideEffects(input: {
         return;
       }
 
-      log.warn('LangGraph: specialist not in members', {
+      log.warn('Graph: specialist not in members', {
         runId: run.id,
         agent: interrupt.agent,
       });
@@ -305,7 +306,7 @@ async function handleInterruptSideEffects(input: {
       ([k, v]) => `- ${k}: ${v}`,
     );
     const text = [
-      '[LangGraph] Orchestrator decision required.',
+      '[Graph] Orchestrator decision required.',
       `Current node: ${interrupt.current_node}`,
       `Goal: ${interrupt.goal || '(none)'}`,
       `Allowed next branches (graph is locked — pick one; do not invent new nodes/loops): ${allowed.join(', ') || '(none)'}`,
@@ -345,14 +346,14 @@ async function invokeOrResume(input: {
     } catch (err) {
       // No usable checkpoint (run predates stored checkpoints, or the graph was
       // re-registered without the pending node) — rebuild from DB state.
-      log.warn('LangGraph resume failed; re-invoking from stored run state', {
+      log.warn('Graph resume failed; re-invoking from stored run state', {
         runId: run.id,
         err,
       });
       const stored = parseRunState(run);
       const summary =
         (
-          stored.langgraph as
+          stored.graph as
             | { interrupt?: { results_summary?: Record<string, string>; node_id?: string } }
             | undefined
         )?.interrupt?.results_summary || {};
@@ -386,7 +387,7 @@ async function invokeOrResume(input: {
       };
       if (input.resume.kind === 'specialist') {
         const nodeId =
-          (stored.langgraph as { interrupt?: { node_id?: string } } | undefined)?.interrupt
+          (stored.graph as { interrupt?: { node_id?: string } } | undefined)?.interrupt
             ?.node_id || run.current_node || 'inbox';
         seed.results = {
           ...seed.results,
@@ -445,8 +446,8 @@ async function invokeOrResume(input: {
     status: state.status === 'failed' ? 'failed' : 'completed',
     current_node: state.current_node ?? run.current_node,
     state: mergeRunState(latest, {
-      langgraph: {
-        engine: 'langgraph',
+      graph: {
+        engine: 'graph',
         thread_id: run.id,
         fingerprint: compiled.fingerprint,
         interrupt: null,
@@ -465,7 +466,7 @@ async function invokeOrResume(input: {
 }
 
 /**
- * Ensure a LangGraph-backed run exists and process a user message.
+ * Ensure a graph-backed run exists and process a user message.
  * Still allows the orchestrator container to be woken by the normal processor.
  */
 export async function onOrchestratorUserMessage(input: {
@@ -489,15 +490,15 @@ export async function onOrchestratorUserMessage(input: {
       fallbackToAny: false,
     });
 
-    // Soft runs created before LangGraph have no engine meta / interrupt. Close them
+    // Soft runs created before the graph runner have no engine meta / interrupt. Close them
     // so the hard runner can own the next turn (otherwise we only annotate events).
     if (run) {
       const meta = metaFromRun(run);
-      if (!meta || meta.engine !== 'langgraph') {
+      if (!meta || meta.engine !== 'graph') {
         updateOrchestrationRun(run.id, { status: 'completed' });
         appendOrchestrationEvent(run.id, 'completed', {
-          reason: 'superseded_by_langgraph',
-          note: 'Closed stale soft-orchestration run so LangGraph can start fresh',
+          reason: 'superseded_by_graph',
+          note: 'Closed stale soft-orchestration run so the graph runner can start fresh',
         });
         run = null;
       }
@@ -510,19 +511,19 @@ export async function onOrchestratorUserMessage(input: {
         goal: input.goalText.slice(0, 2000),
         current_node: HANDLE_USER_NODE,
         state: {
-          langgraph: {
-            engine: 'langgraph',
+          graph: {
+            engine: 'graph',
             thread_id: '', // set below
             fingerprint: compiled.fingerprint,
             orchestrator_session_id: input.sessionId,
-          } satisfies LangGraphRunMeta,
+          } satisfies GraphRunMeta,
         },
       });
       // Fix thread_id = run.id
       updateOrchestrationRun(run.id, {
         state: mergeRunState(run, {
-          langgraph: {
-            engine: 'langgraph',
+          graph: {
+            engine: 'graph',
             thread_id: run.id,
             fingerprint: compiled.fingerprint,
             orchestrator_session_id: input.sessionId,
@@ -532,7 +533,7 @@ export async function onOrchestratorUserMessage(input: {
       run = getOrchestrationRun(run.id)!;
       appendOrchestrationEvent(run.id, 'started', {
         goal: input.goalText.slice(0, 200),
-        engine: 'langgraph',
+        engine: 'graph',
       });
 
       await invokeOrResume({
@@ -551,7 +552,7 @@ export async function onOrchestratorUserMessage(input: {
 
     appendOrchestrationEvent(run.id, 'user_message', {
       preview: input.goalText.slice(0, 200),
-      engine: 'langgraph',
+      engine: 'graph',
     });
 
     const meta = metaFromRun(run);
@@ -630,7 +631,7 @@ export async function onSpecialistReply(input: {
   if (expectedAgent && fromName && expectedAgent !== fromName) {
     // Do not resume the wrong node with another specialist's payload (this is what
     // stamped logistics text onto assemble after tripplanner member_not_found).
-    log.info('LangGraph: rejecting specialist reply from unexpected agent', {
+    log.info('Graph: rejecting specialist reply from unexpected agent', {
       runId: run.id,
       expectedAgent,
       fromName,
@@ -670,14 +671,26 @@ export async function onSpecialistReply(input: {
 
   await withRunLock(run.id, async () => {
     const nodeId = meta.interrupt!.node_id;
+    const artifact = createOrchestrationArtifact({
+      runId: run.id,
+      orchestratorWorkspaceId: run.orchestrator_workspace_id,
+      producerWorkspaceId: input.fromWorkspaceId,
+      nodeId,
+      content: parsed.text,
+      summary: parsed.summary,
+      contentType: parsed.payload && typeof parsed.payload === 'object' ? 'application/json' : 'text/plain',
+    });
     const prev = parseRunState(run);
     updateOrchestrationRun(run.id, {
       state: mergeRunState(run, {
         results: {
           ...((prev.results as Record<string, unknown>) || {}),
           [nodeId]: {
-            text: parsed.text,
+            text: artifact.summary,
             from_agent: fromName || expectedAgent || 'specialist',
+            artifact_id: artifact.id,
+            artifact_summary: artifact.summary,
+            artifact_byte_size: artifact.byte_size,
             message_id: input.messageId,
             at: new Date().toISOString(),
             status: parsed.status,
@@ -689,7 +702,7 @@ export async function onSpecialistReply(input: {
     appendOrchestrationEvent(run.id, 'specialist_reply', {
       from_workspace_id: input.fromWorkspaceId,
       message_id: input.messageId,
-      engine: 'langgraph',
+      engine: 'graph',
       node_id: nodeId,
       status: parsed.status,
       explicit: parsed.explicit,
@@ -700,8 +713,11 @@ export async function onSpecialistReply(input: {
       compiled,
       resume: {
         kind: 'specialist',
-        text: parsed.text,
+        text: artifact.summary,
         from_agent: fromName || expectedAgent || 'specialist',
+        artifact_id: artifact.id,
+        artifact_summary: artifact.summary,
+        artifact_byte_size: artifact.byte_size,
         message_id: input.messageId,
         partial: parsed.status === 'partial',
         status: parsed.status,
@@ -736,7 +752,7 @@ async function handleNonTerminalSpecialistReply(input: {
         ...((prev.results as Record<string, unknown>) || {}),
         // Keep progress under a side key — never overwrite the node result slot.
         [progressKey]: {
-          text: parsed.summary || parsed.text,
+          text: (parsed.summary || parsed.text).slice(0, 400),
           from_agent: input.fromName,
           message_id: input.messageId,
           at: new Date().toISOString(),
@@ -756,7 +772,7 @@ async function handleNonTerminalSpecialistReply(input: {
     preview: (parsed.summary || parsed.text).slice(0, 200),
   });
 
-  log.info('LangGraph: specialist non-terminal reply (graph still waiting)', {
+  log.info('Graph: specialist non-terminal reply (graph still waiting)', {
     runId: run.id,
     status: parsed.status,
     nodeId,
@@ -770,7 +786,7 @@ async function handleNonTerminalSpecialistReply(input: {
   if (!orch) return;
 
   const note = [
-    `[LangGraph] Specialist "${input.fromName}" ${parsed.status} on node "${nodeId ?? '?'}".`,
+    `[Graph] Specialist "${input.fromName}" ${parsed.status} on node "${nodeId ?? '?'}".`,
     'The graph is still waiting for their terminal result (completed/blocked/failed/partial).',
     'Do not tell the user this specialist finished. You may give a brief status if helpful.',
     '',
@@ -820,14 +836,24 @@ export async function onOrchestratorSelfTaskComplete(input: {
   const agent = meta.interrupt.agent || 'orchestrator';
 
   await withRunLock(run.id, async () => {
+    const artifact = createOrchestrationArtifact({
+      runId: run.id,
+      orchestratorWorkspaceId: run.orchestrator_workspace_id,
+      producerWorkspaceId: run.orchestrator_workspace_id,
+      nodeId,
+      content: input.text,
+    });
     const prev = parseRunState(run);
     updateOrchestrationRun(run.id, {
       state: mergeRunState(run, {
         results: {
           ...((prev.results as Record<string, unknown>) || {}),
           [nodeId]: {
-            text: input.text,
+            text: artifact.summary,
             from_agent: agent,
+            artifact_id: artifact.id,
+            artifact_summary: artifact.summary,
+            artifact_byte_size: artifact.byte_size,
             message_id: input.messageId,
             at: new Date().toISOString(),
           },
@@ -845,8 +871,11 @@ export async function onOrchestratorSelfTaskComplete(input: {
       compiled,
       resume: {
         kind: 'specialist',
-        text: input.text,
+        text: artifact.summary,
         from_agent: agent,
+        artifact_id: artifact.id,
+        artifact_summary: artifact.summary,
+        artifact_byte_size: artifact.byte_size,
         message_id: input.messageId,
       },
       orchestratorSessionId: meta.orchestrator_session_id || input.orchestratorSessionId,
@@ -867,10 +896,18 @@ async function recordLateSpecialistReply(input: {
 }): Promise<void> {
   const prev = parseRunState(input.run);
   const key = input.fromLocalName || input.fromWorkspaceId;
+  const artifact = createOrchestrationArtifact({
+    runId: input.run.id,
+    orchestratorWorkspaceId: input.run.orchestrator_workspace_id,
+    producerWorkspaceId: input.fromWorkspaceId,
+    nodeId: key,
+    content: input.text,
+  });
   appendOrchestrationEvent(input.run.id, 'late_specialist_reply', {
     from_workspace_id: input.fromWorkspaceId,
     message_id: input.messageId,
     status: input.status ?? null,
+    artifact_id: artifact.id,
     note: 'Reply arrived after graph left await_specialist (or state was clobbered)',
   });
   updateOrchestrationRun(input.run.id, {
@@ -879,8 +916,11 @@ async function recordLateSpecialistReply(input: {
       results: {
         ...((prev.results as Record<string, unknown>) || {}),
         [key]: {
-          text: input.text,
+          text: artifact.summary,
           from_agent: input.fromLocalName || key,
+          artifact_id: artifact.id,
+          artifact_summary: artifact.summary,
+          artifact_byte_size: artifact.byte_size,
           message_id: input.messageId,
           at: new Date().toISOString(),
           late: true,
@@ -923,10 +963,10 @@ export async function onOrchestratorDecision(input: {
   if (!meta?.interrupt) {
     // Soft run (or lost interrupt) — reclaim so soft A2A loops cannot
     // own the conversation and starve Cliq replies.
-    if (!meta || meta.engine !== 'langgraph') {
+    if (!meta || meta.engine !== 'graph') {
       updateOrchestrationRun(run.id, { status: 'completed' });
       appendOrchestrationEvent(run.id, 'completed', {
-        reason: 'superseded_by_langgraph_reclaim',
+        reason: 'superseded_by_graph_reclaim',
         note: 'Closed soft/interrupt-less run on orchestrator decision',
       });
       const fresh = await onOrchestratorUserMessage({
@@ -958,7 +998,7 @@ export async function onOrchestratorDecision(input: {
         waiting_node: meta.interrupt.node_id,
         waiting_agent: meta.interrupt.agent,
       });
-      log.info('LangGraph: ignoring orchestrator branch while waiting on specialist', {
+      log.info('Graph: ignoring orchestrator branch while waiting on specialist', {
         runId: run.id,
         branch: input.branch,
         waitingNode: meta.interrupt.node_id,
@@ -987,7 +1027,7 @@ export async function onOrchestratorDecision(input: {
         allowed: meta.interrupt.allowed_branches,
         reason: 'not_in_allowed_branches',
       });
-      log.warn('LangGraph: orchestrator chose a branch outside the locked graph', {
+      log.warn('Graph: orchestrator chose a branch outside the locked graph', {
         runId: run.id,
         branch: input.branch,
         allowed: meta.interrupt.allowed_branches,
@@ -1031,7 +1071,7 @@ export async function onOrchestratorDecision(input: {
   await withRunLock(run.id, async () => {
     appendOrchestrationEvent(run.id, 'decision', {
       branch,
-      engine: 'langgraph',
+      engine: 'graph',
     });
     const latest = getOrchestrationRun(run.id) ?? run;
     await invokeOrResume({
@@ -1069,7 +1109,7 @@ export function localNameForMember(
   return m?.local_name ?? null;
 }
 
-export function isLangGraphOrchestrator(workspaceId: string): boolean {
+export function isGraphOrchestrator(workspaceId: string): boolean {
   return getCompiled(workspaceId) !== null;
 }
 
@@ -1080,7 +1120,7 @@ export function getRunInterrupt(runId: string): InterruptPayload | null {
 }
 
 /** Used by nudge tick. */
-export function listWaitingLangGraphRuns(limit = 50): OrchestrationRun[] {
+export function listWaitingGraphRuns(limit = 50): OrchestrationRun[] {
   const rows = getGatewayDb()
     .prepare(
       `SELECT * FROM gateway_orchestration_runs
@@ -1138,7 +1178,7 @@ export async function resumeTimeout(
       });
       updateOrchestrationRun(run.id, {
         state: mergeRunState(run, {
-          langgraph: { ...meta, nudge_count: (meta.nudge_count ?? 0) + 1 },
+          graph: { ...meta, nudge_count: (meta.nudge_count ?? 0) + 1 },
         }),
       });
       return;
@@ -1169,7 +1209,7 @@ export async function resumeTimeout(
       });
       updateOrchestrationRun(run.id, {
         state: mergeRunState(run, {
-          langgraph: { ...meta, nudge_count: (meta.nudge_count ?? 0) + 1 },
+          graph: { ...meta, nudge_count: (meta.nudge_count ?? 0) + 1 },
         }),
       });
     }
@@ -1192,7 +1232,7 @@ export async function resumeTimeout(
 }
 
 /** Test helper */
-export function _resetLangGraphRuntimeForTests(): void {
+export function _resetGraphRuntimeForTests(): void {
   compileCache.clear();
   runTails.clear();
 }

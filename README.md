@@ -122,7 +122,7 @@ messaging apps → gateway (channels, queue) → worker (materialize + spawn) �
                  ↑________________ outbound collector + delivery ________________↑
 ```
 
-The **gateway** receives channel messages, stores them in `gateway.db`, and asks the **worker** to process them. The worker materializes a workspace, writes `inbound.db`, and wakes a container. The agent-runner polls `inbound.db`, runs Claude, and writes `outbound.db`. The worker collects outbound messages; the gateway delivers them (and routes LangGraph agent-to-agent traffic when multi-agent is enabled).
+The **gateway** receives channel messages, stores them in `gateway.db`, and asks the **worker** to process them. The worker materializes a workspace, writes `inbound.db`, and wakes a container. The agent-runner polls `inbound.db`, runs Claude, and writes `outbound.db`. The worker collects outbound messages; the gateway delivers them (and routes agent-to-agent traffic when multi-agent is enabled).
 
 Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping.
 

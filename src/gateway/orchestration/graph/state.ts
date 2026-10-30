@@ -8,6 +8,10 @@ import type { StateChannels } from './engine.js';
 export interface SpecialistResult {
   text: string;
   from_agent: string;
+  /** Full output is kept in a run-scoped gateway artifact, never in task packets. */
+  artifact_id?: string;
+  artifact_summary?: string;
+  artifact_byte_size?: number;
   message_id?: string;
   at: string;
   /** @deprecated Prefer status === 'partial' */
@@ -110,6 +114,9 @@ export type ResumePayload =
       kind: 'specialist';
       text: string;
       from_agent: string;
+      artifact_id?: string;
+      artifact_summary?: string;
+      artifact_byte_size?: number;
       message_id?: string;
       partial?: boolean;
       status?: SpecialistReplyStatus;

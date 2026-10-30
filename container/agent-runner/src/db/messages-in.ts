@@ -250,32 +250,11 @@ export function resolveQuestionChoice(
  * Reads from inbound.db, checks processing_ack to skip already-handled responses.
  */
 export function findKnowledgeResponse(requestId: string): MessageInRow | undefined {
-  const inbound = openInboundDb();
-  const outbound = getOutboundDb();
+  return findSystemResponseByType(requestId, 'knowledge_response');
+}
 
-  try {
-    const candidates = inbound
-      .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
-      .all(`%"requestId":"${requestId}"%`) as MessageInRow[];
-
-    for (const response of candidates) {
-      let type: string | undefined;
-      try {
-        type = (JSON.parse(response.content) as { type?: string }).type;
-      } catch {
-        continue;
-      }
-      if (type !== 'knowledge_response') continue;
-
-      const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
-      if (acked) continue;
-      return response;
-    }
-
-    return undefined;
-  } finally {
-    inbound.close();
-  }
+export function findArtifactResponse(requestId: string): MessageInRow | undefined {
+  return findSystemResponseByType(requestId, 'orchestration_artifact_response');
 }
 
 /** Find a pending browser_session_response for a requestId. */

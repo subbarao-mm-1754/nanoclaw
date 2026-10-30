@@ -2,7 +2,7 @@
  * Gateway-side agent-to-agent routing for orchestrators.
  * Worker pushes channel_type=agent outbound; we wake the target workspace.
  *
- * When a fixed graph is registered, LangGraph (in-process) owns control flow:
+ * When a fixed graph is registered, the in-process graph runner owns control flow:
  * waits, loop caps, auto-delegate. The orchestrator agent remains the user-facing
  * decision maker but cannot mutate graph/loops/rules.
  */
@@ -19,13 +19,13 @@ import { processMessageOnWorker } from '../worker-client.js';
 import type { WorkerCollectedOutbound } from '../../worker/types.js';
 import { isMultiAgentOrchestrationEnabled } from './config.js';
 import {
-  isLangGraphOrchestrator,
+  isGraphOrchestrator,
   localNameForMember,
   onOrchestratorDecision,
   onOrchestratorUserMessage,
   onSpecialistReply,
-} from './langgraph/index.js';
-import { specialistSessionId } from './langgraph/a2a.js';
+} from './graph/index.js';
+import { specialistSessionId } from './graph/a2a.js';
 import {
   appendOrchestrationEvent,
   createOrchestrationRun,
@@ -75,10 +75,10 @@ export async function routeAgentOutboundMessages(input: {
     const sessionId = specialistSessionId(input.sourceSessionId, target.workspace_id);
     const inboundId = sessionInboundMessageId(msg.id, target.agent_group_id);
 
-    // --- LangGraph hard runner hooks ---
+    // --- Graph runner hooks ---
     let skipSoftWake = false;
 
-    if (sourceWs?.agent_kind === 'orchestrator' && isLangGraphOrchestrator(sourceWs.workspace_id)) {
+    if (sourceWs?.agent_kind === 'orchestrator' && isGraphOrchestrator(sourceWs.workspace_id)) {
       const members = (
         await import('./store.js')
       ).listOrchestratorMembers(sourceWs.workspace_id);
@@ -89,7 +89,7 @@ export async function routeAgentOutboundMessages(input: {
         fallbackToAny: false,
       });
       const lg = active
-        ? (parseRunState(active).langgraph as { orchestrator_session_id?: string } | undefined)
+        ? (parseRunState(active).graph as { orchestrator_session_id?: string } | undefined)
         : undefined;
       const decision = await onOrchestratorDecision({
         orchestratorWorkspaceId: sourceWs.workspace_id,
@@ -101,19 +101,19 @@ export async function routeAgentOutboundMessages(input: {
       });
       if (decision.handled) {
         // Graph consumed (or intentionally ignored) this send_message — do not soft-wake
-        // or clobber langgraph state_json.
+        // or clobber graph state_json.
         skipSoftWake = true;
         routed++;
       }
     } else if (
       target.agent_kind === 'orchestrator' &&
-      isLangGraphOrchestrator(target.workspace_id)
+      isGraphOrchestrator(target.workspace_id)
     ) {
       const fromName = localNameForMember(target.workspace_id, input.sourceWorkspaceId);
       const { getActiveOrchestrationRun, parseRunState } = await import('./store.js');
       const active = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
       const lg = active
-        ? (parseRunState(active).langgraph as { orchestrator_session_id?: string } | undefined)
+        ? (parseRunState(active).graph as { orchestrator_session_id?: string } | undefined)
         : undefined;
 
       let orchSession = lg?.orchestrator_session_id || '';
@@ -140,22 +140,22 @@ export async function routeAgentOutboundMessages(input: {
       }
     }
 
-    // Soft / legacy run tracking when not fully handled by LangGraph auto-path.
-    // CRITICAL: never create/update soft runs for LangGraph orchestrators — that
+    // Soft run tracking when the graph runner did not consume the message.
+    // CRITICAL: never create/update soft runs for graph orchestrators — that
     // wipes interrupt meta and leaves TripPlanner stuck in A2A loops with no Cliq reply.
     if (sourceWs?.agent_kind === 'orchestrator' && !skipSoftWake) {
-      if (isLangGraphOrchestrator(sourceWs.workspace_id)) {
+      if (isGraphOrchestrator(sourceWs.workspace_id)) {
         const soft = getActiveOrchestrationRun(sourceWs.workspace_id, input.conversationId, {
           fallbackToAny: false,
         });
         if (soft) {
           const st = parseRunState(soft);
-          const engine = (st.langgraph as { engine?: string } | undefined)?.engine;
-          if (engine !== 'langgraph') {
+          const engine = (st.graph as { engine?: string } | undefined)?.engine;
+          if (engine !== 'graph') {
             updateOrchestrationRun(soft.id, { status: 'completed' });
             appendOrchestrationEvent(soft.id, 'completed', {
-              reason: 'close_soft_under_langgraph',
-              note: 'Soft run was stealing the conversation from LangGraph',
+              reason: 'close_soft_under_graph',
+              note: 'Soft run was stealing the conversation from the graph runner',
             });
           }
         }
@@ -186,7 +186,7 @@ export async function routeAgentOutboundMessages(input: {
         });
       }
     } else if (target.agent_kind === 'orchestrator' && !skipSoftWake) {
-      if (!isLangGraphOrchestrator(target.workspace_id)) {
+      if (!isGraphOrchestrator(target.workspace_id)) {
         const run = getActiveOrchestrationRun(target.workspace_id, input.conversationId);
         if (run) {
           appendOrchestrationEvent(run.id, 'specialist_reply', {
@@ -263,7 +263,7 @@ export async function routeAgentOutboundMessages(input: {
 
 /**
  * Start (or refresh) an orchestration run when a user messages an orchestrator.
- * LangGraph-backed when a fixed graph exists; otherwise soft DB tracking only.
+ * graph-backed when a fixed graph exists; otherwise soft DB tracking only.
  */
 export async function ensureOrchestrationRunForUserMessage(input: {
   workspaceId: string;
@@ -275,7 +275,7 @@ export async function ensureOrchestrationRunForUserMessage(input: {
   const ws = getWorkspace(input.workspaceId);
   if (!ws || ws.agent_kind !== 'orchestrator') return;
 
-  if (isLangGraphOrchestrator(input.workspaceId)) {
+  if (isGraphOrchestrator(input.workspaceId)) {
     await onOrchestratorUserMessage({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,

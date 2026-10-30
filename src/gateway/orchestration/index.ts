@@ -37,10 +37,10 @@ export {
   saveOrchestratorGraph,
 } from './store.js';
 export {
-  startLangGraphNudgeLoop,
-  stopLangGraphNudgeLoop,
-  isLangGraphOrchestrator,
-} from './langgraph/index.js';
+  startGraphNudgeLoop,
+  stopGraphNudgeLoop,
+  isGraphOrchestrator,
+} from './graph/index.js';
 export type {
   AgentKind,
   OrchestratorGraph,

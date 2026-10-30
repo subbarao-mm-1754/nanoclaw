@@ -1,5 +1,5 @@
 export {
-  compileOrchestratorLangGraph,
+  compileOrchestratorGraph,
   graphFingerprint,
   HANDLE_USER_NODE,
   resolveGraphNext,
@@ -7,7 +7,7 @@ export {
 export type { CompiledOrchestratorGraph } from './compile.js';
 export {
   invalidateCompiledGraph,
-  isLangGraphOrchestrator,
+  isGraphOrchestrator,
   isOrchestratorSelfAgent,
   localNameForMember,
   onOrchestratorDecision,
@@ -15,9 +15,9 @@ export {
   onOrchestratorUserMessage,
   onSpecialistReply,
   resumeTimeout,
-  _resetLangGraphRuntimeForTests,
+  _resetGraphRuntimeForTests,
 } from './runner.js';
-export { startLangGraphNudgeLoop, stopLangGraphNudgeLoop, tickLangGraphNudges } from './nudge.js';
+export { startGraphNudgeLoop, stopGraphNudgeLoop, tickGraphNudges } from './nudge.js';
 export type {
   InterruptPayload,
   OrchestratorDecision,

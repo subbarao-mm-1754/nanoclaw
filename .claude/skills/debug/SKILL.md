@@ -16,7 +16,7 @@ Channel → Gateway (queue / gateway.db)
             ↓ mounts inbound.db / outbound.db
          Container agent-runner (Bun + Claude Agent SDK)
             ↑ outbound collector
-         Gateway delivers reply / LangGraph A2A
+         Gateway delivers reply / agent-to-agent
 ```
 
 **Important:** The container runs as user `node` with `HOME=/home/node`. Claude state is under the worker's materialized `.claude-shared` mount.

@@ -1,37 +1,37 @@
 /**
- * Timeout / nudge loop for LangGraph specialist waits.
+ * Timeout / nudge loop for specialist waits.
  */
 import { log } from '../../../log.js';
 import { getGatewayDb } from '../../db/connection.js';
 import { parseRunState, type OrchestrationEvent } from '../store.js';
 import type { OrchestrationRun } from '../types.js';
-import { listWaitingLangGraphRuns, resumeTimeout, type LangGraphRunMeta } from './runner.js';
+import { listWaitingGraphRuns, resumeTimeout, type GraphRunMeta } from './runner.js';
 
 /** Default: nudge after 20m, fail/partial after 30m post-nudge (50m total). */
-export const LANGGRAPH_NUDGE_AFTER_MS = parseInt(
-  process.env.LANGGRAPH_NUDGE_AFTER_MS || String(20 * 60 * 1000),
+export const GRAPH_NUDGE_AFTER_MS = parseInt(
+  process.env.GRAPH_NUDGE_AFTER_MS || String(20 * 60 * 1000),
   10,
 );
-export const LANGGRAPH_FAIL_AFTER_MS = parseInt(
-  process.env.LANGGRAPH_FAIL_AFTER_MS || String(50 * 60 * 1000),
+export const GRAPH_FAIL_AFTER_MS = parseInt(
+  process.env.GRAPH_FAIL_AFTER_MS || String(50 * 60 * 1000),
   10,
 );
-export const LANGGRAPH_NUDGE_INTERVAL_MS = parseInt(
-  process.env.LANGGRAPH_NUDGE_INTERVAL_MS || String(60 * 1000),
+export const GRAPH_NUDGE_INTERVAL_MS = parseInt(
+  process.env.GRAPH_NUDGE_INTERVAL_MS || String(60 * 1000),
   10,
 );
 
 let timer: ReturnType<typeof setInterval> | null = null;
 
-function metaOf(run: OrchestrationRun): LangGraphRunMeta | null {
+function metaOf(run: OrchestrationRun): GraphRunMeta | null {
   const state = parseRunState(run);
-  const lg = state.langgraph;
+  const lg = state.graph;
   if (!lg || typeof lg !== 'object') return null;
-  return lg as LangGraphRunMeta;
+  return lg as GraphRunMeta;
 }
 
-export async function tickLangGraphNudges(): Promise<number> {
-  const waiting = listWaitingLangGraphRuns(100);
+export async function tickGraphNudges(): Promise<number> {
+  const waiting = listWaitingGraphRuns(100);
   let acted = 0;
   const now = Date.now();
 
@@ -44,35 +44,35 @@ export async function tickLangGraphNudges(): Promise<number> {
     const nudges = meta.nudge_count ?? 0;
 
     try {
-      if (elapsed >= LANGGRAPH_FAIL_AFTER_MS) {
+      if (elapsed >= GRAPH_FAIL_AFTER_MS) {
         await resumeTimeout(run, 'partial', {
           partialText: '(partial — specialist wait exceeded time limit)',
         });
         acted++;
-      } else if (elapsed >= LANGGRAPH_NUDGE_AFTER_MS && nudges < 1) {
+      } else if (elapsed >= GRAPH_NUDGE_AFTER_MS && nudges < 1) {
         await resumeTimeout(run, 'nudge');
         acted++;
       }
     } catch (err) {
-      log.warn('LangGraph nudge tick failed', { runId: run.id, err });
+      log.warn('Graph nudge tick failed', { runId: run.id, err });
     }
   }
   return acted;
 }
 
-export function startLangGraphNudgeLoop(intervalMs = LANGGRAPH_NUDGE_INTERVAL_MS): void {
+export function startGraphNudgeLoop(intervalMs = GRAPH_NUDGE_INTERVAL_MS): void {
   if (timer) return;
   timer = setInterval(() => {
-    void tickLangGraphNudges();
+    void tickGraphNudges();
   }, intervalMs);
   // Unref so tests / short CLI don't hang (Node only).
   if (typeof timer === 'object' && timer && 'unref' in timer) {
     (timer as NodeJS.Timeout).unref?.();
   }
-  log.info('LangGraph nudge loop started', { intervalMs });
+  log.info('Graph nudge loop started', { intervalMs });
 }
 
-export function stopLangGraphNudgeLoop(): void {
+export function stopGraphNudgeLoop(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;

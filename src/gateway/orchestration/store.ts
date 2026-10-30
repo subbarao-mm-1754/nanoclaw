@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto';
+
 import { generateId } from '../auth.js';
 import { getGatewayDb } from '../db/connection.js';
+import { getWorkspace } from '../store/workspaces.js';
 import type {
   OrchestrationRun,
   OrchestrationRunStatus,
@@ -9,6 +12,124 @@ import type {
 
 function now(): string {
   return new Date().toISOString();
+}
+
+const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface OrchestrationArtifact {
+  id: string;
+  run_id: string;
+  orchestrator_workspace_id: string;
+  producer_workspace_id: string | null;
+  node_id: string;
+  content_type: string;
+  content_text: string;
+  summary: string;
+  byte_size: number;
+  sha256: string;
+  expires_at: string | null;
+  created_at: string;
+}
+
+function rowToArtifact(row: Record<string, unknown>): OrchestrationArtifact {
+  return {
+    id: row.id as string,
+    run_id: row.run_id as string,
+    orchestrator_workspace_id: row.orchestrator_workspace_id as string,
+    producer_workspace_id: (row.producer_workspace_id as string | null) ?? null,
+    node_id: row.node_id as string,
+    content_type: row.content_type as string,
+    content_text: row.content_text as string,
+    summary: row.summary as string,
+    byte_size: Number(row.byte_size),
+    sha256: row.sha256 as string,
+    expires_at: (row.expires_at as string | null) ?? null,
+    created_at: row.created_at as string,
+  };
+}
+
+/** Persist an immutable full result; only a compact manifest belongs in graph state. */
+export function createOrchestrationArtifact(input: {
+  runId: string;
+  orchestratorWorkspaceId: string;
+  producerWorkspaceId?: string;
+  nodeId: string;
+  content: string;
+  summary?: string;
+  contentType?: string;
+}): OrchestrationArtifact {
+  const ts = now();
+  const bytes = Buffer.byteLength(input.content, 'utf8');
+  const id = generateId('oart');
+  const artifact: OrchestrationArtifact = {
+    id,
+    run_id: input.runId,
+    orchestrator_workspace_id: input.orchestratorWorkspaceId,
+    producer_workspace_id: input.producerWorkspaceId ?? null,
+    node_id: input.nodeId,
+    content_type: input.contentType ?? 'text/plain',
+    content_text: input.content,
+    summary: (input.summary || input.content).slice(0, 400),
+    byte_size: bytes,
+    sha256: createHash('sha256').update(input.content).digest('hex'),
+    expires_at: null,
+    created_at: ts,
+  };
+  getGatewayDb()
+    .prepare(
+      `INSERT INTO gateway_orchestration_artifacts
+       (id, run_id, orchestrator_workspace_id, producer_workspace_id, node_id,
+        content_type, content_text, summary, byte_size, sha256, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      artifact.id, artifact.run_id, artifact.orchestrator_workspace_id, artifact.producer_workspace_id,
+      artifact.node_id, artifact.content_type, artifact.content_text, artifact.summary,
+      artifact.byte_size, artifact.sha256, artifact.expires_at, artifact.created_at,
+    );
+  return artifact;
+}
+
+/**
+ * A caller may read only artifacts for a run owned by the same user where it
+ * is either the orchestrator or one of that orchestrator's declared members.
+ */
+export function getAuthorizedOrchestrationArtifact(
+  artifactId: string,
+  callerWorkspaceId: string,
+): OrchestrationArtifact | null {
+  const row = getGatewayDb()
+    .prepare('SELECT * FROM gateway_orchestration_artifacts WHERE id = ?')
+    .get(artifactId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  const artifact = rowToArtifact(row);
+  const orchestrator = getWorkspace(artifact.orchestrator_workspace_id);
+  const caller = getWorkspace(callerWorkspaceId);
+  if (!orchestrator || !caller || !orchestrator.owner_user_id || caller.owner_user_id !== orchestrator.owner_user_id) {
+    return null;
+  }
+  if (caller.workspace_id === orchestrator.workspace_id) return artifact;
+  const member = getGatewayDb()
+    .prepare(
+      `SELECT 1 FROM gateway_orchestrator_members
+       WHERE orchestrator_workspace_id = ? AND member_workspace_id = ?`,
+    )
+    .get(orchestrator.workspace_id, caller.workspace_id);
+  return member ? artifact : null;
+}
+
+/** Mark finished-run artifacts for expiry; active runs remain available. */
+export function scheduleOrchestrationArtifactExpiry(runId: string): void {
+  const expiry = new Date(Date.now() + ARTIFACT_RETENTION_MS).toISOString();
+  getGatewayDb()
+    .prepare('UPDATE gateway_orchestration_artifacts SET expires_at = ? WHERE run_id = ? AND expires_at IS NULL')
+    .run(expiry, runId);
+}
+
+export function purgeExpiredOrchestrationArtifacts(): number {
+  return getGatewayDb()
+    .prepare('DELETE FROM gateway_orchestration_artifacts WHERE expires_at IS NOT NULL AND expires_at <= ?')
+    .run(now()).changes;
 }
 
 export function saveOrchestratorGraph(
@@ -224,6 +345,13 @@ export function updateOrchestrationRun(
       ts,
       id,
     );
+  if (
+    patch.status &&
+    ['completed', 'failed'].includes(patch.status) &&
+    !['completed', 'failed'].includes(existing.status)
+  ) {
+    scheduleOrchestrationArtifactExpiry(id);
+  }
   return getOrchestrationRun(id);
 }
 
