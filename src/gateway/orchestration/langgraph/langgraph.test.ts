@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { initGatewayTestDb, closeGatewayDb } from '../../db/connection.js';
+import { initGatewayTestDb, closeGatewayDb, getGatewayDb } from '../../db/connection.js';
 import { createUser } from '../../store/users.js';
 import { createAgentRecord } from '../../store/agents.js';
 import { ORCHESTRATION_SETTING_KEY } from '../config.js';
@@ -377,5 +377,141 @@ describe('LangGraph orchestration', () => {
     if (runAfter.status === 'waiting') {
       expect(runAfter.current_node).not.toBe('research');
     }
+  });
+
+  async function startResearchRun(tag: string) {
+    const user = createUser({
+      email: `lg-${tag}@test.com`,
+      password: 'password123',
+      display_name: tag,
+    });
+    const orch = createAgentRecord({
+      name: `Lead-${tag}`,
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# o' }],
+      agent_kind: 'orchestrator',
+    });
+    const researcher = createAgentRecord({
+      name: `Researcher-${tag}`,
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# r' }],
+      agent_kind: 'agent',
+    });
+    const writer = createAgentRecord({
+      name: `Writer-${tag}`,
+      owner_user_id: user.id,
+      files: [{ path: 'CLAUDE.local.md', content: '# w' }],
+      agent_kind: 'agent',
+    });
+    replaceOrchestratorMembers(orch.workspace_id, [
+      {
+        member_workspace_id: researcher.workspace_id,
+        member_agent_group_id: researcher.agent_group_id,
+        local_name: 'researcher',
+      },
+      {
+        member_workspace_id: writer.workspace_id,
+        member_agent_group_id: writer.agent_group_id,
+        local_name: 'writer',
+      },
+    ]);
+    saveOrchestratorGraph(orch.workspace_id, sampleGraph);
+
+    const conversationId = `conv-${tag}`;
+    await onOrchestratorUserMessage({
+      workspaceId: orch.workspace_id,
+      conversationId,
+      sessionId: `sess-${tag}`,
+      goalText: 'Write about topic',
+    });
+    await onOrchestratorDecision({
+      orchestratorWorkspaceId: orch.workspace_id,
+      conversationId,
+      orchestratorSessionId: `sess-${tag}`,
+      branch: 'researcher',
+      taskPacket: 'Find sources',
+    });
+    const waiting = getActiveOrchestrationRun(orch.workspace_id, conversationId)!;
+    expect(waiting.current_node).toBe('research');
+    return { orch, researcher, conversationId, runId: waiting.id, sessionId: `sess-${tag}` };
+  }
+
+  it('resumes a waiting run at the same node after a gateway restart', async () => {
+    const ctx = await startResearchRun('restart');
+
+    // Restart drops in-process caches; the checkpoint lives in gateway.db.
+    _resetLangGraphRuntimeForTests();
+
+    const handled = await onSpecialistReply({
+      orchestratorWorkspaceId: ctx.orch.workspace_id,
+      conversationId: ctx.conversationId,
+      orchestratorSessionId: ctx.sessionId,
+      fromWorkspaceId: ctx.researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text: 'Sources: 1, 2',
+      messageId: 'msg-restart',
+    });
+    expect(handled).toBe(true);
+
+    const { getOrchestrationRun } = await import('../store.js');
+    const run = getOrchestrationRun(ctx.runId)!;
+    expect(run.status).toBe('waiting');
+    expect(run.current_node).toBe('write');
+    const results = parseRunState(run).results as Record<string, { text?: string }>;
+    expect(results.research?.text).toContain('Sources');
+    const lg = parseRunState(run).langgraph as { interrupt?: { kind?: string; agent?: string } };
+    expect(lg.interrupt).toMatchObject({ kind: 'await_specialist', agent: 'writer' });
+  });
+
+  it('rebuilds a run without a stored checkpoint instead of completing it', async () => {
+    const ctx = await startResearchRun('legacy');
+    getGatewayDb()
+      .prepare('DELETE FROM gateway_orchestration_checkpoints WHERE thread_id = ?')
+      .run(ctx.runId);
+    _resetLangGraphRuntimeForTests();
+
+    await onSpecialistReply({
+      orchestratorWorkspaceId: ctx.orch.workspace_id,
+      conversationId: ctx.conversationId,
+      orchestratorSessionId: ctx.sessionId,
+      fromWorkspaceId: ctx.researcher.workspace_id,
+      fromLocalName: 'researcher',
+      text: 'Sources: legacy',
+      messageId: 'msg-legacy',
+    });
+
+    const { getOrchestrationRun } = await import('../store.js');
+    const run = getOrchestrationRun(ctx.runId)!;
+    expect(run.status).toBe('waiting');
+    expect(run.current_node).toBe(HANDLE_USER_NODE);
+    const results = parseRunState(run).results as Record<string, { text?: string }>;
+    expect(results.research?.text).toBe('Sources: legacy');
+  });
+
+  it('deletes checkpoints with the orchestrator runs', async () => {
+    const ctx = await startResearchRun('cleanup');
+    const count = () =>
+      (
+        getGatewayDb()
+          .prepare('SELECT COUNT(*) AS c FROM gateway_orchestration_checkpoints WHERE thread_id = ?')
+          .get(ctx.runId) as { c: number }
+      ).c;
+    expect(count()).toBe(1);
+    const { deleteOrchestrationForWorkspace } = await import('../store.js');
+    deleteOrchestrationForWorkspace(ctx.orch.workspace_id);
+    expect(count()).toBe(0);
+  });
+
+  it('compiles graphs whose node ids match state fields', () => {
+    const compiled = compileOrchestratorLangGraph({
+      entry: 'status',
+      nodes: [
+        { id: 'status', agent: 'researcher', type: 'task' },
+        { id: 'results', agent: 'writer', type: 'task' },
+      ],
+      edges: [{ from: 'status', to: 'results' }],
+    });
+    expect(compiled).not.toBeNull();
+    expect(compiled!.isTaskNode('results')).toBe(true);
   });
 });

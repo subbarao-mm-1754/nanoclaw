@@ -113,6 +113,14 @@ function migrateGatewaySchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_orch_events_run
       ON gateway_orchestration_events(run_id);
+
+    CREATE TABLE IF NOT EXISTS gateway_orchestration_checkpoints (
+      thread_id       TEXT PRIMARY KEY REFERENCES gateway_orchestration_runs(id) ON DELETE CASCADE,
+      values_json     TEXT NOT NULL,
+      next_node       TEXT,
+      interrupt_json  TEXT,
+      updated_at      TEXT NOT NULL
+    );
   `);
 
   if (tableExists(db, 'build_jobs')) {

@@ -103,7 +103,13 @@ export function deleteOrchestrationForWorkspace(workspaceId: string): void {
       .prepare('SELECT id FROM gateway_orchestration_runs WHERE orchestrator_workspace_id = ?')
       .all(workspaceId) as Array<{ id: string }>;
     const delEvents = db.prepare('DELETE FROM gateway_orchestration_events WHERE run_id = ?');
-    for (const r of runs) delEvents.run(r.id);
+    const delCheckpoints = db.prepare(
+      'DELETE FROM gateway_orchestration_checkpoints WHERE thread_id = ?',
+    );
+    for (const r of runs) {
+      delEvents.run(r.id);
+      delCheckpoints.run(r.id);
+    }
     db.prepare('DELETE FROM gateway_orchestration_runs WHERE orchestrator_workspace_id = ?').run(
       workspaceId,
     );

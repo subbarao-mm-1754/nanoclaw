@@ -1,10 +1,9 @@
 /**
- * LangGraph state for multi-agent orchestration runs.
+ * Graph state for multi-agent orchestration runs.
  * One thread per orchestration run id (multi-user / multi-conversation safe).
  */
-import { Annotation } from '@langchain/langgraph';
-
 import type { SpecialistReplyStatus } from '../specialist-protocol.js';
+import type { StateChannels } from './engine.js';
 
 export interface SpecialistResult {
   text: string;
@@ -44,59 +43,39 @@ export interface PendingWait {
 
 export type GraphRunStatus = 'running' | 'waiting' | 'completed' | 'failed';
 
-export const OrchestrationStateAnnotation = Annotation.Root({
-  goal: Annotation<string>({
-    reducer: (_a, b) => b,
-    default: () => '',
-  }),
-  last_user_message: Annotation<string>({
-    reducer: (_a, b) => b,
-    default: () => '',
-  }),
-  user_messages: Annotation<string[]>({
+export interface OrchestrationGraphState {
+  goal: string;
+  last_user_message: string;
+  user_messages: string[];
+  current_node: string;
+  /** Last chosen branch / when label (orchestrator decision). */
+  branch: string | null;
+  decision: OrchestratorDecision | null;
+  results: Record<string, SpecialistResult>;
+  loop_counts: Record<string, number>;
+  skip_nodes: string[];
+  pending_wait: PendingWait | null;
+  status: GraphRunStatus;
+  error: string | null;
+}
+
+export const OrchestrationStateChannels: StateChannels<OrchestrationGraphState> = {
+  goal: { reducer: (_a, b) => b, default: () => '' },
+  last_user_message: { reducer: (_a, b) => b, default: () => '' },
+  user_messages: {
     reducer: (a, b) => (Array.isArray(b) ? [...a, ...b] : a),
     default: () => [],
-  }),
-  current_node: Annotation<string>({
-    reducer: (_a, b) => b,
-    default: () => '',
-  }),
-  /** Last chosen branch / when label (orchestrator decision). */
-  branch: Annotation<string | null>({
-    reducer: (_a, b) => b,
-    default: () => null,
-  }),
-  decision: Annotation<OrchestratorDecision | null>({
-    reducer: (_a, b) => b,
-    default: () => null,
-  }),
-  results: Annotation<Record<string, SpecialistResult>>({
-    reducer: (a, b) => ({ ...a, ...(b ?? {}) }),
-    default: () => ({}),
-  }),
-  loop_counts: Annotation<Record<string, number>>({
-    reducer: (a, b) => ({ ...a, ...(b ?? {}) }),
-    default: () => ({}),
-  }),
-  skip_nodes: Annotation<string[]>({
-    reducer: (_a, b) => (Array.isArray(b) ? b : _a),
-    default: () => [],
-  }),
-  pending_wait: Annotation<PendingWait | null>({
-    reducer: (_a, b) => b,
-    default: () => null,
-  }),
-  status: Annotation<GraphRunStatus>({
-    reducer: (_a, b) => b,
-    default: () => 'running',
-  }),
-  error: Annotation<string | null>({
-    reducer: (_a, b) => b,
-    default: () => null,
-  }),
-});
-
-export type OrchestrationGraphState = typeof OrchestrationStateAnnotation.State;
+  },
+  current_node: { reducer: (_a, b) => b, default: () => '' },
+  branch: { reducer: (_a, b) => b, default: () => null },
+  decision: { reducer: (_a, b) => b, default: () => null },
+  results: { reducer: (a, b) => ({ ...a, ...(b ?? {}) }), default: () => ({}) },
+  loop_counts: { reducer: (a, b) => ({ ...a, ...(b ?? {}) }), default: () => ({}) },
+  skip_nodes: { reducer: (a, b) => (Array.isArray(b) ? b : a), default: () => [] },
+  pending_wait: { reducer: (_a, b) => b, default: () => null },
+  status: { reducer: (_a, b) => b, default: () => 'running' },
+  error: { reducer: (_a, b) => b, default: () => null },
+};
 
 export type InterruptPayload =
   | {

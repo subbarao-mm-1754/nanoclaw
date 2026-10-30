@@ -1,13 +1,10 @@
 /**
- * In-process LangGraph runner for multi-agent orchestrators.
+ * In-process graph runner for multi-agent orchestrators.
  *
  * - One compiled graph per orchestrator workspace (from builder-stored JSON)
- * - One LangGraph thread per orchestration run id (multi-user / multi-conversation)
+ * - One graph thread per orchestration run id (multi-user / multi-conversation)
  * - Orchestrator LLM chooses among allowed branches only (graph/loops locked)
  */
-import { Command, MemorySaver, isInterrupted } from '@langchain/langgraph';
-import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint';
-
 import { generateId } from '../../auth.js';
 import { log } from '../../../log.js';
 import { getGatewayDb } from '../../db/connection.js';
@@ -25,6 +22,8 @@ import {
 } from '../store.js';
 import type { OrchestrationRun } from '../types.js';
 import { resolveMemberByLocalName, wakeAgentWithText, wakeWorkspaceSession } from './a2a.js';
+import { orchestrationCheckpointer } from './checkpoints.js';
+import { Command, isInterrupted, type CompiledStateGraph } from './engine.js';
 import {
   HANDLE_USER_NODE,
   compileOrchestratorLangGraph,
@@ -43,13 +42,10 @@ import {
   type ParsedSpecialistReply,
 } from '../specialist-protocol.js';
 
-const checkpointer: BaseCheckpointSaver = new MemorySaver();
-
 interface CachedCompile {
   fingerprint: string;
   compiled: CompiledOrchestratorGraph;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  app: any;
+  app: CompiledStateGraph<OrchestrationGraphState>;
 }
 
 const compileCache = new Map<string, CachedCompile>();
@@ -117,7 +113,7 @@ function getCompiled(orchestratorWorkspaceId: string): CachedCompile | null {
 
   const compiled = compileOrchestratorLangGraph(graph);
   if (!compiled) return null;
-  const app = compiled.stateGraph.compile({ checkpointer: checkpointer as never });
+  const app = compiled.stateGraph.compile({ checkpointer: orchestrationCheckpointer });
   const entry: CachedCompile = { fingerprint, compiled, app };
   compileCache.set(orchestratorWorkspaceId, entry);
   return entry;
@@ -347,7 +343,8 @@ async function invokeOrResume(input: {
     try {
       result = await compiled.app.invoke(new Command({ resume: input.resume }), cfg);
     } catch (err) {
-      // Gateway restart drops MemorySaver checkpoints — rebuild from DB state.
+      // No usable checkpoint (run predates stored checkpoints, or the graph was
+      // re-registered without the pending node) — rebuild from DB state.
       log.warn('LangGraph resume failed; re-invoking from stored run state', {
         runId: run.id,
         err,
@@ -924,7 +921,7 @@ export async function onOrchestratorDecision(input: {
 
   const meta = metaFromRun(run);
   if (!meta?.interrupt) {
-    // Soft run (or lost MemorySaver interrupt) — reclaim so soft A2A loops cannot
+    // Soft run (or lost interrupt) — reclaim so soft A2A loops cannot
     // own the conversation and starve Cliq replies.
     if (!meta || meta.engine !== 'langgraph') {
       updateOrchestrationRun(run.id, { status: 'completed' });

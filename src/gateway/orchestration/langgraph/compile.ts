@@ -1,14 +1,14 @@
 /**
- * Compile a builder-stored OrchestratorGraph into a LangGraph StateGraph.
+ * Compile a builder-stored OrchestratorGraph into an executable StateGraph.
  *
  * The registered graph / loops / rules are fixed at compile time. The orchestrator
  * may only choose among allowed branches (edge `when` labels / successor node ids)
  * and set soft skip flags — it cannot mutate the graph structure.
  */
-import { END, START, StateGraph, interrupt } from '@langchain/langgraph';
 import type { OrchestratorGraph, OrchestratorGraphEdge, OrchestratorGraphLoop } from '../types.js';
+import { END, START, StateGraph, interrupt } from './engine.js';
 import {
-  OrchestrationStateAnnotation,
+  OrchestrationStateChannels,
   type InterruptPayload,
   type OrchestrationGraphState,
   type OrchestratorDecision,
@@ -290,9 +290,7 @@ export function compileOrchestratorLangGraph(graph: OrchestratorGraph | null | u
   if (!graph?.nodes?.length) return null;
 
   const entry = graph.entry?.trim() || graph.nodes[0]!.id;
-  // Dynamic node ids from builder JSON — loosen StateGraph's literal node typing.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const builder: any = new StateGraph(OrchestrationStateAnnotation);
+  const builder = new StateGraph<OrchestrationGraphState>(OrchestrationStateChannels);
 
   // --- handle_user: orchestrator decision hub (user-facing) ---
   builder.addNode(HANDLE_USER_NODE, async (state: OrchestrationGraphState) => {
